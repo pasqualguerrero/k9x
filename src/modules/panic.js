@@ -145,6 +145,11 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       bot.cave.stop();
     }
 
+    if (bot.equipRing?.stop) {
+      bot.equipRing.stop();
+      bot.ui?.refreshEquipRingStatus?.();
+    }
+
     return !!bot.pz?.goToHomePz?.();
   }
 
@@ -166,6 +171,10 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       bot.cave.stop();
     }
 
+    if (bot.equipRing?.stop) {
+      bot.equipRing.stop();
+    }
+
     config.unknownPlayerEnabled = false;
     config.healthLossEnabled = false;
     persistConfig();
@@ -174,6 +183,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     bot.ui?.refreshPanicStatus?.();
     bot.ui?.refreshRuneStatus?.();
     bot.ui?.refreshAutoEatStatus?.();
+    bot.ui?.refreshEquipRingStatus?.();
     return true;
   }
 
