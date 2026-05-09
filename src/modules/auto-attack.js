@@ -21,6 +21,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       runeHotbarSlot: null,
       targetCooldownMs: 1200,
       runeCooldownMs: 1200,
+      maxTargetDistance: 8,
       meleeMode: true,
       enabled: false,
     },
@@ -85,6 +86,17 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return (dx !== 0 || dy !== 0) && dx <= 1 && dy <= 1;
   }
 
+  function getTileDistance(from, to) {
+    if (!from || !to || Number(from.z) !== Number(to.z)) {
+      return Number.POSITIVE_INFINITY;
+    }
+
+    return Math.max(
+      Math.abs(Number(from.x) - Number(to.x)),
+      Math.abs(Number(from.y) - Number(to.y))
+    );
+  }
+
   function isSameCreature(left, right) {
     if (!left || !right) {
       return false;
@@ -122,6 +134,24 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     state.engagedTargetId = null;
     state.combatStartedAt = 0;
     state.lastChaseDestinationKey = null;
+  }
+
+  function clearCurrentTarget() {
+    if (!window.gameClient?.player || typeof window.gameClient.send !== "function") {
+      return false;
+    }
+
+    if (typeof TargetPacket !== "function") {
+      return false;
+    }
+
+    if (!getCurrentTarget()) {
+      return false;
+    }
+
+    window.gameClient.player.setTarget(null);
+    window.gameClient.send(new TargetPacket(0));
+    return true;
   }
 
   function markCombatActive(now = Date.now()) {
@@ -175,6 +205,49 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     clearEngagedTarget();
     return null;
+  }
+
+  function shouldGiveUpTarget(target) {
+    const maxTargetDistance = Math.max(1, Number(config.maxTargetDistance) || 8);
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const targetPosition = normalizePosition(target?.getPosition?.() || target?.__position);
+    if (!playerPosition || !targetPosition) {
+      return false;
+    }
+
+    return getTileDistance(playerPosition, targetPosition) > maxTargetDistance;
+  }
+
+  function resetTargetIfTooFar() {
+    const currentTarget = getCurrentTarget();
+    if (currentTarget && shouldGiveUpTarget(currentTarget)) {
+      const targetPosition = normalizePosition(currentTarget.getPosition?.() || currentTarget.__position);
+      const cleared = clearCurrentTarget();
+      clearEngagedTarget();
+      if (cleared) {
+        bot.log("gave up distant auto attack target", {
+          id: currentTarget.id,
+          name: currentTarget.name || "Mob",
+          position: targetPosition,
+          maxTargetDistance: Math.max(1, Number(config.maxTargetDistance) || 8),
+        });
+      }
+      return true;
+    }
+
+    const engagedTarget = getEngagedTarget();
+    if (engagedTarget && shouldGiveUpTarget(engagedTarget)) {
+      clearEngagedTarget();
+      bot.log("gave up distant auto attack target", {
+        id: engagedTarget.id,
+        name: engagedTarget.name || "Mob",
+        position: normalizePosition(engagedTarget.getPosition?.() || engagedTarget.__position),
+        maxTargetDistance: Math.max(1, Number(config.maxTargetDistance) || 8),
+      });
+      return true;
+    }
+
+    return false;
   }
 
   function goToPosition(position) {
@@ -351,6 +424,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     const now = Date.now();
+    if (resetTargetIfTooFar()) {
+      return true;
+    }
+
     syncCombatState(now);
 
     if (config.meleeMode) {
@@ -464,6 +541,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     if (Object.prototype.hasOwnProperty.call(nextConfig, "runeHotbarSlot")) {
       nextConfig.runeHotbarSlot = normalizeHotbarSlot(nextConfig.runeHotbarSlot);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "maxTargetDistance")) {
+      nextConfig.maxTargetDistance = Math.max(1, Math.trunc(Number(nextConfig.maxTargetDistance) || config.maxTargetDistance || 8));
     }
 
     Object.assign(config, nextConfig);
