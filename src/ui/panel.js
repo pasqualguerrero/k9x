@@ -600,6 +600,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         gap: 8px;
       }
 
+      #minibia-bot-panel .mb-row-compact {
+        grid-template-columns: auto auto;
+        justify-content: start;
+      }
+
       #minibia-bot-panel .mb-row .mb-toggle {
         white-space: nowrap;
       }
@@ -640,6 +645,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel .mb-field {
         display: grid;
         gap: 4px;
+      }
+
+      #minibia-bot-panel .mb-field-compact {
+        width: 96px;
+        justify-self: end;
       }
 
       #minibia-bot-panel .mb-field-label {
@@ -789,12 +799,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="text" id="minibia-bot-rune-spell" placeholder="Spell words" />
                 <input type="number" id="minibia-bot-rune-mana" min="0" placeholder="Mana" />
               </div>
-              <div class="mb-row">
+              <div class="mb-row mb-row-compact">
                 <label class="mb-toggle">
                   <input type="checkbox" id="minibia-bot-auto-eat-enabled" />
                   <span>Auto Eat</span>
                 </label>
-                <div></div>
+                <label class="mb-field mb-field-compact" for="minibia-bot-auto-eat-hotkey">
+                  <span class="mb-field-label">Eat Hotkey (1-12)</span>
+                  <input type="number" id="minibia-bot-auto-eat-hotkey" min="1" max="12" placeholder="10" />
+                </label>
               </div>
               <div class="mb-row">
                 <label class="mb-toggle">
@@ -925,6 +938,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const manaInput = panel.querySelector("#minibia-bot-rune-mana");
     const runeEnabledInput = panel.querySelector("#minibia-bot-rune-enabled");
     const autoEatEnabledInput = panel.querySelector("#minibia-bot-auto-eat-enabled");
+    const autoEatHotkeyInput = panel.querySelector("#minibia-bot-auto-eat-hotkey");
     const equipRingEnabledInput = panel.querySelector("#minibia-bot-equip-ring-enabled");
     const autoHealEnabledInput = panel.querySelector("#minibia-bot-auto-heal-enabled");
     const autoHealMinHpInput = panel.querySelector("#minibia-bot-auto-heal-min-hp");
@@ -1068,11 +1082,25 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if (autoEatHotkeyInput) {
+      autoEatHotkeyInput.value = String(bot.eat?.config?.eatHotbarSlot ?? 10);
+      autoEatHotkeyInput.addEventListener("change", () => {
+        const eatHotbarSlot = Math.min(12, Math.max(1, Number(autoEatHotkeyInput.value) || 1));
+        autoEatHotkeyInput.value = String(eatHotbarSlot);
+        bot.eat.updateConfig({ eatHotbarSlot });
+      });
+    }
+
     if (autoEatEnabledInput) {
       autoEatEnabledInput.checked = !!bot.eat?.status?.().running;
       autoEatEnabledInput.addEventListener("change", () => {
+        const eatHotbarSlot = Math.min(
+          12,
+          Math.max(1, Number(autoEatHotkeyInput?.value) || bot.eat.config.eatHotbarSlot || 1)
+        );
+
         if (autoEatEnabledInput.checked) {
-          bot.eat.start();
+          bot.eat.start({ eatHotbarSlot });
         } else {
           bot.eat.stop();
         }
