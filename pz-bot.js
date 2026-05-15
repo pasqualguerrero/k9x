@@ -801,6 +801,14 @@ window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
     return null;
   }
 
+  function getCreatureLabel(creature) {
+    if (creature?.name) {
+      return creature.name;
+    }
+
+    return creature?.type === 0 ? "Player" : "Mob";
+  }
+
   function getOverlayCreatures() {
     const me = bot.getPlayerPosition();
     if (!me) {
@@ -817,7 +825,7 @@ window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
         return isWithinVisibleRange(me, pos);
       }
 
-      return creature.type !== 0 && !isWithinVisibleRange(me, pos);
+      return !isWithinVisibleRange(me, pos);
     });
   }
 
@@ -827,8 +835,8 @@ window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
 
   function getSameFloorOffscreenMarkerText(creature, healthLabel) {
     return healthLabel
-      ? `${creature.name || "Mob"} ${healthLabel}`
-      : `${creature.name || "Mob"}`;
+      ? `${getCreatureLabel(creature)} ${healthLabel}`
+      : `${getCreatureLabel(creature)}`;
   }
 
   function ensureOverlayStyle() {
@@ -940,8 +948,8 @@ window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
         const floorOffset = me.z - pos.z;
         const floorLabel = floorOffset === 0 ? "0" : floorOffset > 0 ? `+${floorOffset}` : `${floorOffset}`;
         marker.textContent = healthLabel
-          ? `${creature.name || "Mob"} (${floorLabel}) ${healthLabel}`
-          : `${creature.name || "Mob"} (${floorLabel})`;
+          ? `${getCreatureLabel(creature)} (${floorLabel}) ${healthLabel}`
+          : `${getCreatureLabel(creature)} (${floorLabel})`;
         marker.style.left = `${viewportRect.left + ((dx + 8.5) * tileWidth)}px`;
         marker.style.top = `${viewportRect.top + ((dy + 6.5) * tileHeight)}px`;
       }
