@@ -171,6 +171,10 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       bot.cave.stop();
     }
 
+    if (bot.attack?.stop) {
+      bot.attack.stop();
+    }
+
     if (bot.equipRing?.stop) {
       bot.equipRing.stop();
     }
@@ -183,6 +187,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     bot.ui?.refreshPanicStatus?.();
     bot.ui?.refreshRuneStatus?.();
     bot.ui?.refreshAutoEatStatus?.();
+    bot.ui?.refreshAutoAttackStatus?.();
+    bot.ui?.refreshCaveStatus?.();
     bot.ui?.refreshEquipRingStatus?.();
     return true;
   }
