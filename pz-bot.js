@@ -5207,6 +5207,16 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     return [message?.body, message?.rawMessage].some((text) => bot.isRecentSentChat?.(text, 20000));
   }
 
+  function isTrustedSender(message) {
+    const senderName = normalizeText(message?.sender);
+    if (!senderName) {
+      return false;
+    }
+
+    const trustedNames = bot.panic?.getTrustedNames?.() || [];
+    return trustedNames.includes(senderName);
+  }
+
   function isNpcMessage(message) {
     const npcType = window.CONST?.TYPES?.NPC;
     return npcType != null && message?.senderType === npcType;
@@ -5263,7 +5273,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
         return false;
       }
 
-      if (!message.sender || isSelfMessage(message) || isNpcMessage(message)) {
+      if (!message.sender || isSelfMessage(message) || isNpcMessage(message) || isTrustedSender(message)) {
         rememberSeenMessage(message);
         return false;
       }
