@@ -222,6 +222,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     autoInvisibleToggle.checked = !!bot.invisible?.status?.().running;
   }
 
+  function refreshAutoMagicShieldStatus() {
+    const autoMagicShieldToggle = document.getElementById("minibia-bot-auto-magic-shield-enabled");
+    if (!autoMagicShieldToggle) return;
+
+    autoMagicShieldToggle.checked = !!bot.magicShield?.status?.().running;
+  }
+
   function refreshAutoAttackStatus() {
     const autoAttackToggle = document.getElementById("minibia-bot-auto-attack-enabled");
     if (!autoAttackToggle) return;
@@ -949,6 +956,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               </div>
               <div class="mb-row">
                 <label class="mb-toggle">
+                  <input type="checkbox" id="minibia-bot-auto-magic-shield-enabled" />
+                  <span>Auto Utamo Vita</span>
+                </label>
+                <div class="mb-small-note">Casts utamo vita whenever magic shield is not active.</div>
+              </div>
+              <div class="mb-row">
+                <label class="mb-toggle">
                   <input type="checkbox" id="minibia-bot-equip-ring-enabled" />
                   <span>Equip Ring</span>
                 </label>
@@ -957,7 +971,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
             </div>
           </div>
           <div class="mb-section mb-column-section">
-            <div class="mb-note">Loaded routines: Panic Runner, magic level trainer, auto eat, auto invisible, equip ring, auto heal, auto attack, and talk.</div>
+            <div class="mb-note">Loaded routines: Panic Runner, magic level trainer, auto eat, auto invisible, auto utamo vita, equip ring, auto heal, auto attack, and talk.</div>
           </div>
         </div>
         <div class="mb-side-column">
@@ -1091,6 +1105,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoEatEnabledInput = panel.querySelector("#minibia-bot-auto-eat-enabled");
     const autoEatHotkeyInput = panel.querySelector("#minibia-bot-auto-eat-hotkey");
     const autoInvisibleEnabledInput = panel.querySelector("#minibia-bot-auto-invisible-enabled");
+    const autoMagicShieldEnabledInput = panel.querySelector("#minibia-bot-auto-magic-shield-enabled");
     const equipRingEnabledInput = panel.querySelector("#minibia-bot-equip-ring-enabled");
     const autoHealEnabledInput = panel.querySelector("#minibia-bot-auto-heal-enabled");
     const autoHealMinHpInput = panel.querySelector("#minibia-bot-auto-heal-min-hp");
@@ -1275,6 +1290,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         }
 
         refreshAutoInvisibleStatus();
+      });
+    }
+
+    if (autoMagicShieldEnabledInput) {
+      autoMagicShieldEnabledInput.checked = !!bot.magicShield?.status?.().running;
+      autoMagicShieldEnabledInput.addEventListener("change", () => {
+        if (autoMagicShieldEnabledInput.checked) {
+          bot.magicShield.start();
+        } else {
+          bot.magicShield.stop();
+        }
+
+        refreshAutoMagicShieldStatus();
       });
     }
 
@@ -1591,6 +1619,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshRuneStatus();
     refreshAutoHealStatus();
     refreshAutoInvisibleStatus();
+    refreshAutoMagicShieldStatus();
     refreshAutoAttackStatus();
     refreshAutoEatStatus();
     refreshCaveStatus();
@@ -1632,6 +1661,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshRuneStatus,
     refreshAutoHealStatus,
     refreshAutoInvisibleStatus,
+    refreshAutoMagicShieldStatus,
     refreshAutoAttackStatus,
     refreshAutoEatStatus,
     refreshCaveStatus,

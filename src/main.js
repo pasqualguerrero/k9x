@@ -4,6 +4,7 @@
     ["rune", "minibiaBot.rune.config"],
     ["heal", "minibiaBot.heal.config"],
     ["invisible", "minibiaBot.invisible.config"],
+    ["magicShield", "minibiaBot.magicShield.config"],
     ["attack", "minibiaBot.attack.config"],
     ["cave", "minibiaBot.cave.config"],
     ["equipRing", "minibiaBot.equipRing.config"],
@@ -62,6 +63,7 @@
     currentBundle.installRuneModule(bot);
     currentBundle.installHealModule(bot);
     currentBundle.installAutoInvisibleModule(bot);
+    currentBundle.installAutoMagicShieldModule(bot);
     currentBundle.installAutoAttackModule(bot);
     currentBundle.installCaveModule(bot);
     currentBundle.installEquipRingModule(bot);
@@ -84,6 +86,7 @@
       rune: bot.rune.status(),
       heal: bot.heal.status(),
       invisible: bot.invisible.status(),
+      magicShield: bot.magicShield.status(),
       attack: bot.attack.status(),
       cave: bot.cave.status(),
       equipRing: bot.equipRing.status(),
@@ -96,7 +99,7 @@
 
     console.log("[minibia-bot] ready", {
       version: bot.version,
-      modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "attack", "cave", "equipRing", "eat", "talk", "ui"],
+      modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "magicShield", "attack", "cave", "equipRing", "eat", "talk", "ui"],
     });
     console.log("minibiaBot.reload()");
     console.log("minibiaBot.xray.status()");
@@ -110,6 +113,8 @@
     console.log("minibiaBot.heal.stop()");
     console.log("minibiaBot.invisible.start()");
     console.log("minibiaBot.invisible.stop()");
+    console.log("minibiaBot.magicShield.start()");
+    console.log("minibiaBot.magicShield.stop()");
     console.log("minibiaBot.attack.start()");
     console.log("minibiaBot.attack.stop()");
     console.log("minibiaBot.cave.addWaypointCurrentSpot()");
