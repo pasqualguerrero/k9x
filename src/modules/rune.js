@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
-  const configStorageKey = "minibiaBot.rune.config";
+  const configStorageKey = "k9x.rune.config";
   const state = {
     running: false,
     timerId: null,

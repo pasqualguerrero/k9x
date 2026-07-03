@@ -1,8 +1,8 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPanel = function installPanel(bot) {
-  const panelPositionKey = "minibiaBot.ui.panelPosition";
-  const panelCollapsedKey = "minibiaBot.ui.panelCollapsed";
+  const panelPositionKey = "k9x.ui.panelPosition";
+  const panelCollapsedKey = "k9x.ui.panelCollapsed";
 
   function destroy() {
     document.getElementById("minibia-bot-panel")?.remove();
@@ -977,7 +977,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     panel.id = "minibia-bot-panel";
     panel.innerHTML = `
         <div class="mb-titlebar">
-        <div class="mb-title">[fork] Minibia Bot</div>
+        <div class="mb-title">[k9x]</div>
         <button type="button" class="mb-icon-button" id="minibia-bot-collapse" aria-label="Minimize panel" title="Minimize">−</button>
       </div>
       <div class="mb-body">

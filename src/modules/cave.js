@@ -1,10 +1,10 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
-  const configStorageKey = "minibiaBot.cave.config";
-  const routeStorageKey = "minibiaBot.cave.route";
-  const transitionStorageKey = "minibiaBot.cave.transitions";
-  const presetStorageKey = "minibiaBot.cave.presets";
+  const configStorageKey = "k9x.cave.config";
+  const routeStorageKey = "k9x.cave.route";
+  const transitionStorageKey = "k9x.cave.transitions";
+  const presetStorageKey = "k9x.cave.presets";
   const defaultPresetName = "Default";
   const minimapOverlayRootId = "minibia-bot-cave-minimap-overlay";
   const minimapOverlayStyleId = "minibia-bot-cave-minimap-overlay-style";

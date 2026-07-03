@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
-  const configStorageKey = "minibiaBot.heal.config";
+  const configStorageKey = "k9x.heal.config";
   const state = {
     running: false,
     timerId: null,

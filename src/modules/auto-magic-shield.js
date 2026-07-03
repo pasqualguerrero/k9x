@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoMagicShieldModule = function installAutoMagicShieldModule(bot) {
-  const configStorageKey = "minibiaBot.magicShield.config";
+  const configStorageKey = "k9x.magicShield.config";
   const MAGIC_SHIELD_FALLBACK_DURATION_MS = 180000;
   const state = {
     running: false,

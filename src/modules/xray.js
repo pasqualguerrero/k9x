@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
-  const configStorageKey = "minibiaBot.xray.config";
+  const configStorageKey = "k9x.xray.config";
   const overlayRootId = "minibia-bot-xray-overlay";
   const overlayStyleId = "minibia-bot-xray-overlay-style";
   const overlayState = {

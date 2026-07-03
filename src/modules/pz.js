@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
-  const homeStorageKey = "minibiaBot.pz.home";
+  const homeStorageKey = "k9x.pz.home";
 
   function getLoadedTiles() {
     const chunks = window.gameClient?.world?.chunks || [];

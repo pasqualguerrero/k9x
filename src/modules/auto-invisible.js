@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoInvisibleModule = function installAutoInvisibleModule(bot) {
-  const configStorageKey = "minibiaBot.invisible.config";
+  const configStorageKey = "k9x.invisible.config";
   const INVISIBLE_CONDITION_ID = 4;
   const state = {
     running: false,

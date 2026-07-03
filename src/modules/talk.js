@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
-  const configStorageKey = "minibiaBot.talk.config";
+  const configStorageKey = "k9x.talk.config";
   const legacyDefaultModels = ["gemini-3-pro-preview", "gemini-2.0-flash"];
   const defaultModel = "gemini-2.5-flash-lite";
   const defaultSystemPrompt =

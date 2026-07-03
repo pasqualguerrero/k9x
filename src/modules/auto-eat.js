@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoEatModule = function installAutoEatModule(bot) {
-  const configStorageKey = "minibiaBot.eat.config";
+  const configStorageKey = "k9x.eat.config";
   const state = {
     running: false,
     timerId: null,

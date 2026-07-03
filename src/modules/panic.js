@@ -1,7 +1,7 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) {
-  const configStorageKey = "minibiaBot.panic.config";
+  const configStorageKey = "k9x.panic.config";
   const state = {
     running: false,
     timerId: null,

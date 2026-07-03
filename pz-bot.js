@@ -3,7 +3,7 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 window.__minibiaBotBundle.createBot = function createBot() {
   const cleanups = [];
   const defaultAlarmAudioSrc = "https://upload.wikimedia.org/wikipedia/commons/transcoded/3/3f/ACA_Allertor_125_video.ogv/ACA_Allertor_125_video.ogv.480p.vp9.webm";
-  const alarmAudioSrcStorageKey = "minibiaBot.audio.alarmSrc";
+  const alarmAudioSrcStorageKey = "k9x.audio.alarmSrc";
   const recentSentChats = [];
   const reconnectButtonSelectors = [
     "button",
@@ -471,7 +471,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
-  const homeStorageKey = "minibiaBot.pz.home";
+  const homeStorageKey = "k9x.pz.home";
 
   function getLoadedTiles() {
     const chunks = window.gameClient?.world?.chunks || [];
@@ -666,7 +666,7 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
-  const configStorageKey = "minibiaBot.xray.config";
+  const configStorageKey = "k9x.xray.config";
   const overlayRootId = "minibia-bot-xray-overlay";
   const overlayStyleId = "minibia-bot-xray-overlay-style";
   const overlayState = {
@@ -1113,7 +1113,7 @@ window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) {
-  const configStorageKey = "minibiaBot.panic.config";
+  const configStorageKey = "k9x.panic.config";
   const state = {
     running: false,
     timerId: null,
@@ -1713,7 +1713,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
-  const configStorageKey = "minibiaBot.rune.config";
+  const configStorageKey = "k9x.rune.config";
   const state = {
     running: false,
     timerId: null,
@@ -1955,7 +1955,7 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
-  const configStorageKey = "minibiaBot.heal.config";
+  const configStorageKey = "k9x.heal.config";
   const state = {
     running: false,
     timerId: null,
@@ -2276,7 +2276,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoInvisibleModule = function installAutoInvisibleModule(bot) {
-  const configStorageKey = "minibiaBot.invisible.config";
+  const configStorageKey = "k9x.invisible.config";
   const INVISIBLE_CONDITION_ID = 4;
   const state = {
     running: false,
@@ -2492,7 +2492,7 @@ window.__minibiaBotBundle.installAutoInvisibleModule = function installAutoInvis
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoMagicShieldModule = function installAutoMagicShieldModule(bot) {
-  const configStorageKey = "minibiaBot.magicShield.config";
+  const configStorageKey = "k9x.magicShield.config";
   const MAGIC_SHIELD_FALLBACK_DURATION_MS = 180000;
   const state = {
     running: false,
@@ -2730,7 +2730,7 @@ window.__minibiaBotBundle.installAutoMagicShieldModule = function installAutoMag
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackModule(bot) {
-  const configStorageKey = "minibiaBot.attack.config";
+  const configStorageKey = "k9x.attack.config";
   const state = {
     running: false,
     timerId: null,
@@ -3571,10 +3571,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
-  const configStorageKey = "minibiaBot.cave.config";
-  const routeStorageKey = "minibiaBot.cave.route";
-  const transitionStorageKey = "minibiaBot.cave.transitions";
-  const presetStorageKey = "minibiaBot.cave.presets";
+  const configStorageKey = "k9x.cave.config";
+  const routeStorageKey = "k9x.cave.route";
+  const transitionStorageKey = "k9x.cave.transitions";
+  const presetStorageKey = "k9x.cave.presets";
   const defaultPresetName = "Default";
   const minimapOverlayRootId = "minibia-bot-cave-minimap-overlay";
   const minimapOverlayStyleId = "minibia-bot-cave-minimap-overlay-style";
@@ -5386,7 +5386,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installEquipRingModule = function installEquipRingModule(bot) {
-  const configStorageKey = "minibiaBot.equipRing.config";
+  const configStorageKey = "k9x.equipRing.config";
   const RING_SLOT = 8;
   const state = {
     running: false,
@@ -5682,7 +5682,7 @@ window.__minibiaBotBundle.installEquipRingModule = function installEquipRingModu
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoEatModule = function installAutoEatModule(bot) {
-  const configStorageKey = "minibiaBot.eat.config";
+  const configStorageKey = "k9x.eat.config";
   const state = {
     running: false,
     timerId: null,
@@ -5885,7 +5885,7 @@ window.__minibiaBotBundle.installAutoEatModule = function installAutoEatModule(b
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
-  const configStorageKey = "minibiaBot.talk.config";
+  const configStorageKey = "k9x.talk.config";
   const legacyDefaultModels = ["gemini-3-pro-preview", "gemini-2.0-flash"];
   const defaultModel = "gemini-2.5-flash-lite";
   const defaultSystemPrompt =
@@ -6557,8 +6557,8 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPanel = function installPanel(bot) {
-  const panelPositionKey = "minibiaBot.ui.panelPosition";
-  const panelCollapsedKey = "minibiaBot.ui.panelCollapsed";
+  const panelPositionKey = "k9x.ui.panelPosition";
+  const panelCollapsedKey = "k9x.ui.panelCollapsed";
 
   function destroy() {
     document.getElementById("minibia-bot-panel")?.remove();
@@ -7533,7 +7533,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     panel.id = "minibia-bot-panel";
     panel.innerHTML = `
         <div class="mb-titlebar">
-        <div class="mb-title">[fork] Minibia Bot</div>
+        <div class="mb-title">[k9x]</div>
         <button type="button" class="mb-icon-button" id="minibia-bot-collapse" aria-label="Minimize panel" title="Minimize">−</button>
       </div>
       <div class="mb-body">
@@ -8434,17 +8434,83 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 };
 (() => {
   const bundle = window.__minibiaBotBundle || window.__minibiaBotReloadBundle || {};
-  const persistedEnabledModules = [
-    ["rune", "minibiaBot.rune.config"],
-    ["heal", "minibiaBot.heal.config"],
-    ["invisible", "minibiaBot.invisible.config"],
-    ["magicShield", "minibiaBot.magicShield.config"],
-    ["attack", "minibiaBot.attack.config"],
-    ["cave", "minibiaBot.cave.config"],
-    ["equipRing", "minibiaBot.equipRing.config"],
-    ["eat", "minibiaBot.eat.config"],
-    ["talk", "minibiaBot.talk.config"],
+  const storageKeyMigrations = [
+    ["minibiaBot.audio.alarmSrc", "k9x.audio.alarmSrc"],
+    ["minibiaBot.rune.config", "k9x.rune.config"],
+    ["minibiaBot.heal.config", "k9x.heal.config"],
+    ["minibiaBot.invisible.config", "k9x.invisible.config"],
+    ["minibiaBot.magicShield.config", "k9x.magicShield.config"],
+    ["minibiaBot.attack.config", "k9x.attack.config"],
+    ["minibiaBot.cave.config", "k9x.cave.config"],
+    ["minibiaBot.cave.route", "k9x.cave.route"],
+    ["minibiaBot.cave.transitions", "k9x.cave.transitions"],
+    ["minibiaBot.cave.presets", "k9x.cave.presets"],
+    ["minibiaBot.equipRing.config", "k9x.equipRing.config"],
+    ["minibiaBot.eat.config", "k9x.eat.config"],
+    ["minibiaBot.talk.config", "k9x.talk.config"],
+    ["minibiaBot.panic.config", "k9x.panic.config"],
+    ["minibiaBot.pz.home", "k9x.pz.home"],
+    ["minibiaBot.xray.config", "k9x.xray.config"],
+    ["minibiaBot.ui.panelPosition", "k9x.ui.panelPosition"],
+    ["minibiaBot.ui.panelCollapsed", "k9x.ui.panelCollapsed"],
+    ["gameHelper.audio.alarmSrc", "k9x.audio.alarmSrc"],
+    ["gameHelper.rune.config", "k9x.rune.config"],
+    ["gameHelper.heal.config", "k9x.heal.config"],
+    ["gameHelper.invisible.config", "k9x.invisible.config"],
+    ["gameHelper.magicShield.config", "k9x.magicShield.config"],
+    ["gameHelper.attack.config", "k9x.attack.config"],
+    ["gameHelper.cave.config", "k9x.cave.config"],
+    ["gameHelper.cave.route", "k9x.cave.route"],
+    ["gameHelper.cave.transitions", "k9x.cave.transitions"],
+    ["gameHelper.cave.presets", "k9x.cave.presets"],
+    ["gameHelper.equipRing.config", "k9x.equipRing.config"],
+    ["gameHelper.eat.config", "k9x.eat.config"],
+    ["gameHelper.talk.config", "k9x.talk.config"],
+    ["gameHelper.panic.config", "k9x.panic.config"],
+    ["gameHelper.pz.home", "k9x.pz.home"],
+    ["gameHelper.xray.config", "k9x.xray.config"],
+    ["gameHelper.ui.panelPosition", "k9x.ui.panelPosition"],
+    ["gameHelper.ui.panelCollapsed", "k9x.ui.panelCollapsed"],
   ];
+  const persistedEnabledModules = [
+    ["rune", "k9x.rune.config"],
+    ["heal", "k9x.heal.config"],
+    ["invisible", "k9x.invisible.config"],
+    ["magicShield", "k9x.magicShield.config"],
+    ["attack", "k9x.attack.config"],
+    ["cave", "k9x.cave.config"],
+    ["equipRing", "k9x.equipRing.config"],
+    ["eat", "k9x.eat.config"],
+    ["talk", "k9x.talk.config"],
+  ];
+
+  function migrateLegacyStorageKeys() {
+    storageKeyMigrations.forEach(([legacyKey, nextKey]) => {
+      if (!legacyKey || !nextKey || legacyKey === nextKey) {
+        return;
+      }
+
+      try {
+        const legacyValue = window.localStorage.getItem(legacyKey);
+        if (legacyValue == null) {
+          return;
+        }
+
+        const nextValue = window.localStorage.getItem(nextKey);
+        if (nextValue == null) {
+          window.localStorage.setItem(nextKey, legacyValue);
+        }
+
+        window.localStorage.removeItem(legacyKey);
+      } catch (error) {
+        console.error("[minibia-bot] failed to migrate storage key", {
+          legacyKey,
+          nextKey,
+          error,
+        });
+      }
+    });
+  }
 
   function getPersistedEnabledSnapshot(bot) {
     const snapshot = {};
@@ -8481,6 +8547,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
 
   function boot(currentBundle = bundle) {
+    migrateLegacyStorageKeys();
     const previousEnabledSnapshot = getPersistedEnabledSnapshot(window.minibiaBot);
 
     if (window.minibiaBot?.destroy) {
