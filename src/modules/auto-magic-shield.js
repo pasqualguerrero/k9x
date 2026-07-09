@@ -87,14 +87,18 @@ window.__minibiaBotBundle.installAutoMagicShieldModule = function installAutoMag
       return false;
     }
 
-    const sent = bot.sendChat(config.spellWords);
-    if (sent) {
+    const castResult = bot.castSpell({ words: config.spellWords });
+    if (castResult.ok) {
       state.lastCastAt = now;
       state.assumedActiveUntil = now + MAGIC_SHIELD_FALLBACK_DURATION_MS;
-      bot.log("cast magic shield spell", { spellWords: config.spellWords });
+      bot.log("cast magic shield spell", {
+        spellWords: config.spellWords,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+      });
     }
 
-    return sent;
+    return castResult.ok;
   }
 
   function scheduleNextTick() {

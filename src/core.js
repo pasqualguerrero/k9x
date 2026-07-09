@@ -163,6 +163,94 @@ window.__minibiaBotBundle.createBot = function createBot() {
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  function normalizeSpellWords(words) {
+    return String(words || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  function normalizeSpellSid(sid) {
+    const value = Number(sid);
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+
+    const normalized = Math.trunc(value);
+    return normalized >= 0 ? normalized : null;
+  }
+
+  function resolveSpellSid(options = {}) {
+    const explicitSid = normalizeSpellSid(options.sid);
+    if (explicitSid != null) {
+      return explicitSid;
+    }
+
+    const normalizedWords = normalizeSpellWords(options.words);
+    if (!normalizedWords) {
+      return null;
+    }
+
+    const spells = window.gameClient?.interface?.SPELLS;
+    if (!spells || typeof spells.forEach !== "function") {
+      return null;
+    }
+
+    let matchedSid = null;
+    spells.forEach((spell, spellSid) => {
+      if (matchedSid != null) {
+        return;
+      }
+
+      if (normalizeSpellWords(spell?.words) === normalizedWords) {
+        matchedSid = spellSid;
+      }
+    });
+
+    return matchedSid;
+  }
+
+  function isSpellOnCooldown(spellbook, spellSid) {
+    if (!spellbook || spellSid == null) {
+      return false;
+    }
+
+    const bucket =
+      typeof spellbook.__bucketFor === "function"
+        ? spellbook.__bucketFor(spellSid)
+        : spellbook.GLOBAL_COOLDOWN_HEAL;
+
+    return !!(
+      spellbook.cooldowns?.has?.(spellbook.GLOBAL_COOLDOWN) ||
+      spellbook.cooldowns?.has?.(spellbook.GLOBAL_COOLDOWN_HEAL) ||
+      spellbook.cooldowns?.has?.(bucket) ||
+      spellbook.cooldowns?.has?.(spellSid)
+    );
+  }
+
+  function castSpellPacket(spellSid) {
+    const spellbook = window.gameClient?.player?.spellbook;
+    if (!spellbook?.spells?.has?.(spellSid)) {
+      return false;
+    }
+
+    if (isSpellOnCooldown(spellbook, spellSid)) {
+      return false;
+    }
+
+    if (typeof spellbook.castSpell === "function") {
+      spellbook.castSpell(spellSid);
+      return true;
+    }
+
+    if (typeof SpellCastPacket === "function" && typeof window.gameClient?.send === "function") {
+      window.gameClient.send(new SpellCastPacket(spellSid));
+      return true;
+    }
+
+    return false;
+  }
+
   function isVisibleElement(element) {
     if (!(element instanceof Element)) {
       return false;
@@ -266,7 +354,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
   startReconnectWatcher();
 
   return {
-    version: "0.3.0",
+    version: "0.3.1",
     addCleanup,
     destroy() {
       if (this.panic?.stop) {
@@ -398,6 +486,44 @@ window.__minibiaBotBundle.createBot = function createBot() {
 
       button.click();
       return true;
+    },
+    resolveSpellSid(options = {}) {
+      return resolveSpellSid(options);
+    },
+    castSpell(options = {}) {
+      const words = String(options.words || "").trim();
+      const hotbarSlot = Number(options.hotbarSlot);
+      const fallbackChat = options.fallbackChat !== false;
+      const spellSid = resolveSpellSid(options);
+
+      if (spellSid != null) {
+        const spellbook = window.gameClient?.player?.spellbook;
+        if (spellbook?.spells?.has?.(spellSid)) {
+          if (isSpellOnCooldown(spellbook, spellSid)) {
+            return { ok: false, method: "cooldown", sid: spellSid, words: words || null };
+          }
+
+          if (castSpellPacket(spellSid)) {
+            this.log("cast spell", { sid: spellSid, words: words || null });
+            return { ok: true, method: "packet", sid: spellSid, words: words || null };
+          }
+        }
+      }
+
+      if (Number.isFinite(hotbarSlot) && hotbarSlot >= 1 && hotbarSlot <= 12) {
+        if (this.clickHotbar(hotbarSlot - 1)) {
+          return { ok: true, method: "hotbar", sid: spellSid, slot: Math.trunc(hotbarSlot) };
+        }
+      }
+
+      if (fallbackChat && words && this.sendChat(words)) {
+        return { ok: true, method: "chat", sid: spellSid, words };
+      }
+
+      return { ok: false, method: null, sid: spellSid, words: words || null };
+    },
+    castSpellByWords(words, options = {}) {
+      return this.castSpell({ ...options, words });
     },
     getAlarmAudioSrc() {
       return getStoredAlarmAudioSrc();

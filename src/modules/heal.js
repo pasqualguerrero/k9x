@@ -21,8 +21,12 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       healConfirmMs: 250,
       minHp: 250,
       hpHotbarSlot: 1,
+      hpSpellWords: "exura",
+      hpSpellSid: null,
       minMana: 150,
       manaHotbarSlot: 2,
+      manaSpellWords: null,
+      manaSpellSid: null,
       enabled: false,
     },
     bot.storage.get(configStorageKey, {})
@@ -95,7 +99,11 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       if (didHpHealSucceed(stats, hpAttempt)) {
         state.lastHpHealAt = hpAttempt.attemptedAt;
         state.pendingHpAttempt = null;
-        bot.log("confirmed hp heal", { slot: hpAttempt.slot });
+        bot.log("confirmed hp heal", {
+          slot: hpAttempt.slot,
+          method: hpAttempt.method || null,
+          sid: hpAttempt.sid ?? null,
+        });
       } else if (now - hpAttempt.attemptedAt >= Math.max(50, Number(config.healConfirmMs) || 0)) {
         state.pendingHpAttempt = null;
         bot.log("hp heal did not register", { slot: hpAttempt.slot });
@@ -107,7 +115,11 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       if (didManaHealSucceed(stats, manaAttempt)) {
         state.lastManaHealAt = manaAttempt.attemptedAt;
         state.pendingManaAttempt = null;
-        bot.log("confirmed mana heal", { slot: manaAttempt.slot });
+        bot.log("confirmed mana heal", {
+          slot: manaAttempt.slot,
+          method: manaAttempt.method || null,
+          sid: manaAttempt.sid ?? null,
+        });
       } else if (now - manaAttempt.attemptedAt >= Math.max(50, Number(config.healConfirmMs) || 0)) {
         state.pendingManaAttempt = null;
         bot.log("mana heal did not register", { slot: manaAttempt.slot });
@@ -115,10 +127,42 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
   }
 
+  function hasHpCastOption() {
+    return !!(
+      normalizeHotbarSlot(config.hpHotbarSlot) ||
+      normalizeSpellWords(config.hpSpellWords) ||
+      normalizeSpellSid(config.hpSpellSid) != null
+    );
+  }
+
+  function hasManaCastOption() {
+    return !!(
+      normalizeHotbarSlot(config.manaHotbarSlot) ||
+      normalizeSpellWords(config.manaSpellWords) ||
+      normalizeSpellSid(config.manaSpellSid) != null
+    );
+  }
+
+  function normalizeSpellWords(words) {
+    return String(words || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  function normalizeSpellSid(sid) {
+    const value = Number(sid);
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+
+    const normalized = Math.trunc(value);
+    return normalized >= 0 ? normalized : null;
+  }
+
   function canUseHpHeal(now = Date.now(), stats = readStats()) {
     const { hp } = stats;
-    const slot = normalizeHotbarSlot(config.hpHotbarSlot);
-    if (!hp || !slot || state.pendingHpAttempt) return false;
+    if (!hp || !hasHpCastOption() || state.pendingHpAttempt) return false;
 
     return (
       hp.current > 0 &&
@@ -130,8 +174,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
 
   function canUseManaHeal(now = Date.now(), stats = readStats()) {
     const { mana } = stats;
-    const slot = normalizeHotbarSlot(config.manaHotbarSlot);
-    if (!mana || !slot || state.pendingManaAttempt || state.pendingHpAttempt) return false;
+    if (!mana || !hasManaCastOption() || state.pendingManaAttempt || state.pendingHpAttempt) return false;
 
     return (
       mana.current <= Math.max(0, Number(config.minMana) || 0) &&
@@ -146,19 +189,31 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
 
     const slot = normalizeHotbarSlot(config.hpHotbarSlot);
-    const clicked = bot.clickHotbar(slot - 1);
-    if (clicked) {
+    const castResult = bot.castSpell({
+      sid: config.hpSpellSid,
+      words: config.hpSpellWords,
+      hotbarSlot: slot,
+    });
+
+    if (castResult.ok) {
       state.lastHpAttemptAt = now;
       state.pendingHpAttempt = {
         attemptedAt: now,
         slot,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
         hpBefore: Number(stats.hp?.current ?? 0),
         manaBefore: Number(stats.mana?.current ?? 0),
       };
-      bot.log("pressed hp heal hotkey", { slot, minHp: config.minHp });
+      bot.log("cast hp heal", {
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+        slot,
+        minHp: config.minHp,
+      });
     }
 
-    return clicked;
+    return castResult.ok;
   }
 
   function triggerManaHeal(now = Date.now(), stats = readStats()) {
@@ -167,19 +222,32 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
 
     const slot = normalizeHotbarSlot(config.manaHotbarSlot);
-    const clicked = bot.clickHotbar(slot - 1);
-    if (clicked) {
+    const castResult = bot.castSpell({
+      sid: config.manaSpellSid,
+      words: config.manaSpellWords,
+      hotbarSlot: slot,
+      fallbackChat: !!normalizeSpellWords(config.manaSpellWords),
+    });
+
+    if (castResult.ok) {
       state.lastManaAttemptAt = now;
       state.pendingManaAttempt = {
         attemptedAt: now,
         slot,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
         hpBefore: Number(stats.hp?.current ?? 0),
         manaBefore: Number(stats.mana?.current ?? 0),
       };
-      bot.log("pressed mana heal hotkey", { slot, minMana: config.minMana });
+      bot.log("cast mana heal", {
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+        slot,
+        minMana: config.minMana,
+      });
     }
 
-    return clicked;
+    return castResult.ok;
   }
 
   function tryHeal() {
@@ -292,6 +360,24 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
 
     if (Object.prototype.hasOwnProperty.call(nextConfig, "healConfirmMs")) {
       nextConfig.healConfirmMs = Math.max(50, Number(nextConfig.healConfirmMs) || 50);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "hpSpellSid")) {
+      nextConfig.hpSpellSid = normalizeSpellSid(nextConfig.hpSpellSid);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "manaSpellSid")) {
+      nextConfig.manaSpellSid = normalizeSpellSid(nextConfig.manaSpellSid);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "hpSpellWords")) {
+      const words = normalizeSpellWords(nextConfig.hpSpellWords);
+      nextConfig.hpSpellWords = words || null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "manaSpellWords")) {
+      const words = normalizeSpellWords(nextConfig.manaSpellWords);
+      nextConfig.manaSpellWords = words || null;
     }
 
     Object.assign(config, nextConfig);

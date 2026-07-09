@@ -98,12 +98,17 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
       return false;
     }
 
-    const sent = bot.sendChat(config.runeSpellWords);
-    if (sent) {
+    const castResult = bot.castSpell({ words: config.runeSpellWords });
+    if (castResult.ok) {
       state.lastRuneAt = Date.now();
+      bot.log("cast rune spell", {
+        spellWords: config.runeSpellWords,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+      });
     }
 
-    return sent;
+    return castResult.ok;
   }
 
   function scheduleNextTick() {

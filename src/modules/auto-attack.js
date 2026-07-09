@@ -191,6 +191,93 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return getNearbyMonsters().find((monster) => monster?.id === id) || null;
   }
 
+  function getTrackedCreature(id) {
+    if (id == null) {
+      return null;
+    }
+
+    return window.gameClient?.world?.activeCreatures?.[id] || null;
+  }
+
+  function readCreatureHealth(creature) {
+    if (!creature) {
+      return null;
+    }
+
+    const candidates = [
+      creature.state?.health,
+      creature.health,
+      creature.hp,
+      creature.currentHealth,
+    ];
+
+    const value = candidates.find((entry) => Number.isFinite(Number(entry)));
+    return value == null ? null : Number(value);
+  }
+
+  function isCreatureDead(creature) {
+    if (!creature) {
+      return true;
+    }
+
+    const health = readCreatureHealth(creature);
+    return health === 0;
+  }
+
+  function isCreatureGone(id) {
+    return id != null && !getTrackedCreature(id);
+  }
+
+  function reconcileDeadTargets(now = Date.now()) {
+    const candidateIds = new Set();
+    const currentTarget = getCurrentTarget();
+    const followTarget = getCurrentFollowTarget();
+
+    if (currentTarget?.id != null) {
+      candidateIds.add(currentTarget.id);
+    }
+
+    if (followTarget?.id != null) {
+      candidateIds.add(followTarget.id);
+    }
+
+    if (state.engagedTargetId != null) {
+      candidateIds.add(state.engagedTargetId);
+    }
+
+    let handled = false;
+
+    candidateIds.forEach((id) => {
+      const tracked = getTrackedCreature(id);
+
+      if (isCreatureGone(id)) {
+        if (currentTarget?.id === id) {
+          clearCurrentTarget();
+        }
+
+        if (followTarget?.id === id) {
+          clearCurrentFollowTarget();
+        }
+
+        if (state.engagedTargetId === id) {
+          clearEngagedTarget();
+        }
+
+        state.skippedTargetIds.set(id, now + 500);
+        bot.log("target gone after kill", { id });
+        handled = true;
+        return;
+      }
+
+      if (isCreatureDead(tracked)) {
+        skipTarget(tracked, "target dead", now, 500);
+        handled = true;
+      }
+    });
+
+    return handled;
+  }
+
   function getCurrentTarget() {
     return window.gameClient?.player?.__target || null;
   }
@@ -303,7 +390,22 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const nearbyTarget = findNearbyMonsterById(state.engagedTargetId);
     if (nearbyTarget) {
+      if (isCreatureDead(nearbyTarget)) {
+        skipTarget(nearbyTarget, "engaged target dead", Date.now(), 500);
+        return null;
+      }
+
       return nearbyTarget;
+    }
+
+    const trackedTarget = getTrackedCreature(state.engagedTargetId);
+    if (trackedTarget) {
+      if (isCreatureDead(trackedTarget)) {
+        skipTarget(trackedTarget, "engaged target dead", Date.now(), 500);
+        return null;
+      }
+
+      return trackedTarget;
     }
 
     clearEngagedTarget();
@@ -663,6 +765,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     const now = Date.now();
+
+    if (reconcileDeadTargets(now)) {
+      return triggerAttack(now) || true;
+    }
+
     const engagedTarget = getEngagedTarget();
     if (engagedTarget && !shouldTargetCreature(engagedTarget)) {
       skipTarget(engagedTarget, "target does not match configured filters", now, 2000);
@@ -835,6 +942,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     getCurrentFollowTarget,
     isCombatActive,
     syncMeleeChase,
+    reconcileDeadTargets,
+    getTrackedCreature,
+    readCreatureHealth,
+    isCreatureDead,
     normalizeHotbarSlot,
     config,
   };

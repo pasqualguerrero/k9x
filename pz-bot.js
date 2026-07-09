@@ -163,6 +163,94 @@ window.__minibiaBotBundle.createBot = function createBot() {
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  function normalizeSpellWords(words) {
+    return String(words || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  function normalizeSpellSid(sid) {
+    const value = Number(sid);
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+
+    const normalized = Math.trunc(value);
+    return normalized >= 0 ? normalized : null;
+  }
+
+  function resolveSpellSid(options = {}) {
+    const explicitSid = normalizeSpellSid(options.sid);
+    if (explicitSid != null) {
+      return explicitSid;
+    }
+
+    const normalizedWords = normalizeSpellWords(options.words);
+    if (!normalizedWords) {
+      return null;
+    }
+
+    const spells = window.gameClient?.interface?.SPELLS;
+    if (!spells || typeof spells.forEach !== "function") {
+      return null;
+    }
+
+    let matchedSid = null;
+    spells.forEach((spell, spellSid) => {
+      if (matchedSid != null) {
+        return;
+      }
+
+      if (normalizeSpellWords(spell?.words) === normalizedWords) {
+        matchedSid = spellSid;
+      }
+    });
+
+    return matchedSid;
+  }
+
+  function isSpellOnCooldown(spellbook, spellSid) {
+    if (!spellbook || spellSid == null) {
+      return false;
+    }
+
+    const bucket =
+      typeof spellbook.__bucketFor === "function"
+        ? spellbook.__bucketFor(spellSid)
+        : spellbook.GLOBAL_COOLDOWN_HEAL;
+
+    return !!(
+      spellbook.cooldowns?.has?.(spellbook.GLOBAL_COOLDOWN) ||
+      spellbook.cooldowns?.has?.(spellbook.GLOBAL_COOLDOWN_HEAL) ||
+      spellbook.cooldowns?.has?.(bucket) ||
+      spellbook.cooldowns?.has?.(spellSid)
+    );
+  }
+
+  function castSpellPacket(spellSid) {
+    const spellbook = window.gameClient?.player?.spellbook;
+    if (!spellbook?.spells?.has?.(spellSid)) {
+      return false;
+    }
+
+    if (isSpellOnCooldown(spellbook, spellSid)) {
+      return false;
+    }
+
+    if (typeof spellbook.castSpell === "function") {
+      spellbook.castSpell(spellSid);
+      return true;
+    }
+
+    if (typeof SpellCastPacket === "function" && typeof window.gameClient?.send === "function") {
+      window.gameClient.send(new SpellCastPacket(spellSid));
+      return true;
+    }
+
+    return false;
+  }
+
   function isVisibleElement(element) {
     if (!(element instanceof Element)) {
       return false;
@@ -266,7 +354,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
   startReconnectWatcher();
 
   return {
-    version: "0.3.0",
+    version: "0.3.1",
     addCleanup,
     destroy() {
       if (this.panic?.stop) {
@@ -398,6 +486,44 @@ window.__minibiaBotBundle.createBot = function createBot() {
 
       button.click();
       return true;
+    },
+    resolveSpellSid(options = {}) {
+      return resolveSpellSid(options);
+    },
+    castSpell(options = {}) {
+      const words = String(options.words || "").trim();
+      const hotbarSlot = Number(options.hotbarSlot);
+      const fallbackChat = options.fallbackChat !== false;
+      const spellSid = resolveSpellSid(options);
+
+      if (spellSid != null) {
+        const spellbook = window.gameClient?.player?.spellbook;
+        if (spellbook?.spells?.has?.(spellSid)) {
+          if (isSpellOnCooldown(spellbook, spellSid)) {
+            return { ok: false, method: "cooldown", sid: spellSid, words: words || null };
+          }
+
+          if (castSpellPacket(spellSid)) {
+            this.log("cast spell", { sid: spellSid, words: words || null });
+            return { ok: true, method: "packet", sid: spellSid, words: words || null };
+          }
+        }
+      }
+
+      if (Number.isFinite(hotbarSlot) && hotbarSlot >= 1 && hotbarSlot <= 12) {
+        if (this.clickHotbar(hotbarSlot - 1)) {
+          return { ok: true, method: "hotbar", sid: spellSid, slot: Math.trunc(hotbarSlot) };
+        }
+      }
+
+      if (fallbackChat && words && this.sendChat(words)) {
+        return { ok: true, method: "chat", sid: spellSid, words };
+      }
+
+      return { ok: false, method: null, sid: spellSid, words: words || null };
+    },
+    castSpellByWords(words, options = {}) {
+      return this.castSpell({ ...options, words });
     },
     getAlarmAudioSrc() {
       return getStoredAlarmAudioSrc();
@@ -1814,12 +1940,17 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
       return false;
     }
 
-    const sent = bot.sendChat(config.runeSpellWords);
-    if (sent) {
+    const castResult = bot.castSpell({ words: config.runeSpellWords });
+    if (castResult.ok) {
       state.lastRuneAt = Date.now();
+      bot.log("cast rune spell", {
+        spellWords: config.runeSpellWords,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+      });
     }
 
-    return sent;
+    return castResult.ok;
   }
 
   function scheduleNextTick() {
@@ -1979,8 +2110,12 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       healConfirmMs: 250,
       minHp: 250,
       hpHotbarSlot: 1,
+      hpSpellWords: "exura",
+      hpSpellSid: null,
       minMana: 150,
       manaHotbarSlot: 2,
+      manaSpellWords: null,
+      manaSpellSid: null,
       enabled: false,
     },
     bot.storage.get(configStorageKey, {})
@@ -2053,7 +2188,11 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       if (didHpHealSucceed(stats, hpAttempt)) {
         state.lastHpHealAt = hpAttempt.attemptedAt;
         state.pendingHpAttempt = null;
-        bot.log("confirmed hp heal", { slot: hpAttempt.slot });
+        bot.log("confirmed hp heal", {
+          slot: hpAttempt.slot,
+          method: hpAttempt.method || null,
+          sid: hpAttempt.sid ?? null,
+        });
       } else if (now - hpAttempt.attemptedAt >= Math.max(50, Number(config.healConfirmMs) || 0)) {
         state.pendingHpAttempt = null;
         bot.log("hp heal did not register", { slot: hpAttempt.slot });
@@ -2065,7 +2204,11 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       if (didManaHealSucceed(stats, manaAttempt)) {
         state.lastManaHealAt = manaAttempt.attemptedAt;
         state.pendingManaAttempt = null;
-        bot.log("confirmed mana heal", { slot: manaAttempt.slot });
+        bot.log("confirmed mana heal", {
+          slot: manaAttempt.slot,
+          method: manaAttempt.method || null,
+          sid: manaAttempt.sid ?? null,
+        });
       } else if (now - manaAttempt.attemptedAt >= Math.max(50, Number(config.healConfirmMs) || 0)) {
         state.pendingManaAttempt = null;
         bot.log("mana heal did not register", { slot: manaAttempt.slot });
@@ -2073,10 +2216,42 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
   }
 
+  function hasHpCastOption() {
+    return !!(
+      normalizeHotbarSlot(config.hpHotbarSlot) ||
+      normalizeSpellWords(config.hpSpellWords) ||
+      normalizeSpellSid(config.hpSpellSid) != null
+    );
+  }
+
+  function hasManaCastOption() {
+    return !!(
+      normalizeHotbarSlot(config.manaHotbarSlot) ||
+      normalizeSpellWords(config.manaSpellWords) ||
+      normalizeSpellSid(config.manaSpellSid) != null
+    );
+  }
+
+  function normalizeSpellWords(words) {
+    return String(words || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  function normalizeSpellSid(sid) {
+    const value = Number(sid);
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+
+    const normalized = Math.trunc(value);
+    return normalized >= 0 ? normalized : null;
+  }
+
   function canUseHpHeal(now = Date.now(), stats = readStats()) {
     const { hp } = stats;
-    const slot = normalizeHotbarSlot(config.hpHotbarSlot);
-    if (!hp || !slot || state.pendingHpAttempt) return false;
+    if (!hp || !hasHpCastOption() || state.pendingHpAttempt) return false;
 
     return (
       hp.current > 0 &&
@@ -2088,8 +2263,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
 
   function canUseManaHeal(now = Date.now(), stats = readStats()) {
     const { mana } = stats;
-    const slot = normalizeHotbarSlot(config.manaHotbarSlot);
-    if (!mana || !slot || state.pendingManaAttempt || state.pendingHpAttempt) return false;
+    if (!mana || !hasManaCastOption() || state.pendingManaAttempt || state.pendingHpAttempt) return false;
 
     return (
       mana.current <= Math.max(0, Number(config.minMana) || 0) &&
@@ -2104,19 +2278,31 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
 
     const slot = normalizeHotbarSlot(config.hpHotbarSlot);
-    const clicked = bot.clickHotbar(slot - 1);
-    if (clicked) {
+    const castResult = bot.castSpell({
+      sid: config.hpSpellSid,
+      words: config.hpSpellWords,
+      hotbarSlot: slot,
+    });
+
+    if (castResult.ok) {
       state.lastHpAttemptAt = now;
       state.pendingHpAttempt = {
         attemptedAt: now,
         slot,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
         hpBefore: Number(stats.hp?.current ?? 0),
         manaBefore: Number(stats.mana?.current ?? 0),
       };
-      bot.log("pressed hp heal hotkey", { slot, minHp: config.minHp });
+      bot.log("cast hp heal", {
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+        slot,
+        minHp: config.minHp,
+      });
     }
 
-    return clicked;
+    return castResult.ok;
   }
 
   function triggerManaHeal(now = Date.now(), stats = readStats()) {
@@ -2125,19 +2311,32 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
 
     const slot = normalizeHotbarSlot(config.manaHotbarSlot);
-    const clicked = bot.clickHotbar(slot - 1);
-    if (clicked) {
+    const castResult = bot.castSpell({
+      sid: config.manaSpellSid,
+      words: config.manaSpellWords,
+      hotbarSlot: slot,
+      fallbackChat: !!normalizeSpellWords(config.manaSpellWords),
+    });
+
+    if (castResult.ok) {
       state.lastManaAttemptAt = now;
       state.pendingManaAttempt = {
         attemptedAt: now,
         slot,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
         hpBefore: Number(stats.hp?.current ?? 0),
         manaBefore: Number(stats.mana?.current ?? 0),
       };
-      bot.log("pressed mana heal hotkey", { slot, minMana: config.minMana });
+      bot.log("cast mana heal", {
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+        slot,
+        minMana: config.minMana,
+      });
     }
 
-    return clicked;
+    return castResult.ok;
   }
 
   function tryHeal() {
@@ -2252,6 +2451,24 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       nextConfig.healConfirmMs = Math.max(50, Number(nextConfig.healConfirmMs) || 50);
     }
 
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "hpSpellSid")) {
+      nextConfig.hpSpellSid = normalizeSpellSid(nextConfig.hpSpellSid);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "manaSpellSid")) {
+      nextConfig.manaSpellSid = normalizeSpellSid(nextConfig.manaSpellSid);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "hpSpellWords")) {
+      const words = normalizeSpellWords(nextConfig.hpSpellWords);
+      nextConfig.hpSpellWords = words || null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "manaSpellWords")) {
+      const words = normalizeSpellWords(nextConfig.manaSpellWords);
+      nextConfig.manaSpellWords = words || null;
+    }
+
     Object.assign(config, nextConfig);
     persistConfig();
     bot.log("auto heal config updated", { ...config });
@@ -2346,13 +2563,17 @@ window.__minibiaBotBundle.installAutoInvisibleModule = function installAutoInvis
       return false;
     }
 
-    const sent = bot.sendChat(config.spellWords);
-    if (sent) {
+    const castResult = bot.castSpell({ words: config.spellWords });
+    if (castResult.ok) {
       state.lastCastAt = now;
-      bot.log("cast invisible spell", { spellWords: config.spellWords });
+      bot.log("cast invisible spell", {
+        spellWords: config.spellWords,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+      });
     }
 
-    return sent;
+    return castResult.ok;
   }
 
   function scheduleNextTick() {
@@ -2582,14 +2803,18 @@ window.__minibiaBotBundle.installAutoMagicShieldModule = function installAutoMag
       return false;
     }
 
-    const sent = bot.sendChat(config.spellWords);
-    if (sent) {
+    const castResult = bot.castSpell({ words: config.spellWords });
+    if (castResult.ok) {
       state.lastCastAt = now;
       state.assumedActiveUntil = now + MAGIC_SHIELD_FALLBACK_DURATION_MS;
-      bot.log("cast magic shield spell", { spellWords: config.spellWords });
+      bot.log("cast magic shield spell", {
+        spellWords: config.spellWords,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+      });
     }
 
-    return sent;
+    return castResult.ok;
   }
 
   function scheduleNextTick() {
@@ -2924,6 +3149,93 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return getNearbyMonsters().find((monster) => monster?.id === id) || null;
   }
 
+  function getTrackedCreature(id) {
+    if (id == null) {
+      return null;
+    }
+
+    return window.gameClient?.world?.activeCreatures?.[id] || null;
+  }
+
+  function readCreatureHealth(creature) {
+    if (!creature) {
+      return null;
+    }
+
+    const candidates = [
+      creature.state?.health,
+      creature.health,
+      creature.hp,
+      creature.currentHealth,
+    ];
+
+    const value = candidates.find((entry) => Number.isFinite(Number(entry)));
+    return value == null ? null : Number(value);
+  }
+
+  function isCreatureDead(creature) {
+    if (!creature) {
+      return true;
+    }
+
+    const health = readCreatureHealth(creature);
+    return health === 0;
+  }
+
+  function isCreatureGone(id) {
+    return id != null && !getTrackedCreature(id);
+  }
+
+  function reconcileDeadTargets(now = Date.now()) {
+    const candidateIds = new Set();
+    const currentTarget = getCurrentTarget();
+    const followTarget = getCurrentFollowTarget();
+
+    if (currentTarget?.id != null) {
+      candidateIds.add(currentTarget.id);
+    }
+
+    if (followTarget?.id != null) {
+      candidateIds.add(followTarget.id);
+    }
+
+    if (state.engagedTargetId != null) {
+      candidateIds.add(state.engagedTargetId);
+    }
+
+    let handled = false;
+
+    candidateIds.forEach((id) => {
+      const tracked = getTrackedCreature(id);
+
+      if (isCreatureGone(id)) {
+        if (currentTarget?.id === id) {
+          clearCurrentTarget();
+        }
+
+        if (followTarget?.id === id) {
+          clearCurrentFollowTarget();
+        }
+
+        if (state.engagedTargetId === id) {
+          clearEngagedTarget();
+        }
+
+        state.skippedTargetIds.set(id, now + 500);
+        bot.log("target gone after kill", { id });
+        handled = true;
+        return;
+      }
+
+      if (isCreatureDead(tracked)) {
+        skipTarget(tracked, "target dead", now, 500);
+        handled = true;
+      }
+    });
+
+    return handled;
+  }
+
   function getCurrentTarget() {
     return window.gameClient?.player?.__target || null;
   }
@@ -3036,7 +3348,22 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const nearbyTarget = findNearbyMonsterById(state.engagedTargetId);
     if (nearbyTarget) {
+      if (isCreatureDead(nearbyTarget)) {
+        skipTarget(nearbyTarget, "engaged target dead", Date.now(), 500);
+        return null;
+      }
+
       return nearbyTarget;
+    }
+
+    const trackedTarget = getTrackedCreature(state.engagedTargetId);
+    if (trackedTarget) {
+      if (isCreatureDead(trackedTarget)) {
+        skipTarget(trackedTarget, "engaged target dead", Date.now(), 500);
+        return null;
+      }
+
+      return trackedTarget;
     }
 
     clearEngagedTarget();
@@ -3396,6 +3723,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     const now = Date.now();
+
+    if (reconcileDeadTargets(now)) {
+      return triggerAttack(now) || true;
+    }
+
     const engagedTarget = getEngagedTarget();
     if (engagedTarget && !shouldTargetCreature(engagedTarget)) {
       skipTarget(engagedTarget, "target does not match configured filters", now, 2000);
@@ -3568,6 +3900,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     getCurrentFollowTarget,
     isCombatActive,
     syncMeleeChase,
+    reconcileDeadTargets,
+    getTrackedCreature,
+    readCreatureHealth,
+    isCreatureDead,
     normalizeHotbarSlot,
     config,
   };

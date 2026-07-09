@@ -67,13 +67,17 @@ window.__minibiaBotBundle.installAutoInvisibleModule = function installAutoInvis
       return false;
     }
 
-    const sent = bot.sendChat(config.spellWords);
-    if (sent) {
+    const castResult = bot.castSpell({ words: config.spellWords });
+    if (castResult.ok) {
       state.lastCastAt = now;
-      bot.log("cast invisible spell", { spellWords: config.spellWords });
+      bot.log("cast invisible spell", {
+        spellWords: config.spellWords,
+        method: castResult.method,
+        sid: castResult.sid ?? null,
+      });
     }
 
-    return sent;
+    return castResult.ok;
   }
 
   function scheduleNextTick() {
