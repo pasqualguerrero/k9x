@@ -1,6 +1,6 @@
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/audio/sound-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/audio/sound-manager.js ===== */
 
 const SoundManager = function(enabled) {
 
@@ -438,7 +438,7 @@ SoundManager.prototype.setVolume = function(id, volume) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/audio/soundbit.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/audio/soundbit.js ===== */
 
 const SoundBit = function(ids) {
 
@@ -474,7 +474,7 @@ SoundBit.prototype.play = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/audio/soundtrace.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/audio/soundtrace.js ===== */
 
 const SoundTrace = function(id) {
 
@@ -556,7 +556,7 @@ SoundTrace.prototype.setVolume = function(volume) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/core/database.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/database.js ===== */
 
 "use strict";
 
@@ -1687,7 +1687,7 @@ Database.prototype.__saveChunk = function (id) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/core/event-queue.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/event-queue.js ===== */
 
 const EventQueue = function() {
 
@@ -1827,7 +1827,7 @@ EventQueue.prototype.__addEvent = function(callback, frame) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/core/game-loop.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/game-loop.js ===== */
 
 const GameLoop = function (frameCallback) {
 
@@ -2025,7 +2025,7 @@ GameLoop.prototype.__loop = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/core/gameclient.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/gameclient.js ===== */
 
 const GameClient = function () {
 
@@ -2323,6 +2323,13 @@ GameClient.prototype.reset = function () {
   // Clear the screen
   this.renderer.screen.clear();
 
+  // Remove the HP/mana arc overlay — a position:fixed canvas on the BODY,
+  // so without this it survives logout and haunts the login screen with
+  // the last-drawn arcs; a fresh Renderer on re-login then stacked a new
+  // one per session (Rotterdam 2026-07-04: 3 arcs + 'als je uitlogt
+  // blijven ze ook staan'). querySelectorAll prunes pre-fix orphans too.
+  document.querySelectorAll("#hp-mana-arc-overlay").forEach(function (el) { el.remove(); });
+
   // Remove all creature characterElements (nameplates, health bars) from the DOM
   // and clear world state so no ghost sprites persist across sessions
   if (this.world) {
@@ -2600,6 +2607,13 @@ GameClient.prototype.isSelf = function (creature) {
 
 GameClient.prototype.handleAcceptLogin = function (packet) {
 
+  // World-enter timestamp for the OTCv8-style container-height restore
+  // window: containers the SERVER re-pushes right after login/reconnect
+  // arrive within seconds of this stamp and restore their saved heights;
+  // anything opened later is a mid-play open and sizes to content instead
+  // (Container.__applyBodyHeightPolicy).
+  this.__gameStartAt = Date.now();
+
   // Re-apply the saved sidebar layout (window-manager localStorage): the
   // construction-time restore covers a refresh, but a same-page logout ->
   // login passes through the disconnect cleanup (closeAll) without ever
@@ -2718,6 +2732,25 @@ GameClient.prototype.handleAcceptLogin = function (packet) {
   // This triggers the start of the game loop
   this.gameLoop.init();
 
+  // Non-PvP world: hide the PK-lock buttons (desktop + mobile) — the
+  // toggle is meaningless and the server ignores it anyway (owner
+  // 2026-07-04). Default (old servers / missing flag) keeps them visible.
+  try {
+    let pvpOn = this.__worldPvp !== false;
+    let pkBtn = document.getElementById("pk-lock-btn");
+    let pkBtnMobile = document.getElementById("mobile-pk-lock-btn");
+    if (pkBtn) pkBtn.style.display = pvpOn ? "" : "none";
+    if (pkBtnMobile) pkBtnMobile.style.display = pvpOn ? "" : "none";
+  } catch (e) { /* cosmetic */ }
+
+  // The setting re-sends below are AUTOMATION (no user gesture — login
+  // handshake finishes >1s after the Enter-Game click), so they must not
+  // be classified as provenance intents: they were stamping up to 4
+  // UNTRUSTED marks on every player at every login, polluting /botcheck
+  // ratios (found in the 2026-07-04 automation audit). Cleared in the
+  // finally below the last re-send block.
+  if (this.networkManager) this.networkManager.__provenanceExempt = true;
+
   // Re-arm the "Show ring/amulet timer" opt-in for this session. The server
   // gates the EQUIPMENT_TIMERS packet on this command, so a pre-feature client
   // (which never sends it) never receives the new opcode. Driven from the
@@ -2760,6 +2793,7 @@ GameClient.prototype.handleAcceptLogin = function (packet) {
       if (st["attack-indicator"] === true) this.send(new ChannelMessagePacket(0x00, 0, "/attackind on"));
     }
   } catch (e) { /* best effort — never break login on this */ }
+  finally { if (this.networkManager) this.networkManager.__provenanceExempt = false; }
 
   // Background-tab fallback ticker. rAF throttles to ~1 Hz when the
   // tab is hidden, freezing eventQueue and starving client-side
@@ -3110,7 +3144,7 @@ GameClient.prototype.__loop = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/core/index.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/index.js ===== */
 
 const CLIENT_VERSION = "0.0.1";
 const SERVER_VERSION = "760";
@@ -3168,7 +3202,7 @@ document.addEventListener("DOMContentLoaded", function DOMContentLoaded() {
 });
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/core/world.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/world.js ===== */
 
 const World = function (width, height, depth) {
 
@@ -3378,6 +3412,15 @@ World.prototype.addCreature = function (creature) {
    * Function GameClient.addCreature
    * Adds a creature to the gameworld
    */
+
+  // A state packet (re)introduced this id — reset the unknown-CID heal
+  // budget. Without this, a player stair-hopping in and out of view
+  // burned their 3 chunk-request retries across a few cycles and then
+  // went permanently invisible to bystanders (the give-up backstop is
+  // meant for chronic server-side orphans, not legit re-introductions).
+  if (this.__unknownCidMisses && creature.id !== undefined) {
+    this.__unknownCidMisses.delete(creature.id);
+  }
 
   let tile = this.getTileFromWorldPosition(creature.getPosition());
 
@@ -4484,7 +4527,7 @@ World.prototype.prefetchSecondRing = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/chunk.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/chunk.js ===== */
 
 const Chunk = function (id, position, tiles) {
 
@@ -5112,7 +5155,7 @@ Chunk.prototype.__isOpenDoorCid = function (cid) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/condition.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/condition.js ===== */
 
 const ConditionManager = function (player, conditions) {
 
@@ -5216,7 +5259,7 @@ ConditionManager.prototype.PZ_LOCK = 19;
 ConditionManager.prototype.CAPTCHA_FREEZE = 20;
 ConditionManager.prototype.HUNT_FREEZE = 21;
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/container.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/container.js ===== */
 
 const Container = function (properties) {
 
@@ -5325,9 +5368,27 @@ Container.prototype.createDOM = function (title, items) {
   // container. Deferred (setTimeout 0) because the "minimize" event fires
   // BEFORE InteractiveWindow.minimize() toggles, so reading the state on the
   // next tick captures the post-toggle truth.
+  let self = this;
   this.window.on("minimize", function () {
     setTimeout(function () {
-      try { gameClient.interface.windowManager.saveContainerGeometry(); } catch (e) {}
+      try {
+        if (self.window && self.window.isMinimized()) {
+          // Just MINIMIZED: the body keeps its inline height (only display
+          // is hidden) — snapshot it so the expand below can restore the
+          // exact pre-minimize size (OTCv8 keeps height across minimize).
+          let body = self.window.getElement(".body");
+          let h = body ? parseInt(body.style.height, 10) : NaN;
+          if (isFinite(h)) {
+            gameClient.interface.windowManager.saveContainerHeight(self.__restoreKey(), h);
+          }
+        } else if (self.window) {
+          // Just EXPANDED: setElementVisible cleared the inline height which
+          // used to spring the bag to full height — re-apply the snapshot
+          // (isOpen false: no game-start gate, no clearing).
+          self.__applyBodyHeightPolicy(false);
+        }
+        gameClient.interface.windowManager.saveContainerGeometry();
+      } catch (e) {}
     }, 0);
   });
 
@@ -5351,6 +5412,11 @@ Container.prototype.createDOM = function (title, items) {
   // Add the items to the slots
   this.addItems(items);
 
+  // OTCv8 sizing — AFTER addItems so the content-fit sees the filled slots:
+  // login/reconnect re-push restores the saved height, mid-play opens size
+  // to content (isOpen = true engages the game-start gate + clear rule).
+  this.__applyBodyHeightPolicy(true);
+
   // Restore the saved minimized (collapsed) state — best-effort; on any failure
   // the window simply opens fully expanded (today's behavior).
   if (__savedGeom && __savedGeom.minimized) {
@@ -5360,6 +5426,23 @@ Container.prototype.createDOM = function (title, items) {
         this.window.setElementHidden(__minBtn);
       }
     } catch (e) { /* leave expanded */ }
+  }
+
+}
+
+Container.prototype.applyLootChips = function (map) {
+
+  /*
+   * Function Container.applyLootChips
+   * Loot router: paints/clears the 4-letter name chips for this window's
+   * slots from the BAG_NAMES payload ({ slotIndex: name }).
+   */
+
+  for (let i = 0; i < this.slots.length; i++) {
+    let slot = this.slots[i];
+    if (slot && typeof slot.setLootChip === "function") {
+      slot.setLootChip(map && map[i] ? map[i] : null);
+    }
   }
 
 }
@@ -5617,6 +5700,120 @@ Container.prototype.getSlotItem = function (index) {
 
 }
 
+// Restore window after world enter (handleAcceptLogin stamps __gameStartAt)
+// inside which an opening container counts as the server's login/reconnect
+// re-push and restores its saved height. OTCv8 uses 1000ms from game start;
+// we allow more because our initial packet burst can drain late (hidden-tab
+// queue, slow links) — the rule's INTENT is "the login re-push restores,
+// mid-play opens don't", and manual opens within seconds of login are rare.
+Container.prototype.GAME_START_RESTORE_MS = 5000;
+
+Container.prototype.__restoreKey = function () {
+
+  /*
+   * Function Container.__restoreKey
+   * OTCv8-equivalent window identity for the height store. OTC keys settings
+   * by container:getId() — a SMALL, REUSED protocol slot id. Our server-side
+   * container ids are assignUID() guids, re-minted on every login (items are
+   * re-instantiated from the character save), so they can never match across
+   * sessions — and keying on them would also grow localStorage without bound.
+   * The OPEN-ORDER index is the stable equivalent: the server's login replay
+   * (restoreOpenedPaths / the live reconnect re-push) re-opens containers in
+   * their saved order, so "the k-th open container" is the same bag before
+   * and after a relog. Same aliasing-on-close as OTCv8's reused slot ids;
+   * the mid-play clear rule bounds any staleness. handleContainerOpen calls
+   * us BEFORE player.openContainer adds this container to the Set — the
+   * not-found case returns the index we are about to occupy (the Set size).
+   */
+
+  let index = 0;
+  let found = -1;
+  let self = this;
+  gameClient.player.__openedContainers.forEach(function (c) {
+    if (c === self) found = index;
+    index++;
+  });
+
+  return (found >= 0) ? found : index;
+
+};
+
+Container.prototype.__applyBodyHeightPolicy = function (isOpen) {
+
+  /*
+   * Function Container.__applyBodyHeightPolicy
+   * DESKTOP body height — OTCv8's container sizing, copied (owner 2026-07-06:
+   * "lets fully copy theirs its the gold standard"):
+   *   - a container opening within GAME_START_RESTORE_MS of world enter (the
+   *     server re-pushing your containers on login/reconnect) restores its
+   *     saved per-session-id height — a relog looks exactly like you left it
+   *     (Deadlymage: "bags retaining their size after disconnects/rejoins");
+   *   - any other open CLEARS that memory (OTCv8 clearSettings) and opens
+   *     CONTENT-FITTED: max(1, ceil(filledSlots / 4)) rows — OTCv8's
+   *     filledLines — so a bag with 2 items takes 1 row, not the full bag;
+   *   - expand-from-minimize (isOpen false) re-applies the saved height
+   *     (snapshotted on minimize) without the game-start gate and without
+   *     clearing, so collapsing and expanding never loses the size.
+   * Heights are clamped to [1 row, min(full rows, 33% viewport)] — OTCv8
+   * clamps [1 row, full rows]; the 33% viewport cap is ours (__handleMove's
+   * resize cap) because our sidebar columns don't scroll like OTC panels.
+   * Mobile keeps its tabbed panels (this.window == null → no-op).
+   */
+
+  if (!this.window) {
+    return;
+  }
+
+  let body = this.window.getElement(".body");
+  if (!body) {
+    return;
+  }
+
+  let fullRows = Math.ceil(this.size / 4);
+  let height = null;
+
+  try {
+    let wm = gameClient.interface.windowManager;
+    if (isOpen) {
+      let withinStart = (typeof gameClient !== "undefined" && gameClient.__gameStartAt
+        && (Date.now() - gameClient.__gameStartAt) < this.GAME_START_RESTORE_MS);
+      if (withinStart) {
+        height = wm.loadContainerHeight(this.__restoreKey());
+      } else {
+        wm.clearContainerHeight(this.__restoreKey());
+      }
+    } else {
+      // Expand-from-minimize: plain re-apply of whatever is saved.
+      height = wm.loadContainerHeight(this.__restoreKey());
+    }
+  } catch (e) { height = null; }
+
+  if (height === null) {
+    // Content-fitted default (OTCv8 filledLines): as many rows as have items.
+    let filled = 0;
+    this.slots.forEach(function (slot) {
+      if (slot && slot.item) filled++;
+    });
+    height = Math.max(1, Math.ceil(filled / 4)) * 34;
+  }
+
+  let cap = Math.min(fullRows * 34, Math.floor(window.innerHeight * 0.33));
+  height = Math.max(34, Math.min(height, cap));
+
+  body.style.height = height + "px";
+
+  // Mirror the resize drag's padding rule: at the one-row minimum the
+  // vertical padding is zeroed so the body equals exactly one slot row.
+  if (height <= 34) {
+    body.style.paddingTop = "0";
+    body.style.paddingBottom = "0";
+  } else {
+    body.style.paddingTop = "";
+    body.style.paddingBottom = "";
+  }
+
+}
+
 Container.prototype.createBodyContent = function (size) {
 
   /*
@@ -5631,13 +5828,20 @@ Container.prototype.createBodyContent = function (size) {
   body.innerHTML = "";
 
   // Set a limit to the container height based on the number of slots
-  body.style.maxHeight = Math.ceil(size / 4) * 34 + "px";
+  let fullRows = Math.ceil(size / 4);
+  body.style.maxHeight = fullRows * 34 + "px";
   // Body inline min-height must match (or be less than) the resize floor in
   // window-manager.js — otherwise the resize JS clamps style.height down to
   // 34 but this min-height inflates the actual content area back up. 34
   // matches one slot row's content height (32 content + 2 border).
   body.style.minHeight = "34px";
-  body.style.height = "100%";
+  // DESKTOP height is applied in createDOM AFTER addItems — the OTCv8
+  // content-fit needs the filled slot count, and slots are still empty here
+  // (see __applyBodyHeightPolicy). Mobile keeps 100% — its tabbed panels
+  // size themselves.
+  if (!this.window) {
+    body.style.height = "100%";
+  }
 
   // Create the requested number of slots in the backpack
   for (let i = 0; i < size; i++) {
@@ -5958,7 +6162,7 @@ Container.prototype.__enableDepotTouchDrag = function (element) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/creature.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/creature.js ===== */
 
 const Creature = function (data) {
 
@@ -6007,11 +6211,16 @@ const Creature = function (data) {
   this.castingManager = new CastingManager();
 
   // Internal information
-  this.spriteBuffer = new SpriteBuffer(this.outfit.getSpriteBufferSize(this.outfit.getDataObject()));
+  // Shared per-signature buffer (sprite-buffer.js): identical outfits reuse
+  // one composed sprite set — re-introduced creatures and same-species packs
+  // stop recomposing on phones (stair-hop crowd lag, 2026-07-08).
+  this.spriteBuffer = SpriteBuffer.acquireShared("o:" + this.outfit.getSignature(),
+    this.outfit.getSpriteBufferSize(this.outfit.getDataObject()));
 
   // If the creature has mount create a sprite buffer for its outfit
   if (this.outfit.getDataObjectMount()) {
-    this.spriteBufferMount = new SpriteBuffer(this.outfit.getSpriteBufferSize(this.outfit.getDataObjectMount()));
+    this.spriteBufferMount = SpriteBuffer.acquireShared("m:" + this.outfit.getSignature(),
+      this.outfit.getSpriteBufferSize(this.outfit.getDataObjectMount()));
   }
 
   // Cached at outfit-set time so per-frame setTextPosition calls don't
@@ -6289,22 +6498,24 @@ Creature.prototype.serverSetOutfit = function (outfit) {
   let __oldMount = this.spriteBufferMount;
 
   // Clear the outfit sprite buffer to make room for the new sprite
-  this.spriteBuffer = new SpriteBuffer(this.outfit.getSpriteBufferSize(this.outfit.getDataObject()));
+  this.spriteBuffer = SpriteBuffer.acquireShared("o:" + this.outfit.getSignature(),
+    this.outfit.getSpriteBufferSize(this.outfit.getDataObject()));
 
   // If there is a mount: add a sprite buffer for the mounts as well
   if (this.outfit.getDataObjectMount()) {
-    this.spriteBufferMount = new SpriteBuffer(this.outfit.getSpriteBufferSize(this.outfit.getDataObjectMount()));
+    this.spriteBufferMount = SpriteBuffer.acquireShared("m:" + this.outfit.getSignature(),
+      this.outfit.getSpriteBufferSize(this.outfit.getDataObjectMount()));
   }
 
   // Free the replaced buffers' textures. The main buffer is always replaced;
   // the mount buffer only when the new outfit actually has a mount — on a
   // dismount the old mount buffer stays the live reference (freed later, on the
   // next mount change or on despawn) so we never free something still drawn.
-  if (__oldBuffer && typeof __oldBuffer.destroy === "function") {
-    __oldBuffer.destroy();
+  if (__oldBuffer) {
+    SpriteBuffer.releaseShared(__oldBuffer);
   }
-  if (__oldMount && __oldMount !== this.spriteBufferMount && typeof __oldMount.destroy === "function") {
-    __oldMount.destroy();
+  if (__oldMount && __oldMount !== this.spriteBufferMount) {
+    SpriteBuffer.releaseShared(__oldMount);
   }
 
   // Recompute displacement cache — outfit may have flipped between
@@ -6579,8 +6790,13 @@ Creature.prototype.moveTo = function (position, speed) {
   // Stamp walk-animation start on rest→walk transition. Chained moves
   // keep the existing timestamp so the leg-cycle animation continues
   // across tile boundaries instead of resetting to standing per-tile.
-  // Player only — other creatures keep legacy per-tile animation.
-  if (this === gameClient.player && this.__walkAnimStart === null) {
+  // ALL creatures since 2026-07-06 (was player-only): monsters/others on
+  // the legacy per-tile fraction path restarted their leg cycle at every
+  // tile edge — the "marching in place" look on slow monsters. OTCv8
+  // drives every creature's foot animation off its step duration
+  // (creature.cpp updateWalkAnimation: footDelay = stepDuration /
+  // footAnimPhases); __getWalkingFrame is our equivalent.
+  if (this.__walkAnimStart === null) {
     this.__walkAnimStart = performance.now();
   }
 
@@ -6780,7 +6996,9 @@ Creature.prototype.unlockMovement = function () {
   // in-place walk. A later genuine (non-teleport) stop nulls it normally.
   // Covers keyboard, mobile d-pad and autowalk uniformly (no input-state
   // coupling needed).
-  if (wasTeleport && this === gameClient.player) {
+  // Applies to ALL creatures (2026-07-06, with the all-creature leg cycle):
+  // a monster chasing you down stairs teleports floors the same way.
+  if (wasTeleport) {
     return;
   }
   this.__walkAnimStart = null;
@@ -6922,12 +7140,15 @@ Creature.prototype.__getWalkingFrame = function (frameGroup) {
    * Function Creature.__getWalkingFrame
    * Returns the walking frame of the creature depending on the movement event
    *
-   * Player-only continuous-cycle path. While __walkAnimStart is set
-   * (rest→walk transition stamped it, no rest yet), the leg cycle plays
-   * on real time independent of the per-tile slide fraction. This keeps
-   * the legs moving continuously across tile boundaries instead of
-   * snapping back to phase 0 at every tile, which was making low-speed
-   * walking visibly tile-by-tile.
+   * Continuous-cycle path for ALL creatures (player-only until 2026-07-06).
+   * While __walkAnimStart is set (rest→walk transition stamped it, no rest
+   * yet), the leg cycle plays on real time independent of the per-tile
+   * slide fraction. This keeps the legs moving continuously across tile
+   * boundaries instead of snapping back to phase 0 at every tile, which
+   * was making low-speed walking visibly tile-by-tile — the same
+   * "marching in place" artifact slow MONSTERS had until the player gate
+   * was removed (OTCv8 parity: every creature's foot animation runs off
+   * its own step duration).
    *
    * Cadence is speed-coupled: cycleMs = current step duration. One full
    * leg cycle per tile of walking, so legs move at the same visual rate
@@ -6937,17 +7158,28 @@ Creature.prototype.__getWalkingFrame = function (frameGroup) {
    * Diagonal/floor-change moves naturally elongate the cycle via
    * __lastStepCost.
    */
-  if (this === gameClient.player && this.__walkAnimStart !== null) {
-    let stepDurationFrames = (typeof this.getStepDuration === "function")
-      ? this.getStepDuration(this.getTile())
-      : 14; // ~700ms fallback
-    let tickMs = (gameClient.getTickInterval && gameClient.getTickInterval()) || 50;
-    let cycleMs = Math.max(80, stepDurationFrames * tickMs); // floor at 80ms so god-speed legs don't strobe
+  if (this.__walkAnimStart !== null) {
+    let cycleMs;
+    if (this === gameClient.player && typeof this.getStepDuration === "function") {
+      // Player: predicted step duration (prewalk means the movement event
+      // isn't always the truth for us) — unchanged from the player-only era.
+      let stepDurationFrames = this.getStepDuration(this.getTile());
+      let tickMs = (gameClient.getTickInterval && gameClient.getTickInterval()) || 50;
+      cycleMs = Math.max(80, stepDurationFrames * tickMs); // floor at 80ms so god-speed legs don't strobe
+    } else {
+      // Other creatures: the SERVER dictates each slide's duration via the
+      // movement event (length is ms) — one full leg cycle per tile, with
+      // diagonals/floor changes elongating naturally. 700ms fallback for
+      // the brief window where the stamp exists but the event doesn't.
+      let eventMs = (this.__movementEvent && this.__movementEvent.length) || 700;
+      cycleMs = Math.max(80, eventMs);
+    }
     let elapsed = performance.now() - this.__walkAnimStart;
     return Math.floor((elapsed % cycleMs) / cycleMs * frameGroup.animationLength);
   }
 
-  // Legacy per-tile fraction-based animation (other creatures + fallback)
+  // Legacy per-tile fraction fallback (no stamp yet — e.g. a creature first
+  // rendered mid-slide right after appearing on screen)
   return Math.round((1 - this.getMovingFraction()) * (frameGroup.animationLength - 1));
 
 }
@@ -6971,7 +7203,7 @@ Creature.prototype.__createCharacterElement = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/equipment.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/equipment.js ===== */
 
 const Equipment = function (items) {
 
@@ -7368,7 +7600,7 @@ Equipment.prototype.render = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/friendlist.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/friendlist.js ===== */
 
 const Friendlist = function(friends) {
 
@@ -7633,7 +7865,7 @@ Friendlist.prototype.__nameSort = function(a, b) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/item.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/item.js ===== */
 
 const Item = function(id, count) {
 
@@ -7869,11 +8101,11 @@ Item.prototype.__getCountPattern = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/monster.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/monster.js ===== */
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/outfit.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/outfit.js ===== */
 
 const Outfit = function(outfit) {
 
@@ -8054,6 +8286,40 @@ Outfit.prototype.getColor = function(which) {
 
 }
 
+Outfit.prototype.getColorsNormalized = function() {
+
+  /*
+   * Function Outfit.getColorsNormalized
+   * Returns the head/body/legs/feet colors as a Float32Array(12) of 0-1 RGB
+   * triplets for the GPU outfit-color shader (SpriteBatch.drawMasked).
+   * Byte order mirrors SpriteBuffer.__compose: the low byte multiplies R.
+   * Cached per detail combination — details rarely change on an instance.
+   */
+
+  let details = this.details || { head: 0, body: 0, legs: 0, feet: 0 };
+  let key = details.head | (details.body << 8) | (details.legs << 16) | (details.feet << 24);
+
+  if (this.__normalizedColors !== undefined && this.__normalizedColorsKey === key) {
+    return this.__normalizedColors;
+  }
+
+  let colors = new Float32Array(12);
+  let indices = [details.head, details.body, details.legs, details.feet];
+
+  for (let i = 0; i < 4; i++) {
+    let packed = this.getColor(indices[i]);
+    colors[3 * i + 0] = ((packed >> 0) & 0xFF) / 255;
+    colors[3 * i + 1] = ((packed >> 8) & 0xFF) / 255;
+    colors[3 * i + 2] = ((packed >> 16) & 0xFF) / 255;
+  }
+
+  this.__normalizedColors = colors;
+  this.__normalizedColorsKey = key;
+
+  return colors;
+
+}
+
 // Outfit color options in BGR (LE)
 Outfit.prototype.colors = new Array(
   "0xFFFFFF", "0xBFD4FF", "0xBFE9FF", "0xBFFFFF", "0xBFFFE9", "0xBFFFD4", "0xBFFFBF",
@@ -8077,8 +8343,26 @@ Outfit.prototype.colors = new Array(
   "0x7F0000", "0x7F002A", "0x7F0054", "0x7F007F", "0x55007F", "0x2A007F", "0x00007F"
 ).map(Number);
 
+Outfit.prototype.getSignature = function() {
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/player.js ===== */
+  /*
+   * Function Outfit.getSignature
+   * Canonical string of everything that affects composed outfit PIXELS —
+   * the shared sprite-buffer cache key (verifiedGhost excluded: it only
+   * hides nameplates). Two creatures with equal signatures render from
+   * the same composed sprites.
+   */
+
+  let d = this.details || {};
+  return this.id + "|" + (this.lookTypeEx || 0)
+    + "|" + (d.head | 0) + "," + (d.body | 0) + "," + (d.legs | 0) + "," + (d.feet | 0)
+    + "|" + (this.mount || 0) + "|" + (this.mounted ? 1 : 0)
+    + "|" + (this.addonOne ? 1 : 0) + (this.addonTwo ? 1 : 0);
+
+}
+
+
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/player.js ===== */
 
 const Player = function (data) {
   /*
@@ -8811,7 +9095,7 @@ Player.prototype.__setLookDirection = function (direction) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/skills.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/skills.js ===== */
 
 const Skills = function (skills, vocation) {
 
@@ -9008,7 +9292,7 @@ Skills.prototype.__getRequiredSkillPoints = function (skillType, level) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/slot.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/slot.js ===== */
 
 const Slot = function () {
 
@@ -9030,7 +9314,12 @@ Slot.prototype.setElement = function (element) {
    */
 
   this.element = element;
-  this.canvas = new Canvas(element.firstElementChild, 32, 32);
+  // Bind by TAG/CLASS, never by child position — the loot-chip span is
+  // inserted into this element at runtime, and positional lookups
+  // (firstElementChild/lastElementChild) silently rebind to the wrong
+  // node when siblings appear (2026-07-04: canvas bound to the chip span
+  // -> items in that window stopped rendering = 'looted item vanished').
+  this.canvas = new Canvas(element.querySelector("canvas"), 32, 32);
 
   // A freshly-assigned canvas is blank → invalidate the render-key cache so the
   // next renderIfChanged() forces a draw. Defensive: today setElement only runs
@@ -9067,6 +9356,30 @@ Slot.prototype.createDOM = function (index) {
 
 
   this.setElement(element);
+
+}
+
+Slot.prototype.setLootChip = function (text) {
+
+  /*
+   * Function Slot.setLootChip
+   * Loot router: shows the first letters of a named bag in the slot's
+   * corner (small font). Null/empty hides the chip.
+   */
+
+  if (!this.element) return;
+  let chip = this.element.querySelector(".loot-chip");
+  if (!text) {
+    if (chip) chip.style.display = "none";
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("span");
+    chip.className = "loot-chip";
+    this.element.appendChild(chip);
+  }
+  chip.textContent = String(text).slice(0, 4);
+  chip.style.display = "";
 
 }
 
@@ -9263,7 +9576,8 @@ Slot.prototype.setCountString = function (count) {
    * Sets the count DOM element to the passed value
    */
 
-  this.element.lastElementChild.textContent = count;
+  let countEl = this.element.querySelector(".count");
+  if (countEl) countEl.textContent = count;
 
 }
 
@@ -9279,7 +9593,7 @@ Slot.prototype.isEmpty = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/spellbook.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/spellbook.js ===== */
 
 "use strict";
 
@@ -9471,7 +9785,7 @@ Spellbook.prototype.__unlockSpell = function (id) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/state.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/state.js ===== */
 
 "use strict";
 
@@ -9534,7 +9848,7 @@ State.prototype.__createPattern = function(key, callback) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/thing.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/thing.js ===== */
 
 const Thing = function (id) {
 
@@ -9829,7 +10143,7 @@ Thing.prototype.__generateExtendedDurations = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/entities/tile.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/tile.js ===== */
 
 // Wall-mounted CIDs that need __parent set on construction so
 // Item.__getHangablePattern can pick the wall-sprite variant after
@@ -10397,7 +10711,7 @@ Tile.prototype.getPattern = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/input/gamepad.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/gamepad.js ===== */
 
 const GamepadHandler = function () {
 
@@ -11425,7 +11739,7 @@ GamepadHandler.prototype.__startBindingPoll = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/input/input-provenance.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/input-provenance.js ===== */
 
 "use strict";
 
@@ -11509,7 +11823,7 @@ GamepadHandler.prototype.__startBindingPoll = function () {
 })();
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/input/keyboard.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/keyboard.js ===== */
 
 const Keyboard = function () {
   /*
@@ -11538,6 +11852,19 @@ const Keyboard = function () {
 
   // An object that contains the actively pressed keys
   this.__activeKeys = new Set();
+
+  // Has THIS OS/keyboard ever produced a key auto-repeat (a keydown with
+  // event.repeat === true)? The movement deadman below uses "no keyboard
+  // input for a while" as its "the walk is unattended" signal — but that
+  // is only valid if the OS actually auto-repeats a held key. Some setups
+  // (key-repeat disabled in OS accessibility, or a very slow repeat rate)
+  // send ONE keydown for a genuine hold, which the deadman then mistook
+  // for a stranded key and force-stopped the walk after ~3s (player
+  // report 2026-07-05: held key stops, re-press to resume). Self-calibrate:
+  // until we've SEEN an auto-repeat, silence proves nothing about a held
+  // key, so the silence-based force-stops are suppressed (blur/focus
+  // clearing + the mash-trigger still cover a truly stranded key).
+  this.__sawAutoRepeat = false;
 
   // Movement deadman's switch — see __checkMovementDeadman. A genuinely
   // held key auto-repeats (constant keydowns); the "stuck force-walking
@@ -11878,7 +12205,13 @@ Keyboard.prototype.__checkMovementDeadman = function () {
   // Clearing KEY STATE (setInactive — same as alt-tab blur) is safe during
   // a legit chase/autowalk: neither is driven by __activeKeys, while the
   // stranded key is exactly what injects the phantom direction.
-  if (this.__activeKeys.size > 0
+  // Gated on __sawAutoRepeat: with a key HELD, input silence only means
+  // "stranded" if this OS would otherwise be auto-repeating it. On a
+  // no-repeat OS a genuinely-held key is silent too, so firing here would
+  // force-stop real walking (the reported bug). A truly stranded key on
+  // such a setup is still cleared by blur/focus/visibility + the mash-trigger.
+  if (this.__sawAutoRepeat
+      && this.__activeKeys.size > 0
       && (nowKeys - this.__lastFreshPressAt) > this.MOVEMENT_DEADMAN_ARM_MS
       && (nowKeys - this.__lastInputAt) > this.MOVEMENT_DEADMAN_SILENCE_MS) {
     this.setInactive();
@@ -11929,6 +12262,14 @@ Keyboard.prototype.__checkMovementDeadman = function () {
   // Armed: a genuinely held key would be auto-repeating by now, so total
   // input silence means nothing real is driving the walk.
   if (now - this.__lastInputAt <= this.MOVEMENT_DEADMAN_SILENCE_MS) {
+    return;
+  }
+
+  // A HELD key on a no-repeat OS is silent yet genuinely driving the walk
+  // (the reported bug) — don't force-stop it on silence alone. A server
+  // sticky-walk with NO key held (__activeKeys empty) is still policed here,
+  // because then the silence is real regardless of the OS's repeat setting.
+  if (this.__activeKeys.size > 0 && !this.__sawAutoRepeat) {
     return;
   }
 
@@ -12658,9 +12999,15 @@ Keyboard.prototype.__handleReturnKey = function (event) {
    * Callback event fired when the return key is pressed
    */
 
-  // If we are typing in a textarea (like book-text-area), allow Enter for newlines
+  // Textareas (the book/letter editor) follow the chat-app convention,
+  // uniform with every other text input: Enter = save & close the modal,
+  // SHIFT+Enter = insert a newline (Ctrl/Cmd+Enter also saves).
   if (document.activeElement && document.activeElement.tagName === "TEXTAREA") {
-    return; // Let the default behavior happen (insert newline)
+    if (event.shiftKey || !gameClient.interface.modalManager.isOpened()) {
+      return; // Let the default behavior happen (insert newline)
+    }
+    event.preventDefault();
+    return gameClient.interface.modalManager.handleConfirm();
   }
 
   // Mobile chat: if the mobile chat input is focused, let its send button handle it
@@ -12762,6 +13109,12 @@ Keyboard.prototype.__keyDown = function (event) {
    * Function Keyboard.__keyDown
    * Callback event fired when key is pressed
    */
+
+  // Learn whether this OS auto-repeats held keys (see __sawAutoRepeat).
+  // Any repeat on any key proves it — auto-repeat is a global OS behavior.
+  if (event.repeat) {
+    this.__sawAutoRepeat = true;
+  }
 
   // Guard: handler may fire on the login screen before the game client
   // has been instantiated (user mashes keys before character select).
@@ -13402,7 +13755,7 @@ Keyboard.prototype.__keyUp = function (event) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/input/mouse.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/mouse.js ===== */
 
 "use strict";
 
@@ -14171,6 +14524,24 @@ Mouse.prototype.use = function (object) {
     }
   }
 
+  // Mobile: same context rule for the floating "Open in Window" panel — a
+  // container opened FROM a float-panel-hosted container stays in the float
+  // panel (owner report 2026-07-06: a backpack opened inside the float
+  // window landed in the corner tab panel). Parent ownership is disjoint
+  // across panels, so this can never stamp together with the depot flag.
+  if (gameClient.touch && gameClient.touch.isMobileMode
+      && gameClient.touch.mobileFloatPanel
+      && item !== null && item.isContainer && item.isContainer()
+      && object.which && typeof object.which.__containerId === "number"
+      && gameClient.touch.mobileFloatPanel.__containers.has(object.which.__containerId)) {
+    gameClient.__nextOpenInFloatPanel = true;
+    clearTimeout(gameClient.__nextOpenInFloatPanelTimeout);
+    gameClient.__nextOpenInFloatPanelTimeout = setTimeout(function () {
+      gameClient.__nextOpenInFloatPanel = false;
+      gameClient.__nextOpenInFloatPanelTimeout = null;
+    }, 2000);
+  }
+
   // Premium scroll (SID 9901) — ask for confirmation before consuming
   if (item !== null && item.sid === 9901) {
     let modal = gameClient.interface.modalManager.open("confirm-modal", function() {
@@ -14857,6 +15228,33 @@ Mouse.prototype.__handleContextMenu = function (event) {
       }
     }
 
+    // Containers on the ground get explicit "Open" / "Open in New Window"
+    // entries (player report 2026-07-08: trunks had NO open option — the
+    // "use" action deliberately sends ROTATE for rotatable containers like
+    // trunks/dressers, so nothing in the menu opened them). For rotatable
+    // containers the "use" button relabels to "Rotate"; for plain
+    // containers it hides ("Open" covers it).
+    let openBtn = menu.element.querySelector("button[action=open]");
+    let openWinBtn = menu.element.querySelector("button[action=open-window]");
+    let useBtn = menu.element.querySelector("button[action=use]");
+    if (openBtn) openBtn.style.display = "none";
+    if (openWinBtn) openWinBtn.style.display = "none";
+    if (useBtn) { useBtn.style.display = ""; useBtn.innerHTML = "Use"; }
+    if (tile !== null && tile.which.items && tile.which.items.length > 0) {
+      let topItem = tile.which.peekItem(0xFF);
+      if (topItem && topItem.isContainer && topItem.isContainer()) {
+        if (openBtn) openBtn.style.display = "";
+        if (openWinBtn) openWinBtn.style.display = "";
+        if (useBtn) {
+          if (topItem.isRotateable && topItem.isRotateable()) {
+            useBtn.innerHTML = "Rotate";
+          } else {
+            useBtn.style.display = "none";
+          }
+        }
+      }
+    }
+
     // Show "Message" button when a player is on the tile
     let messageBtn = menu.element.querySelector("button[action=message]");
     if (messageBtn) {
@@ -14982,7 +15380,7 @@ Mouse.prototype.__handleSlotContextMenu = function (event) {
       clearTimeout(gameClient.__forceOpenAfterCloseTimeout);
       gameClient.__forceOpenAfterCloseTimeout = setTimeout(function() {
         gameClient.__forceOpenAfterClose = null;
-      }, 300);
+      }, 1500);   // latency-tolerant; safe because handleContainerOpen clears it on a successful open
     }
     return this.use(slotObject);
   }
@@ -15002,6 +15400,13 @@ Mouse.prototype.__handleSlotContextMenu = function (event) {
     }
   }
 
+  // "Open in Window" is the MOBILE long-press route to the floating panel —
+  // never shown on the desktop menu (the same menu element is shared).
+  let openWindowBtn = menu.element.querySelector("button[action=open-window]");
+  if (openWindowBtn) {
+    openWindowBtn.style.display = "none";
+  }
+
   // Show "Open Here" for container items inside another container (bags/backpacks only).
   // Label flips based on the "open-containers-same-window" setting — it's always the
   // *override* action, opposite of whatever the direct right-click default is.
@@ -15013,6 +15418,26 @@ Mouse.prototype.__handleSlotContextMenu = function (event) {
       let settings = gameClient.interface && gameClient.interface.settings;
       let sameWindow = settings && settings.__state && settings.__state["open-containers-same-window"];
       openHereBtn.innerHTML = sameWindow ? "Open in new window" : "Open Here";
+    }
+  }
+
+  // Loot router: "Set Name" on any container item; "Clear Name" only when
+  // the slot currently shows a name chip (client-known via /bagnames).
+  let setNameBtn = menu.element.querySelector("button[action=set-name]");
+  let clearNameBtn = menu.element.querySelector("button[action=clear-name]");
+  if (setNameBtn) setNameBtn.style.display = "none";
+  if (clearNameBtn) clearNameBtn.style.display = "none";
+  if (item !== null && item.isContainer() && setNameBtn) {
+    let parentCid = slotObject.which ? slotObject.which.__containerId : undefined;
+    // Only offer naming inside the player's own equipment tree — the server
+    // marks each open window (corpse/depot/ground windows are excluded).
+    let ok = gameClient.__bagNameable && gameClient.__bagNameable[parentCid] === true;
+    if (ok) {
+      setNameBtn.style.display = "";
+      let known = gameClient.__bagNames && gameClient.__bagNames[parentCid];
+      if (clearNameBtn && known && known[slotObject.index]) {
+        clearNameBtn.style.display = "";
+      }
     }
   }
 
@@ -15864,7 +16289,7 @@ Mouse.COOKABLE_SIDS = {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/input/pathfinder.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/pathfinder.js ===== */
 
 const Pathfinder = function () {
 
@@ -17184,7 +17609,7 @@ Pathfinder.prototype.searchMinimap = function (fromPos, toPos) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/input/touch.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/touch.js ===== */
 
 "use strict";
 
@@ -17644,6 +18069,9 @@ Touch.prototype.__initialize = function () {
         this.mobileDepotPanel.__resetPositionOnHide = true;
     }
     this.__enableDepotPanelDragAndCenter();
+    // Floating "Open in Window" panel (long-press menu) — created lazily by
+    // getContainerPanelFor on first use, like the tablet second panel.
+    this.mobileFloatPanel = null;
 
     // Mobile chat system (dedicated quick bar + full log)
     this.mobileChat = new MobileChat(this);
@@ -17854,6 +18282,10 @@ Touch.prototype.__cleanup = function () {
         this.mobileDepotPanel.clear();
         this.mobileDepotPanel = null;
     }
+    if (this.mobileFloatPanel) {
+        this.mobileFloatPanel.clear();
+        this.mobileFloatPanel = null;
+    }
 
 }
 
@@ -17893,6 +18325,32 @@ Touch.prototype.getContainerPanelFor = function (containerId) {
     }
     if (this.mobileContainerPanel2 && this.mobileContainerPanel2.__containers.has(containerId)) {
         return this.mobileContainerPanel2;
+    }
+    if (this.mobileFloatPanel && this.mobileFloatPanel.__containers.has(containerId)) {
+        return this.mobileFloatPanel;
+    }
+
+    // Explicit "Open in Window" from the long-press menu: route this open
+    // into the floating centered panel (depot-style — shares its CSS and
+    // drag/center/close wiring). One-shot flag stamped by ContainerMenu,
+    // consumed here; lazy-instantiate the panel on first use.
+    if (gameClient.__nextOpenInFloatPanel === true) {
+        gameClient.__nextOpenInFloatPanel = false;
+        if (gameClient.__nextOpenInFloatPanelTimeout) {
+            clearTimeout(gameClient.__nextOpenInFloatPanelTimeout);
+            gameClient.__nextOpenInFloatPanelTimeout = null;
+        }
+        if (!this.mobileFloatPanel && document.getElementById("mobile-float-panel")) {
+            this.mobileFloatPanel = new MobileContainerPanel("mobile-float-panel", "floatcontainer");
+            // Close → reopen re-centers, exactly like the depot panel.
+            this.mobileFloatPanel.__resetPositionOnHide = true;
+            this.__enablePanelDragAndCenter("mobile-float-panel", ".float-panel-close", "float-center", function () {
+                return gameClient.touch ? gameClient.touch.mobileFloatPanel : null;
+            });
+        }
+        if (this.mobileFloatPanel) {
+            return this.mobileFloatPanel;
+        }
     }
 
     // Depot itself OR a sub-container opened from depot-context → depot panel
@@ -18871,6 +19329,31 @@ Touch.prototype.__openSlotContextMenu = function (slotObject, touch) {
         tradeBtn.style.display = "none";
         if (item !== null && item.isPickupable()) {
             tradeBtn.style.display = "";
+        }
+    }
+
+    // Mobile-only "Open in Window": route the container into the floating
+    // centered panel (depot-style) instead of the corner tab panel.
+    let openWindowBtn = menu.element.querySelector("button[action=open-window]");
+    if (openWindowBtn) {
+        openWindowBtn.style.display = (item !== null && item.isContainer()) ? "" : "none";
+    }
+
+    // Loot router Set/Clear Name — mirror desktop Mouse.__handleContextMenu:
+    // container items in windows the server marked nameable (equipment tree).
+    let setNameBtn = menu.element.querySelector("button[action=set-name]");
+    let clearNameBtn = menu.element.querySelector("button[action=clear-name]");
+    if (setNameBtn) setNameBtn.style.display = "none";
+    if (clearNameBtn) clearNameBtn.style.display = "none";
+    if (item !== null && item.isContainer() && setNameBtn) {
+        let parentCid = slotObject.which ? slotObject.which.__containerId : undefined;
+        let ok = gameClient.__bagNameable && gameClient.__bagNameable[parentCid] === true;
+        if (ok) {
+            setNameBtn.style.display = "";
+            let known = gameClient.__bagNames && gameClient.__bagNames[parentCid];
+            if (clearNameBtn && known && known[slotObject.index]) {
+                clearNameBtn.style.display = "";
+            }
         }
     }
 
@@ -21530,23 +22013,37 @@ Touch.prototype.__enableDepotPanelDragAndCenter = function () {
      * inline styles so the CSS default takes over.
      */
 
-    let panel = document.getElementById("mobile-depot-panel");
+    this.__enablePanelDragAndCenter("mobile-depot-panel", ".depot-panel-close", "depot-center", function () {
+        return gameClient.touch ? gameClient.touch.mobileDepotPanel : null;
+    });
+
+};
+
+Touch.prototype.__enablePanelDragAndCenter = function (panelDomId, closeSelector, centerAction, getPanel) {
+
+    /*
+     * Function Touch.__enablePanelDragAndCenter
+     * Generic floating-panel chrome: close-all button, recenter button and
+     * header touch-drag. Extracted from the depot-only version so the
+     * "Open in Window" float panel gets identical behaviour (2026-07-06).
+     */
+
+    let panel = document.getElementById(panelDomId);
     if (!panel) return;
     let header = panel.querySelector(".mobile-panel-header");
     if (!header) return;
 
-    // Close button — cascades through every tab in the depot panel so
-    // the whole window goes away in one tap (mirrors closing the Depot
-    // tab itself, which the cascade-close in MobileContainerPanel
-    // already handles).
-    let closeBtn = header.querySelector(".depot-panel-close");
+    // Close button — cascades through every tab in the panel so the
+    // whole window goes away in one tap (mirrors closing the tab itself,
+    // which the cascade-close in MobileContainerPanel already handles).
+    let closeBtn = header.querySelector(closeSelector);
     if (closeBtn) {
         let closeAll = function (e) {
             if (e) { e.preventDefault(); e.stopPropagation(); }
-            let depotPanel = gameClient.touch && gameClient.touch.mobileDepotPanel;
-            if (!depotPanel) return;
+            let hostPanel = getPanel ? getPanel() : null;
+            if (!hostPanel) return;
             let toClose = [];
-            depotPanel.__containers.forEach(function (_entry, cid) { toClose.push(cid); });
+            hostPanel.__containers.forEach(function (_entry, cid) { toClose.push(cid); });
             toClose.forEach(function (cid) {
                 let c = gameClient.player.getContainer(cid);
                 if (c) gameClient.player.closeContainer(c);
@@ -21557,11 +22054,11 @@ Touch.prototype.__enableDepotPanelDragAndCenter = function () {
     }
 
     // Center button — inserted next to the existing minimize button so the
-    // header reads: minimize | center | "Depot".
-    if (!header.querySelector('button[action="depot-center"]')) {
+    // header reads: minimize | center | title.
+    if (!header.querySelector('button[action="' + centerAction + '"]')) {
         let centerBtn = document.createElement("button");
         centerBtn.className = "symbol-button small";
-        centerBtn.setAttribute("action", "depot-center");
+        centerBtn.setAttribute("action", centerAction);
         centerBtn.title = "Center";
         centerBtn.textContent = "⌖"; // position-indicator glyph
         let minBtn = header.querySelector(".mobile-panel-minimize");
@@ -22542,7 +23039,7 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/launcher.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/launcher.js ===== */
 
 "use strict";
 
@@ -22675,6 +23172,8 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
     "src/ui/modals/modal-ignore.js",
     "src/ui/modals/modal-party-info.js",
     "src/ui/modals/modal-task-info.js",
+    "src/ui/modals/modal-character.js",
+    "src/ui/modals/modal-automations.js",
     "src/ui/modals/modal-spawn-map.js",
     "src/ui/modals/modal-menu.js",
     "src/ui/modals/modal-games.js",
@@ -23335,6 +23834,12 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
     // still loads the file instead of white-screening.
     let buster = window.__CLIENT_BUILD || "dev";
     script.src = (attempt === 0) ? ("/b/" + buster + "/" + src) : (src + "?v=" + buster);
+    // Unmute error.stack for window.onerror: without crossOrigin, a load the
+    // browser classifies cross-origin (e.g. behind a Cloudflare challenge
+    // redirect) reports "Script error." with NO stack — clienterror.log then
+    // can't name the crash site (Opus 2026-07-06). Same-origin loads are
+    // unaffected; the static server sends Access-Control-Allow-Origin.
+    script.crossOrigin = "anonymous";
     script.onload = () => loadNextScript(index + 1, 0);
     script.onerror = () => {
       script.remove();
@@ -23359,7 +23864,7 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
 })();
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/network/network-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/network-manager.js ===== */
 
 // Standard CRC32 (IEEE 802.3 polynomial 0xEDB88320) — table-driven.
 // Used by the frame-CRC probe so the client can cross-reference the
@@ -23444,6 +23949,18 @@ const NetworkManager = function () {
   // no longer used to gate the modal, counter-based now.
   this.__pendingModalTimer = null;
 
+  // Extended budget for NETWORK-class reconnect failures only (the attempt
+  // never reached the server: timed-out login fetch, unreachable host, WS
+  // connect watchdog trip). A wifi roam / cell handoff can take 10-30s to
+  // settle, so these chain further than the 3-attempt budget above — which
+  // stays reserved for server-ANSWERED refusals. See __scheduleNetworkRetry.
+  this.__networkRetryMax = 8;
+
+  // CONNECTING-state watchdog timer for reconnect WS attempts — a socket
+  // opened mid-roam can hang in CONNECTING for 60s+ without firing close,
+  // which would stall the silent-retry chain. See __armConnectWatchdog.
+  this.__connectWatchdogTimer = null;
+
   // Periodic heartbeat via Web Worker (not throttled in background tabs)
   this.__heartbeatWorker = null;
   this.__heartbeatTimeout = null;
@@ -23475,6 +23992,15 @@ const NetworkManager = function () {
   window.addEventListener("online", this.__handleOnline.bind(this));
   window.addEventListener("offline", this.__handleOffline.bind(this));
 
+  // Network Information API (Chromium — Safari lacks navigator.connection,
+  // so the listener simply never attaches there). Same-SSID wifi roams
+  // (channel or 2.4->5GHz band switches) usually do NOT blip online/offline,
+  // but they often DO fire connection.change — see __handleConnectionChange
+  // for the double-evidence fast path that uses it.
+  if (navigator.connection && typeof navigator.connection.addEventListener === "function") {
+    navigator.connection.addEventListener("change", this.__handleConnectionChange.bind(this));
+  }
+
   // Queue for packets received while the tab is hidden (browser throttles game loop)
   this.__packetQueue = [];
   this.__tabHidden = false;
@@ -23487,6 +24013,38 @@ const NetworkManager = function () {
   this.packetHandler = new PacketHandler();
 
 }
+
+NetworkManager.prototype.__requestBagNames = function (onlyIfChipsFor) {
+
+  /*
+   * Function NetworkManager.__requestBagNames
+   * Loot router: debounced /bagnames request — container OPEN/ADD/REMOVE
+   * all shift or rebuild slots, which drops/staleness the name chips.
+   * 150ms debounce coalesces packet bursts (opening a backpack tree).
+   */
+
+  // Gated form: when called with a containerId, skip entirely unless that
+  // window currently displays name chips — no named bags, no traffic.
+  if (onlyIfChipsFor !== undefined && onlyIfChipsFor !== null) {
+    let known = gameClient.__bagNames && gameClient.__bagNames[onlyIfChipsFor];
+    let hasChips = false;
+    for (let k in known) { hasChips = true; break; }
+    if (!hasChips) return;
+  }
+
+  clearTimeout(gameClient.__bagNamesReqT);
+  gameClient.__bagNamesReqT = setTimeout(function () {
+    let cm = gameClient.interface && gameClient.interface.channelManager;
+    if (!cm || typeof cm.sendMessageText !== "function") return;
+    // Automation-origin message: MUST NOT count as a provenance intent
+    // (CHANNEL_MESSAGE is in the intent list because no automation emits
+    // it — this helper is the one exception, so it opts out explicitly).
+    gameClient.networkManager.__provenanceExempt = true;
+    try { cm.sendMessageText("/bagnames", undefined, true); }
+    finally { gameClient.networkManager.__provenanceExempt = false; }
+  }, 400);
+
+};
 
 NetworkManager.prototype.close = function () {
 
@@ -23685,6 +24243,19 @@ NetworkManager.prototype.readPacket = function (packet) {
       return;
     }
 
+    case CONST.PROTOCOL.SERVER.STANCE_STATE: {
+      // Server's authoritative combat stance — adopt it so the offensive/
+      // balanced/defensive (and chase) buttons always show what the combat
+      // formulas actually use. Received as the STANCE_REQUEST reply and as
+      // an echo/ack after every stance change.
+      let fightMode = packet.readUInt8();
+      let chaseMode = packet.readUInt8();
+      if (gameClient.interface && gameClient.interface.fightModeSelector) {
+        gameClient.interface.fightModeSelector.adoptServerStance(fightMode, chaseMode);
+      }
+      return;
+    }
+
     case CONST.PROTOCOL.SERVER.MAGIC_EFFECT: {
       return this.packetHandler.handleSendMagicEffect(packet.readMagicEffect());
     }
@@ -23694,7 +24265,15 @@ NetworkManager.prototype.readPacket = function (packet) {
     }
 
     case CONST.PROTOCOL.SERVER.CONTAINER_REMOVE: {
-      return this.packetHandler.handleContainerItemRemove(packet.readContainerItemRemove());
+      let cRem = packet.readContainerItemRemove();
+      this.packetHandler.handleContainerItemRemove(cRem);
+      // Only refresh when chips are actually on display for this window —
+      // for the 99% of players with no named bags this stays SILENT
+      // (2026-07-04 tickrate hunt: the unconditional stream was ~1 extra
+      // packet/sec per looting player, each costing 2 idle-lock calls
+      // server-side and polluting the provenance intent counters).
+      this.__requestBagNames(cRem && cRem.containerIndex);
+      return;
     }
 
     case CONST.PROTOCOL.SERVER.CREATURE_STATE: {
@@ -23728,11 +24307,22 @@ NetworkManager.prototype.readPacket = function (packet) {
     }
 
     case CONST.PROTOCOL.SERVER.CONTAINER_OPEN: {
-      return this.packetHandler.handleContainerOpen(packet.readOpenContainer());
+      this.packetHandler.handleContainerOpen(packet.readOpenContainer());
+      this.__requestBagNames();   // loot-router chips (unconditional: first fill)
+      return;
     }
 
     case CONST.PROTOCOL.SERVER.CONTAINER_ADD: {
-      return this.packetHandler.handleContainerAddItem(packet.readContainerItemAdd());
+      let cAdd = packet.readContainerItemAdd();
+      this.packetHandler.handleContainerAddItem(cAdd);
+      // Adding shifts every slot (insert at 0) and the re-render drops the
+      // chip spans — refresh, but ONLY if this window shows chips or the
+      // added thing is itself a container (might be named / inherit).
+      let addedDO = cAdd && gameClient.dataObjects.get(cAdd.itemId);
+      let addedContainer = !!(addedDO && addedDO.flags && addedDO.flags.get(PropBitFlag.prototype.flags.DatFlagContainer));
+      if (addedContainer) this.__requestBagNames();
+      else this.__requestBagNames(cAdd && cAdd.containerId);
+      return;
     }
 
     case CONST.PROTOCOL.SERVER.STATE_PLAYER: {
@@ -24049,6 +24639,35 @@ NetworkManager.prototype.readPacket = function (packet) {
       return;
     }
 
+    case CONST.PROTOCOL.SERVER.BAG_NAMES: {
+      let info = packet.readTaskInfo();   // generic JSON-blob reader
+      let map = (info && info.names) || {};
+      gameClient.__bagNames = map;
+      gameClient.__bagNameable = (info && info.nameable) || {};
+      if (gameClient.player) {
+        gameClient.player.__openedContainers.forEach(function (c) {
+          if (c && typeof c.applyLootChips === "function") {
+            c.applyLootChips(map[c.__containerId] || {});
+          }
+        });
+      }
+      return;
+    }
+
+    case CONST.PROTOCOL.SERVER.CHARACTER_INFO: {
+      let info = packet.readTaskInfo();   // generic JSON-blob reader
+      if (info) {
+        let mgr = gameClient.interface.modalManager;
+        let existing = mgr.get("character-modal");
+        if (mgr.isOpened() && mgr.__openedModal === existing) {
+          existing.handleOpen(info);
+        } else {
+          mgr.open("character-modal", info);
+        }
+      }
+      return;
+    }
+
     case CONST.PROTOCOL.SERVER.TASK_INFO: {
       let info = packet.readTaskInfo();
       if (info) {
@@ -24139,7 +24758,16 @@ NetworkManager.prototype.readPacket = function (packet) {
       // Table (N-player) games carry tableGame=true and render in their own modal;
       // everything else is a 2-player simple game.
       let modalId = (info && info.tableGame) ? "table-game-modal" : "simple-game-modal";
-      let m = gameClient.interface.modalManager.get(modalId);
+      let mgr = gameClient.interface.modalManager;
+      let m = mgr.get(modalId);
+      // Server-initiated lobby push (e.g. the /partygames GM command, an NPC
+      // opening the games window later): OPEN the modal — onState alone
+      // renders into a hidden DOM and 'nothing happens' (owner 2026-07-04).
+      // The open triggers handleOpen -> a fresh lobby request, so we skip
+      // the stale onState below.
+      if (info && info.openModal && mgr.__openedModal !== m) {
+        return mgr.open(modalId, { game: info.game });
+      }
       if (m && info) m.onState(info);
       return;
     }
@@ -24428,7 +25056,9 @@ NetworkManager.prototype.send = function (packet) {
   }
 
   // Input provenance (observe mode — see counters above).
-  switch (buffer[0]) {
+  // Automation-origin sends (auto /bagnames) opt out — they are neither
+  // trusted nor untrusted HUMAN intent and would poison the ratio.
+  switch (this.__provenanceExempt ? -1 : buffer[0]) {
     case CONST.PROTOCOL.CLIENT.TARGET:
     case CONST.PROTOCOL.CLIENT.CAST_SPELL:
     case CONST.PROTOCOL.CLIENT.THING_USE_WITH:
@@ -24595,7 +25225,7 @@ NetworkManager.prototype.createAccount = function (options) {
   fetch("/api/login/create", {
     "method": "POST",
     "headers": { "Content-Type": "application/json" },
-    "body": JSON.stringify({ "account": options.account, "password": options.password, "name": options.name, "sex": options.sex, "referral": options.referral || "" })
+    "body": JSON.stringify({ "account": options.account, "password": options.password, "name": options.name, "sex": options.sex, "referral": options.referral || "", "world": window.__creationWorld || "main" })
   }).then(function (response) {
 
     switch (response.status) {
@@ -24841,6 +25471,7 @@ NetworkManager.prototype.connect = function (pin) {
       "premiumUntil": response.premiumUntil || null,
       "sessionToken": response.sessionToken,
       "host": response.host,
+      "worlds": response.worlds || null,   // multi-world: {id:{name,pvp,online}}
       "hasEmail": response.hasEmail
     });
 
@@ -24954,6 +25585,9 @@ NetworkManager.prototype.connectWithToken = function (token, host) {
   this.socket.onclose = this.__handleClose.bind(this);
   this.socket.onerror = this.__handleError.bind(this);
 
+  // Reconnect attempts only: bound the CONNECTING phase (no-op on fresh logins)
+  this.__armConnectWatchdog(this.socket);
+
 }
 
 NetworkManager.prototype.selectCharacter = function (sessionToken, characterName, host) {
@@ -25051,6 +25685,11 @@ NetworkManager.prototype.selectCharacter = function (sessionToken, characterName
     // Store the character name for reconnect
     this.__lastCharacterName = characterName;
 
+    // Non-PvP world: the PK-lock button is meaningless there — remember the
+    // world's pvp flag so the game UI can hide it (absent field = old
+    // server = assume PvP enabled).
+    gameClient.__worldPvp = response.pvp !== false;
+
     // Show connecting feedback while WebSocket handshake completes
     gameClient.interface.modalManager.open("floater-connecting", "Connecting to Gameworld...");
     this.connectWithToken(response.token, response.host);
@@ -25069,7 +25708,7 @@ NetworkManager.prototype.createCharacterOnAccount = function (sessionToken, name
   fetch("/api/login/create-character", {
     "method": "POST",
     "headers": { "Content-Type": "application/json" },
-    "body": JSON.stringify({ "sessionToken": sessionToken, "name": name, "sex": sex })
+    "body": JSON.stringify({ "sessionToken": sessionToken, "name": name, "sex": sex, "world": window.__creationWorld || "main" })
   }).then(function (response) {
 
     if (response.status === 201) {
@@ -25387,6 +26026,7 @@ NetworkManager.prototype.__handleOAuthMessage = function (event) {
     this.__sessionToken = data.sessionToken;
     this.__lastHost = data.host;
     gameClient.interface.modalManager.open("character-select-modal", {
+      "worlds": data.worlds || null,
       "characters": data.characters,
       "premiumUntil": data.premiumUntil || null,
       "sessionToken": data.sessionToken,
@@ -25394,6 +26034,7 @@ NetworkManager.prototype.__handleOAuthMessage = function (event) {
     });
   } else if (data.type === "oauth_success") {
     // Legacy fallback — connect with the token directly
+    gameClient.__worldPvp = data.pvp !== false;   // PK-button visibility
     this.connectWithToken(data.token, data.host);
   } else if (data.type === "oauth_new_user") {
     // New user — open character creation modal
@@ -25653,6 +26294,9 @@ NetworkManager.prototype.__handleClose = function (event) {
 
   console.log("Disconnected");
 
+  // This socket is done — its CONNECTING watchdog (if any) is moot.
+  this.__clearConnectWatchdog();
+
   // Flush any packets queued while the tab was hidden BEFORE deciding
   // whether to silent-retry. Without this, a ServerErrorPacket sent by
   // the server right before closing the socket sits in __packetQueue —
@@ -25679,6 +26323,15 @@ NetworkManager.prototype.__handleClose = function (event) {
     this.__wasConnected = false;
     if (wasInGame) {
       gameClient.reset();
+    }
+    // Death respawn: interface.reset() (inside gameClient.reset) just closed
+    // the "Reconnecting..." floater the death modal opened, so the player sat
+    // on the login screen with zero feedback until the auto re-login finished
+    // (owner report 2026-07-02). Re-open it AFTER the reset; the login flow
+    // closes/replaces it on success or error like any other login.
+    if (this.__deathReconnectPending) {
+      this.__deathReconnectPending = false;
+      gameClient.interface.modalManager.open("floater-connecting", "Logging in...");
     }
     return;
   }
@@ -25850,6 +26503,9 @@ NetworkManager.prototype.__handleConnection = function (event) {
    * Function NetworkManager.__handleConnection
    * Callback fired when connected to the gameserver
    */
+
+  // Connected — the CONNECTING watchdog for this attempt is moot.
+  this.__clearConnectWatchdog();
 
   // #1 reconnect-lifecycle: if this connect ended a disconnect episode, log how
   // long the gap was (and how many attempts it took). Read BEFORE the resets
@@ -26074,6 +26730,212 @@ NetworkManager.prototype.reconnectNow = function () {
 
 }
 
+// Bound on each reconnect login fetch. During a wifi roam the network is a
+// black hole (packets vanish, nothing errors) — a plain fetch can hang for
+// 60s+ on OS connect retries while the player stares at "Reconnecting...",
+// because the retry chain only advances on an explicit failure.
+NetworkManager.prototype.RECONNECT_FETCH_TIMEOUT_MS = 4000;
+
+// Bound on the CONNECTING phase of a reconnect WebSocket attempt (browsers
+// have no connect timeout of their own — same black-hole hang as above).
+NetworkManager.prototype.WS_CONNECT_TIMEOUT_MS = 5000;
+
+NetworkManager.prototype.__fetchWithTimeout = function (url, options) {
+
+  /*
+   * Function NetworkManager.__fetchWithTimeout
+   * fetch() bounded to RECONNECT_FETCH_TIMEOUT_MS — reconnect path only.
+   * A timed-out attempt rejects with AbortError, which __isNetworkError
+   * classifies as network-level so __scheduleNetworkRetry chains the next
+   * attempt instead of hanging or surfacing the modal.
+   */
+
+  if (typeof AbortController === "undefined") {
+    // Ancient browser: keep the old unbounded behavior rather than break login.
+    return fetch(url, options);
+  }
+
+  let controller = new AbortController();
+  let merged = Object.assign({}, options, { "signal": controller.signal });
+  let timer = setTimeout(function () { controller.abort(); }, this.RECONNECT_FETCH_TIMEOUT_MS);
+
+  return fetch(url, merged).finally(function () {
+    clearTimeout(timer);
+  });
+
+}
+
+NetworkManager.prototype.__isNetworkError = function (err) {
+
+  /*
+   * Function NetworkManager.__isNetworkError
+   * True for reconnect failures where the server never answered: our fetch
+   * timeout (AbortError) or a browser network failure (fetch rejects with
+   * TypeError). Failures the server actually ANSWERED — PIN required,
+   * namelock 451, session expiry, bad credentials — are thrown as plain
+   * Error with a message and stay server-class, keeping their existing
+   * immediate modal/prompt handling.
+   */
+
+  return !!err && (err.name === "AbortError" || err instanceof TypeError);
+
+}
+
+NetworkManager.prototype.__armConnectWatchdog = function (socket) {
+
+  /*
+   * Function NetworkManager.__armConnectWatchdog
+   * RECONNECT attempts only (no-op on fresh logins, which keep browser-
+   * default behavior): if the socket is still CONNECTING after
+   * WS_CONNECT_TIMEOUT_MS, close() it — per spec that fails the connection
+   * attempt and fires the close event, which feeds the EXISTING chained-
+   * retry branch in __handleClose. Without this, a WS opened while the
+   * network is still settling (mid-roam) can sit in CONNECTING for 60s+
+   * and stall the whole retry chain.
+   */
+
+  if (!(this.__reconnecting || this.__silentRetryInFlight)) {
+    return;
+  }
+
+  this.__clearConnectWatchdog();
+
+  let self = this;
+  this.__connectWatchdogTimer = setTimeout(function () {
+    self.__connectWatchdogTimer = null;
+    if (self.socket === socket && socket.readyState === WebSocket.CONNECTING) {
+      try { gameClient.sendDebugImmediate("[reconnect-connect-timeout] after=" + self.WS_CONNECT_TIMEOUT_MS); } catch (e) {}
+      try { socket.close(); } catch (e) {}
+    }
+  }, this.WS_CONNECT_TIMEOUT_MS);
+
+}
+
+NetworkManager.prototype.__clearConnectWatchdog = function () {
+
+  /*
+   * Function NetworkManager.__clearConnectWatchdog
+   * Disarms the pending CONNECTING watchdog (socket opened, closed, or a
+   * newer attempt re-arms it).
+   */
+
+  if (this.__connectWatchdogTimer) {
+    clearTimeout(this.__connectWatchdogTimer);
+    this.__connectWatchdogTimer = null;
+  }
+
+}
+
+NetworkManager.prototype.__scheduleNetworkRetry = function () {
+
+  /*
+   * Function NetworkManager.__scheduleNetworkRetry
+   * A silent reconnect attempt failed at the NETWORK level — the server
+   * never answered (timed-out login fetch / unreachable host). That's the
+   * signature of a wifi roam or cell handoff still settling (owner report
+   * 2026-07-06: same-SSID channel/band switches froze the game), so chain
+   * further attempts with a small backoff up to __networkRetryMax before
+   * surfacing the modal. Server-ANSWERED refusals never route here — they
+   * keep the tight __silentRetryMax budget and their existing handling.
+   * Uses the same __silentRetryTimer/flags as the close-chain, so the
+   * logout cancel path kills this chain too.
+   */
+
+  // Manual (Reconnect button) attempts keep their one-shot semantics —
+  // the modal is up and the user can click again.
+  if (!this.__silentRetryInFlight || this.__intentionalClose) {
+    this.__reconnecting = false;
+    if (!this.__intentionalClose) {
+      this.__showReconnectMessage("Reconnect failed. Try again.");
+    }
+    return;
+  }
+
+  if (this.__silentRetryCount >= this.__networkRetryMax) {
+    try { gameClient.sendDebugImmediate("[reconnect-giveup] n=" + this.__silentRetryCount + " class=network"); } catch (e) {}
+    this.__silentRetryInFlight = false;
+    this.__reconnecting = false;
+    this.__clearReconnectingIndicator();
+    this.__showReconnectMessage("Reconnect failed. Try again.");
+    return;
+  }
+
+  this.__silentRetryCount++;
+  try { gameClient.sendDebugImmediate("[reconnect-fail] n=" + this.__silentRetryCount + " class=network"); } catch (e) {}
+  this.__showReconnectingIndicator();
+
+  // 1s, 2s, then 3s caps — combined with the 4s fetch bound this covers
+  // roughly 30-45s of outage across the budget, well under __RELOAD_AFTER_MS.
+  let delay = Math.min(3000, 1000 * Math.max(1, this.__silentRetryCount - 1));
+
+  let self = this;
+  if (this.__silentRetryTimer) clearTimeout(this.__silentRetryTimer);
+  this.__silentRetryTimer = setTimeout(function () {
+    self.__silentRetryTimer = null;
+    if (!self.__silentRetryInFlight) return;
+    self.__reconnectWithCharacter();
+  }, delay);
+
+}
+
+// Unanswered-ping count at which an OS-reported network change is treated as
+// confirmation the socket died (see __handleConnectionChange). ~3s at 1s
+// cadence — intentionally needs pongs ALREADY missing, never fires alone.
+NetworkManager.prototype.CONNECTION_CHANGE_TRIP_PINGS = 3;
+
+NetworkManager.prototype.__handleConnectionChange = function () {
+
+  /*
+   * Function NetworkManager.__handleConnectionChange
+   * Chromium Network Information API: fires when the browser notices an
+   * interface/estimate change — including many same-SSID wifi roams
+   * (channel or 2.4->5GHz switches) that never blip navigator.onLine, so
+   * the online handler can't help and the half-open socket otherwise waits
+   * the full HALF_OPEN_RECONNECT_PINGS (~9s) before reconnecting.
+   *
+   * Double evidence required before acting, so a healthy link can never
+   * trip: (1) the browser just reported a network change AND (2) pongs
+   * were ALREADY missing for >= CONNECTION_CHANGE_TRIP_PINGS heartbeats
+   * (counted BEFORE the probe below). Then close the zombie socket — the
+   * same two calls as the heartbeat trip — and the existing silent-retry
+   * machinery takes over.
+   *
+   * The trip is DESKTOP-ONLY on purpose: cell handoffs also fire this
+   * event mid-stall, and reconnecting during the stall is exactly what
+   * kicked lossy/LATAM mobile players before the 5->8 bump (d7b05fb0,
+   * Welkyrp/Mercenario — see HALF_OPEN_RECONNECT_PINGS). Mobile keeps the
+   * plain 8-ping path; the only thing it gets here is one extra probe
+   * ping. Hidden tabs never trip (existing policy: no reconnects while
+   * hidden — visibilitychange reconnects on return).
+   */
+
+  if (this.__intentionalClose || this.__reconnecting || this.__silentRetryInFlight) return;
+  if (!this.state || !this.state.connected) return;
+  if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+
+  // Evidence BEFORE the probe — the probe itself bumps __pendingPings.
+  let alreadyMissing = this.__pendingPings;
+
+  // Probe right away: a healthy link answers within RTT and clears the
+  // counter; a dead one was already not answering. Worst case this is one
+  // extra LATENCY packet.
+  this.getLatency();
+
+  if (this.__tabHidden) return;
+
+  let isMobileish = (gameClient.touch && gameClient.touch.isMobileMode)
+    || (navigator.connection && navigator.connection.type === "cellular");
+  if (isMobileish) return;
+
+  if (alreadyMissing >= this.CONNECTION_CHANGE_TRIP_PINGS) {
+    console.log("Network change with " + alreadyMissing + " pings unanswered — forcing reconnect...");
+    try { gameClient.sendDebugImmediate("[reconnect-netchange-trip] pending=" + alreadyMissing); } catch (e) {}
+    this.__stopHeartbeat();
+    this.socket.close();
+  }
+
+}
+
 NetworkManager.prototype.__reconnectWithCharacter = function () {
 
   /*
@@ -26105,7 +26967,7 @@ NetworkManager.prototype.__reconnectWithCharacter = function () {
   // Fall back to password-based login (regular accounts only)
   let { account, password } = gameClient.interface.getAccountDetails();
 
-  fetch("/api/login", {
+  this.__fetchWithTimeout("/api/login", {
     "method": "POST",
     "headers": { "Content-Type": "application/json" },
     "body": JSON.stringify({ "account": account, "password": password })
@@ -26144,7 +27006,14 @@ NetworkManager.prototype.__reconnectWithCharacter = function () {
 
     self.__reconnecting = false;
 
-  }).catch(function () {
+  }).catch(function (err) {
+
+    // Network-class failure (timed out / unreachable — the server never
+    // answered): the roam/handoff is likely still settling, chain another
+    // silent attempt. Server-ANSWERED refusals keep the modal below.
+    if (self.__isNetworkError(err)) {
+      return self.__scheduleNetworkRetry();
+    }
 
     self.__reconnecting = false;
     self.__showReconnectMessage("Reconnect failed. Try again.");
@@ -26164,7 +27033,7 @@ NetworkManager.prototype.__reconnectWithSessionToken = function (sessionToken) {
 
   let characterName = this.__lastCharacterName;
 
-  fetch("/api/login/select-character", {
+  this.__fetchWithTimeout("/api/login/select-character", {
     "method": "POST",
     "headers": { "Content-Type": "application/json" },
     "body": JSON.stringify({ "sessionToken": sessionToken, "characterName": characterName })
@@ -26218,9 +27087,18 @@ NetworkManager.prototype.__reconnectWithSessionToken = function (sessionToken) {
   }).then(function (data) {
 
     if (!data) return;                    // 451 branch already navigated away
+    gameClient.__worldPvp = data.pvp !== false;   // same select-character reply shape
     self.connectWithToken(data.token, data.host);
 
   }).catch(function (err) {
+
+    // Network-class failure (timed out / unreachable — the server never
+    // answered): chain another silent attempt while the roam settles.
+    // Server-ANSWERED errors (session expired, namelock message, …) keep
+    // their existing immediate handling below.
+    if (self.__isNetworkError(err)) {
+      return self.__scheduleNetworkRetry();
+    }
 
     self.__reconnecting = false;
     self.__showReconnectMessage(err.message || "Reconnect failed. Try again.");
@@ -26775,7 +27653,7 @@ NetworkManager.prototype.__onForegroundReturn = function (forceReconnect) {
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/network/packet-handler.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/packet-handler.js ===== */
 
 const PacketHandler = function () {
 
@@ -28331,16 +29209,20 @@ PacketHandler.prototype.handleServerMessage = function (string, color, priority)
     if (gameClient.player) gameClient.player.__sharedExperienceEnabled = false;
   }
 
-  // Convert {valuable}...{/valuable} markers to light blue for rare loot drops (<=1% probability)
-  string = string.replace(/\{valuable\}(.*?)\{\/valuable\}/g, "<span style=\"color:#89CFF0\">$1</span>");
-  // Convert {eat}...{/eat} markers to orange-colored spans for auto-eaten items
-  string = string.replace(/\{eat\}(.*?)\{\/eat\}/g, "<span style=\"color:#FFA500\">$1</span>");
-  // Convert {auto}...{/auto} markers to gold-colored spans for auto-looted items
+  // Loot-tag palette (rebuilt 2026-07-04 — the old {listed} soft-green was
+  // nearly invisible against the loot line's LIGHTGREEN base text, which
+  // cost a full diagnosis hour in the JOHbola routing saga). Every state
+  // is now pairwise-distinct, even in compressed screenshots:
+  //   base lightgreen = ordinary unlisted item, left in corpse
+  //   {auto}     gold        = auto-looted into your bags ("got it")
+  //   {eat}      deep orange = auto-eaten
+  //   {listed}   white bold  = ON your list but STILL IN THE CORPSE — walk
+  //                            over and grab it (the actionable one)
+  //   {valuable} purple      = unlisted rare — consider listing it
+  string = string.replace(/\{valuable\}(.*?)\{\/valuable\}/g, "<span style=\"color:#C77DFF\">$1</span>");
+  string = string.replace(/\{eat\}(.*?)\{\/eat\}/g, "<span style=\"color:#FF8547\">$1</span>");
   string = string.replace(/\{auto\}(.*?)\{\/auto\}/g, "<span style=\"color:#FFD700\">$1</span>");
-  // Convert {listed}...{/listed} markers to soft green — items on the player's
-  // /lootlist that weren't auto-pulled (sniped from range, etc.) so the player
-  // knows to walk over and pick them up manually.
-  string = string.replace(/\{listed\}(.*?)\{\/listed\}/g, "<span style=\"color:#9eea7a\">$1</span>");
+  string = string.replace(/\{listed\}(.*?)\{\/listed\}/g, "<span style=\"color:#FFFFFF;font-weight:bold\">$1</span>");
 
   // Priority 255 = "Console only" sentinel — skip the center-screen popup
   // and log straight to the chat tab. Useful for messages that pair with
@@ -28395,6 +29277,15 @@ PacketHandler.prototype.clientSideMoveCheck = function (position) {
    * Function PacketHandler.clientSideMoveCheck
    * Client side code to check whether a player can move before the server is informed
    */
+
+  // Reconnect guard: a movement check can fire while gameClient.player is
+  // briefly null/incomplete (packet burst during a silent reconnect —
+  // Opus 2026-07-06, 6 saves in 8s directly before the __position-of-
+  // undefined throw). Report "blocked": prediction is skipped for a frame
+  // or two and the server stays authoritative — invisible to the player.
+  if (!gameClient.player || !gameClient.player.__position) {
+    return true;
+  }
 
   // Get the tile from the position to be moved to
   let tile = gameClient.world.getTileFromWorldPosition(position);
@@ -28896,11 +29787,11 @@ PacketHandler.prototype.handleEntityRemove = function (id) {
   // it. Per-creature buffers only — never the shared global sprite buffer.
   // Wrapped so a renderer hiccup can't abort the rest of despawn cleanup.
   try {
-    if (creature.spriteBuffer && typeof creature.spriteBuffer.destroy === "function") {
-      creature.spriteBuffer.destroy();
+    if (creature.spriteBuffer) {
+      SpriteBuffer.releaseShared(creature.spriteBuffer);
     }
-    if (creature.spriteBufferMount && typeof creature.spriteBufferMount.destroy === "function") {
-      creature.spriteBufferMount.destroy();
+    if (creature.spriteBufferMount) {
+      SpriteBuffer.releaseShared(creature.spriteBufferMount);
     }
   } catch (e) {}
 
@@ -29129,6 +30020,22 @@ PacketHandler.prototype.handleContainerOpen = function (packet) {
    * Opens a container to the DOM
    */
 
+  // A successful open cancels any pending toggle-close retry — whether this
+  // open IS the retry's result (bag was open: close -> re-send -> this open)
+  // or a direct open of a not-already-open bag. This is what makes the retry
+  // window safe to extend for latency (arming sites): without it, a use that
+  // opened the bag directly would leave the retry flag lingering, and a later
+  // unrelated container close would spuriously re-toggle it. MUST run before
+  // the dedupe close below, else that close re-fires the retry.
+  if (gameClient.__forceOpenAfterClose) {
+    gameClient.__forceOpenAfterClose = null;
+    clearTimeout(gameClient.__forceOpenAfterCloseTimeout);
+  }
+  if (gameClient.__floatReopenAfterClose) {
+    gameClient.__floatReopenAfterClose = null;
+    clearTimeout(gameClient.__floatReopenAfterCloseTimeout);
+  }
+
   // Dedupe: if a window for this container id already exists, tear it down
   // first via the normal close path. Without this, any double-OPEN without
   // a CLOSE between (rapid open clicks racing a reconnect replay, the
@@ -29171,6 +30078,22 @@ PacketHandler.prototype.handleContainerOpen = function (packet) {
       container.__openedFromParent = parentContainer;
       let upBtn = container.window.__element.querySelector(".container-up-btn");
       if (upBtn) upBtn.style.display = "";
+    }
+  }
+
+  // No client-side flow flags consumed above (login/reconnect replay, or an
+  // open path that doesn't stamp them): the server now sends the parent
+  // container's id (0 = none / parent not open by us). Link it so the "up"
+  // back button survives a relog too (player report 2026-07-06: nested bag
+  // lost its up arrow after relogging). The replay opens parents before
+  // children, so the parent is already registered when the child arrives.
+  if (!container.__openedFromParent && !container.__replacedParent
+    && packet.parentCid && container.window) {
+    let replayParent = gameClient.player.getContainer(packet.parentCid);
+    if (replayParent && replayParent !== container) {
+      container.__openedFromParent = replayParent;
+      let replayUpBtn = container.window.__element.querySelector(".container-up-btn");
+      if (replayUpBtn) replayUpBtn.style.display = "";
     }
   }
 
@@ -29265,6 +30188,24 @@ PacketHandler.prototype.handleContainerClose = function (id) {
     gameClient.__forceOpenAfterClose = null;
     clearTimeout(gameClient.__forceOpenAfterCloseTimeout);
     gameClient.mouse.use(slotObject);
+  }
+
+  // Mobile "Open in Window" auto-retry (float panel). Separate + longer-lived
+  // than __forceOpenAfterClose (300ms): the toggle-close round-trip can exceed
+  // 300ms on mobile, so that flag lapsed and an already-open bag just closed
+  // instead of popping to the centre (player report 2026-07-07). Re-assert the
+  // float routing flag so the reopen lands in the float panel even if its own
+  // timer lapsed during a slow round-trip.
+  if (gameClient.__floatReopenAfterClose) {
+    let floatSlot = gameClient.__floatReopenAfterClose;
+    gameClient.__floatReopenAfterClose = null;
+    clearTimeout(gameClient.__floatReopenAfterCloseTimeout);
+    gameClient.__nextOpenInFloatPanel = true;
+    clearTimeout(gameClient.__nextOpenInFloatPanelTimeout);
+    gameClient.__nextOpenInFloatPanelTimeout = setTimeout(function () {
+      gameClient.__nextOpenInFloatPanel = false;
+    }, 2500);
+    gameClient.mouse.use(floatSlot);
   }
 
 }
@@ -30229,7 +31170,7 @@ PacketHandler.prototype.__getDamageTintColor = function (creature) {
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/network/packet.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/packet.js ===== */
 
 "use strict";
 
@@ -30256,7 +31197,7 @@ Packet.prototype.advance = function(amount) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/network/packetreader.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/packetreader.js ===== */
 
 "use strict";
 
@@ -30727,6 +31668,9 @@ PacketReader.prototype.readOpenContainer = function () {
 
   return new Object({
     "cid": this.readUInt32(),
+    // Parent container guid (0 = none / not open by us) — WIRE_FORMAT 13;
+    // shows the "up" back button on replayed opens (relog) too.
+    "parentCid": this.readUInt32(),
     "id": this.readUInt16(),
     "title": this.readString(),
     "items": this.readItems()
@@ -32102,7 +33046,7 @@ PacketReader.prototype.readCreatureManifest = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/network/packetwriter.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/packetwriter.js ===== */
 
 const PacketWriter = function(opcode, length) {
 
@@ -32286,7 +33230,7 @@ PacketWriter.prototype.writePosition = function(position) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/network/protocol.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/protocol.js ===== */
 
 const OutfitChangePacket = function (outfit) {
 
@@ -33283,6 +34227,22 @@ const PkLockRequestPacket = function () {
 PkLockRequestPacket.prototype = Object.create(PacketWriter.prototype);
 PkLockRequestPacket.prototype.constructor = PkLockRequestPacket;
 
+const StanceRequestPacket = function () {
+
+  /*
+   * Class StanceRequestPacket
+   * Asks the server for the authoritative combat stance (fight + chase mode)
+   * and latches the capability server-side so every later stance change is
+   * echoed back (SERVER.STANCE_STATE). Opcode-only (no payload).
+   */
+
+  PacketWriter.call(this, CONST.PROTOCOL.CLIENT.STANCE_REQUEST, 0);
+
+}
+
+StanceRequestPacket.prototype = Object.create(PacketWriter.prototype);
+StanceRequestPacket.prototype.constructor = StanceRequestPacket;
+
 const WriteTextPacket = function (itemId, content) {
 
   /*
@@ -33470,7 +34430,7 @@ const AutoLootSettingsPacket = function (autoLootGold, autoLootFood, autoOpenCor
 AutoLootSettingsPacket.prototype = Object.create(PacketWriter.prototype);
 AutoLootSettingsPacket.prototype.constructor = AutoLootSettingsPacket;
 
-const LootListUpdatePacket = function (items, enabled) {
+const LootListUpdatePacket = function (items, enabled, routes) {
 
   /*
    * Class LootListUpdatePacket
@@ -33479,18 +34439,48 @@ const LootListUpdatePacket = function (items, enabled) {
    *   UInt8  enabled flag (0 = paused, 1 = active)
    *   UInt16 number of SIDs (capped at 500 — server enforces too)
    *   UInt16 × N each item SID
-   * 500 SIDs → 1003 bytes total, well under the 1024 per-tick ceiling.
+   *   UInt16 route count, then per route UInt16 sid + u8-len string bag
+   *   name (loot router — server reads this tail defensively).
+   * The route tail is trimmed to keep the whole packet under ~1000 bytes
+   * (inbound per-tick ceiling is 1024).
    */
 
   let arr = Array.isArray(items) ? items : [];
   let MAX = 500;
   if (arr.length > MAX) arr = arr.slice(0, MAX);
 
-  PacketWriter.call(this, CONST.PROTOCOL.CLIENT.LOOT_LIST_UPDATE, 1 + 2 + arr.length * 2);
+  let routeArr = [];
+  if (routes && typeof routes === "object") {
+    for (let sid in routes) {
+      if (!Object.prototype.hasOwnProperty.call(routes, sid)) continue;
+      let name = String(routes[sid]).slice(0, 20);
+      if (!name) continue;
+      routeArr.push({ sid: sid | 0, name: name });
+    }
+  }
+  let base = 1 + 2 + arr.length * 2 + 2;
+  let budget = 1000 - base;
+  let take = [];
+  for (let i = 0; i < routeArr.length; i++) {
+    let cost = 2 + 1 + routeArr[i].name.length;
+    if (budget - cost < 0) break;
+    budget -= cost;
+    take.push(routeArr[i]);
+  }
+  let tailBytes = take.reduce(function (a, r) { return a + 2 + 1 + r.name.length; }, 0);
+
+  PacketWriter.call(this, CONST.PROTOCOL.CLIENT.LOOT_LIST_UPDATE, base + tailBytes);
   this.writeUInt8(enabled === false ? 0 : 1);
   this.writeUInt16(arr.length);
   for (let i = 0; i < arr.length; i++) {
     this.writeUInt16(arr[i] | 0);
+  }
+  this.writeUInt16(take.length);
+  for (let i = 0; i < take.length; i++) {
+    this.writeUInt16(take[i].sid);
+    // u8-length-prefixed string (client->server convention)
+    let enc = this.encodeString(take[i].name);
+    this.writeBuffer(enc.stringEncoded);
   }
 
 }
@@ -33568,7 +34558,7 @@ HotbarCountsRequestPacket.prototype.constructor = HotbarCountsRequestPacket;
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/canvas.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/canvas.js ===== */
 
 const Canvas = function (id, width, height) {
 
@@ -34691,6 +35681,18 @@ Canvas.prototype.__drawCharacter = function (spriteBuffer, spriteBufferMount, ou
         continue;
       }
 
+      // GPU outfit colors: colorize in the shader straight from the shared
+      // sprite atlas instead of composing a recolored per-creature copy on
+      // the CPU (SpriteBatch.drawMasked). Falls back to the composed path
+      // when a sprite is unavailable, and for semi-transparent creatures —
+      // stacked addon layers under alpha blend differently than a pre-merged
+      // sprite.
+      if (this.__isWebGL && this.__spriteBatch.__globalAlpha >= 1 &&
+          gameClient.interface.settings.isGpuOutfitColorsEnabled() &&
+          this.__drawOutfitCellGL(spriteBufferMount, outfit, characterGroup, mountGroup, characterFrame, mountFrame, xPattern, zPattern, x, y, position, size)) {
+        continue;
+      }
+
       // Try to get an identifier that is not zero from all layers.. maybe try the addons?
       // The addons are stored in the yPattern parameter
       if (baseIdentifier === 0 && outfit.addonOne) {
@@ -34723,6 +35725,122 @@ Canvas.prototype.__drawCharacter = function (spriteBuffer, spriteBufferMount, ou
     }
 
   }
+
+}
+
+Canvas.prototype.__drawOutfitCellGL = function (spriteBufferMount, outfit, characterGroup, mountGroup, characterFrame, mountFrame, xPattern, zPattern, x, y, position, size) {
+
+  /*
+   * Function Canvas.__drawOutfitCellGL
+   * Draws one outfit sprite cell via the GPU outfit-color shader: each
+   * active layer (base + enabled addons) is drawn as a masked quad straight
+   * from the shared sprite atlas — no per-creature composed copy. Returns
+   * true when the cell was handled; false = caller uses the composed path.
+   */
+
+  let global = gameClient.spriteBuffer;
+
+  // Resolve every active layer BEFORE drawing anything so a miss can fall
+  // back to the composed path for the whole cell (mirrors addComposedOutfit)
+  let baseSprites = [];
+  let maskSprites = [];
+
+  for (let yPattern = 0; yPattern < 3; yPattern++) {
+
+    if (yPattern === 1 && !(outfit.addonOne && characterGroup.pattern.y > 1)) continue;
+    if (yPattern === 2 && !(outfit.addonTwo && characterGroup.pattern.y > 2)) continue;
+
+    let baseId = characterGroup.getSpriteId(characterFrame, xPattern, yPattern, zPattern, 0, x, y);
+    if (baseId === 0) {
+      continue;
+    }
+
+    let baseSprite = global.get(baseId);
+    if (baseSprite === null || !baseSprite.glTexture) {
+      return false;
+    }
+
+    let maskId = characterGroup.getSpriteId(characterFrame, xPattern, yPattern, zPattern, 1, x, y);
+    let maskSprite = null;
+    if (maskId !== 0) {
+      maskSprite = global.get(maskId);
+      // Base and mask must share the atlas texture (single sampler)
+      if (maskSprite === null || !maskSprite.glTexture || maskSprite.glTexture !== baseSprite.glTexture) {
+        return false;
+      }
+    }
+
+    baseSprites.push(baseSprite);
+    maskSprites.push(maskSprite);
+
+  }
+
+  // Empty cell: handled (the composed path draws nothing here either)
+  if (baseSprites.length === 0) {
+    return true;
+  }
+
+  // The mount is enabled and available — drawn beneath, same as composed path
+  if (zPattern === 1 && mountGroup) {
+    let mountSprite = mountGroup.getSpriteId(mountFrame, xPattern, 0, 0, 0, x, y);
+    this.__drawSprite(spriteBufferMount.get(mountSprite), position, x, y, size);
+  }
+
+  // Destination rect: identical math to __drawSprite's WebGL branch
+  let dX = Math.round(32 * (position.x - x));
+  let dY = Math.round(32 * (position.y - y));
+  let dW = 32;
+  let dH = 32;
+
+  let sc = this.__spriteBatch.__spriteScale;
+  if (sc && sc !== 1.0) {
+    let center = this.__spriteBatch.__spriteScaleCenter;
+    dX = center.x + (dX - center.x) * sc;
+    dY = center.y + (dY - center.y) * sc;
+    dW = 32 * sc;
+    dH = 32 * sc;
+  }
+
+  let colors = outfit.getColorsNormalized();
+
+  for (let i = 0; i < baseSprites.length; i++) {
+
+    gameClient.renderer.drawCalls++;
+
+    let baseSprite = baseSprites[i];
+    let maskSprite = maskSprites[i];
+
+    if (maskSprite === null) {
+      // Layer without a color mask: plain draw (mutual flushing in the
+      // batch keeps painter's order between the two queues)
+      this.__spriteBatch.bindTexture(baseSprite.glTexture);
+      this.__spriteBatch.draw(
+        32 * baseSprite.position.x,
+        32 * baseSprite.position.y,
+        32, 32,
+        dX, dY, dW, dH,
+        this.__spriteBatch.__globalAlpha,
+        baseSprite.atlasWidth,
+        baseSprite.atlasHeight
+      );
+    } else {
+      this.__spriteBatch.drawMasked(
+        baseSprite.glTexture,
+        32 * baseSprite.position.x,
+        32 * baseSprite.position.y,
+        32 * maskSprite.position.x,
+        32 * maskSprite.position.y,
+        dX, dY, dW, dH,
+        this.__spriteBatch.__globalAlpha,
+        baseSprite.atlasWidth,
+        baseSprite.atlasHeight,
+        colors
+      );
+    }
+
+  }
+
+  return true;
 
 }
 
@@ -34962,7 +36080,7 @@ Canvas.prototype.drawSlashArc = function (position, ndx, ndy, progress) {
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/debugger.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/debugger.js ===== */
 
 const Debugger = function() {
 
@@ -35616,7 +36734,7 @@ Debugger.prototype.__renderStatistics = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/item-tint.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/item-tint.js ===== */
 
 /*
  * Item Tint Map
@@ -35810,7 +36928,7 @@ function getItemGlow(sid, tintId) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/light-canvas.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/light-canvas.js ===== */
 
 "use strict";
 
@@ -36066,7 +37184,7 @@ LightCanvas.prototype.renderLightBubble = function(x, y, size, colorByte, intens
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/minimap.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/minimap.js ===== */
 
 const Minimap = function () {
 
@@ -37388,7 +38506,7 @@ Minimap.prototype.colors = new Array(
 ).map(Number);
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/outline-canvas.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/outline-canvas.js ===== */
 
 const OutlineCanvas = function(id, width, height) {
 
@@ -37460,7 +38578,7 @@ Canvas.prototype.drawOutlineSprite = function(position) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/renderer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/renderer.js ===== */
 
 const Renderer = function () {
 
@@ -37572,6 +38690,10 @@ Renderer.prototype.render = function () {
    * Main entry point that is called every frame
    */
 
+  // NOTE: the Lowest Spec 20 Hz world-redraw throttle that lived here was
+  // REMOVED (owner 2026-07-02: the frame-skipping stutter reads as a bug,
+  // not a perf win). Lowest Spec keeps its per-tile draw caps below.
+
   // Free GPU sprite textures retired since the last frame (despawned creatures
   // and swapped outfits). Done first, before any drawing, so nothing in this
   // frame can reference a freed texture. See SpriteBatch.flushPendingTextureDeletes.
@@ -37615,14 +38737,13 @@ Renderer.prototype.__renderPlayerStatArcs = function () {
 
   /*
    * Function Renderer.__renderPlayerStatArcs
-   * Draws curved HP (left, green→yellow→red by health) and mana (blue, right) arc bars
-   * framing the local player. The player is always rendered at the
-   * fixed screen tile (7,5) — pixel centre (240,176), the same point
-   * the player light bubble uses — so the arcs sit at a constant
-   * canvas location. Each arc has a dark track and fills from its
-   * lower end upward by the current fraction. Opt-in via the
-   * hp-mana-arcs setting; drawn on the aux 2D canvas (WebGL mode)
-   * just before compositeAux, exactly like the weather overlay.
+   * Draws curved HP (left, green/yellow/red by health) and mana (blue,
+   * right) arc bars framing the local player (fixed screen tile centre
+   * 240,176). Prefers the display-resolution overlay canvas (smooth);
+   * on ANY overlay failure falls back to the game/aux canvas exactly as
+   * the pre-overlay implementation did — the arcs can never silently
+   * disappear (live report 2026-07-03). Opt-in via the hp-mana-arcs
+   * setting.
    */
 
   let player = gameClient.player;
@@ -37635,35 +38756,19 @@ Renderer.prototype.__renderPlayerStatArcs = function () {
     ? Math.max(0, Math.min(1, player.getManaFraction()))
     : 0;
 
-  // --- Geometry / style — safe to tweak ---------------------------
-  // cx/cy: arc centre. (240,176) is the player tile centre; cy is
-  // nudged a few px up so the arcs frame the sprite body, not the
-  // tile floor. centreSpread pushes the two arcs apart horizontally.
+  // --- Geometry / style (game-canvas pixels; scaled for the overlay) ---
   let cx = 240;
   let cy = 170;
-  // Mobile: lift the arcs ~14px so the top ends clear the name / health bar above
-  // the head, and shift them ~8px left so they sit on the sprite — the player
-  // outfit renders ~0.25 tile to the NW while the arcs were pinned to the exact
-  // tile centre, which read as shifted right (player screenshots 2026-06-30).
-  // Desktop unchanged.
   if (gameClient.touch && gameClient.touch.isMobileMode) { cy = 156; cx = 232; }
-  // horizontal gap between the two arcs — a touch wider on mobile (owner request)
   let centreSpread = (gameClient.touch && gameClient.touch.isMobileMode) ? 22 : 14;
   let radius = 46;
   let lineWidth = 8;
-  let borderWidth = 1;             // hairline rim — 1px at low alpha renders
-                                   // smoother than 0.5px solid (sub-pixel
-                                   // strokes produce uneven partial-alpha
-                                   // rows along a curve = "pixelated" look)
-  let halfSpreadDeg = 74;          // each arc spans 2 * halfSpreadDeg
+  let borderWidth = 1;
+  let halfSpreadDeg = 74;
   let trackColor = "rgba(10, 10, 10, 0.64)";
-  // HP fill colour shifts with remaining health (HP side only):
-  //   >= 50% green, 25%–50% yellow, < 25% red. Mana always blue. Thresholds
-  //   match the HP bar above the character (screen-element-character.js
-  //   setHealthFraction: >0.5 green, >0.25 yellow) so the two never disagree.
-  let hpColorFull = "rgba(64, 188, 64, 1)";     // healthy  (>= 50%)
-  let hpColorWarn = "rgba(224, 196, 48, 1)";    // wounded  (25% – 50%)
-  let hpColorCrit = "rgba(208, 52, 52, 1)";     // critical (< 25%)
+  let hpColorFull = "rgba(64, 188, 64, 1)";
+  let hpColorWarn = "rgba(224, 196, 48, 1)";
+  let hpColorCrit = "rgba(208, 52, 52, 1)";
   let hpColor = hp < 0.25 ? hpColorCrit
               : hp < 0.50 ? hpColorWarn
               : hpColorFull;
@@ -37671,35 +38776,52 @@ Renderer.prototype.__renderPlayerStatArcs = function () {
   let borderColor = "rgba(0, 0, 0, 0.7)";
   // ----------------------------------------------------------------
 
+  // Acquire the smooth overlay; ANY failure -> legacy on-canvas path.
+  let ctx = null;
+  let sc = 1;
+  let usingAux = false;
+  try {
+    let overlay = this.__getArcOverlay();
+    if (overlay && overlay.ctx) {
+      ctx = overlay.ctx;
+      sc = overlay.scale;
+      ctx.clearRect(0, 0, overlay.canvas.width, overlay.canvas.height);
+    }
+  } catch (e) {
+    if (!this.__arcOverlayWarned) {
+      this.__arcOverlayWarned = true;
+      console.warn("[arcs] overlay failed — falling back to canvas:", e);
+    }
+  }
+  if (ctx === null) {
+    // Overlay path aborted (exception OR sub-path that didn't self-hide) —
+    // hide the overlay before drawing on the game canvas, otherwise a stale
+    // last-frame overlay leaves both sets of arcs on screen (double arcs).
+    if (this.__arcOverlay) this.__arcOverlay.style.display = "none";
+    ctx = this.screen.context;
+    sc = 1;
+    usingAux = true;
+  }
+
+  cx *= sc; cy *= sc; radius *= sc; lineWidth *= sc; centreSpread *= sc;
+  borderWidth = Math.max(1, borderWidth * sc * 0.75);
+
   let DEG = Math.PI / 180;
-  let ctx = this.screen.context;
   ctx.save();
-  // User-selected arc opacity (Settings > Game) — the ABSOLUTE level:
-  // colour bases above are full-strength, so 100% = solid arcs and the
-  // 50% default reproduces the original half-transparent look exactly.
-  // Track/fill/border keep their relative weights at every level.
   ctx.globalAlpha = gameClient.interface.settings.getHpManaArcsOpacity();
   ctx.lineCap = "round";
 
-  // One stat arc. bottomDeg / topDeg are the arc's lower and upper end
-  // angles (canvas angles run clockwise with y down: 90 = down,
-  // 270 = up). The translucent band is drawn first — dark track over
-  // the whole arc, then the coloured fill from the bottom end up to the
-  // fraction — then a thin black line is stroked along the outer and
-  // inner rims only, so the band centre stays translucent (see-through).
   function drawArc(centreX, bottomDeg, topDeg, fraction, fillColor) {
     let anticlockwise = topDeg < bottomDeg;
     let startRad = bottomDeg * DEG;
     let topRad = topDeg * DEG;
 
-    // Dark track — full arc.
     ctx.lineWidth = lineWidth;
     ctx.strokeStyle = trackColor;
     ctx.beginPath();
     ctx.arc(centreX, cy, radius, startRad, topRad, anticlockwise);
     ctx.stroke();
 
-    // Coloured fill — bottom end up to the current fraction.
     if (fraction > 0) {
       let fillEndRad = (bottomDeg + (topDeg - bottomDeg) * fraction) * DEG;
       ctx.strokeStyle = fillColor;
@@ -37708,7 +38830,6 @@ Renderer.prototype.__renderPlayerStatArcs = function () {
       ctx.stroke();
     }
 
-    // Thin black rim along the band's outer and inner edges, on top.
     ctx.lineWidth = borderWidth;
     ctx.strokeStyle = borderColor;
     ctx.beginPath();
@@ -37719,18 +38840,75 @@ Renderer.prototype.__renderPlayerStatArcs = function () {
     ctx.stroke();
   }
 
-  // HP — left of the player; lower end 106 deg, upper end 254 deg.
   drawArc(cx - centreSpread, 180 - halfSpreadDeg, 180 + halfSpreadDeg, hp, hpColor);
-  // Mana — right of the player; lower end 74 deg, upper end -74 deg.
   drawArc(cx + centreSpread, halfSpreadDeg, -halfSpreadDeg, mana, manaColor);
 
   ctx.restore();
 
-  // WebGL mode: the aux 2D canvas now holds fresh content — flag it so
-  // compositeAux uploads it to the screen this frame.
-  if (this.screen.__isWebGL) {
+  if (usingAux && this.screen.__isWebGL) {
     this.screen.__auxDirty = true;
   }
+
+}
+
+Renderer.prototype.__getArcOverlay = function () {
+
+  /*
+   * Function Renderer.__getArcOverlay
+   * Display-resolution arc overlay, POSITION:FIXED on the body and aligned
+   * to the game canvas via getBoundingClientRect — immune to CSS transforms,
+   * offsetParent quirks and overflow clipping (the offsetParent-based first
+   * attempt rendered nowhere on the live layout). Returns
+   * { canvas, ctx, scale } — scale converts game px to overlay px.
+   */
+
+  let game = this.screen.canvas;
+  if (!game) return null;
+
+  let ov = this.__arcOverlay;
+  if (!ov) {
+    // ADOPT any overlay already in the DOM before creating: the element
+    // outlives the Renderer instance (logout keeps the DOM; re-login
+    // builds a fresh Renderer with an empty cache), so blind creation
+    // stacked one orphaned arc canvas per relog — 'I now have 3 arcs'
+    // (Rotterdam 2026-07-04). Extras from pre-fix sessions are pruned.
+    let existing = document.querySelectorAll("#hp-mana-arc-overlay");
+    for (let i = 1; i < existing.length; i++) existing[i].remove();
+    ov = existing[0] || null;
+    this.__arcOvKey = null;   // force re-align/resize on adoption
+    if (!ov) {
+      ov = document.createElement("canvas");
+      ov.id = "hp-mana-arc-overlay";
+      ov.style.position = "fixed";
+      ov.style.pointerEvents = "none";
+      ov.style.zIndex = "101";   // #screen is z-index:100 — the overlay must top it (same trap as the loot chips)
+      document.body.appendChild(ov);
+    }
+    this.__arcOverlay = ov;
+    this.__arcOverlayCtx = ov.getContext("2d");
+    // One-time diagnostic: report where the overlay landed so a blank
+    // overlay is explainable from a player/owner console screenshot.
+    let r0 = game.getBoundingClientRect();
+    console.log("[arcs] overlay created — game canvas rect:", Math.round(r0.left) + "," + Math.round(r0.top),
+      Math.round(r0.width) + "x" + Math.round(r0.height), "logical:", game.width + "x" + game.height);
+  }
+  ov.style.display = "";
+
+  let rect = game.getBoundingClientRect();
+  if (!rect.width || !rect.height) { ov.style.display = "none"; return null; }
+  let dpr = Math.min(2, window.devicePixelRatio || 1);
+  let key = rect.left + "/" + rect.top + "/" + rect.width + "/" + rect.height + "/" + dpr;
+  if (this.__arcOvKey !== key) {
+    this.__arcOvKey = key;
+    ov.style.left = rect.left + "px";
+    ov.style.top = rect.top + "px";
+    ov.style.width = rect.width + "px";
+    ov.style.height = rect.height + "px";
+    ov.width = Math.max(1, Math.round(rect.width * dpr));
+    ov.height = Math.max(1, Math.round(rect.height * dpr));
+  }
+
+  return { canvas: ov, ctx: this.__arcOverlayCtx, scale: ov.width / game.width };
 
 }
 
@@ -38259,6 +39437,9 @@ Renderer.prototype.__renderWorld = function () {
   let weatherEnabled = settings.isWeatherEnabled();
   let lightingEnabled = settings.isLightingEnabled();
 
+  // Lowest Spec per-tile draw caps (items/effects) read this per-frame flag
+  this.__lowestSpecFrame = settings.isLowestSpecMode();
+
   // Reset light queue for FBO-based lighting
   this.__lightQueueSize = 0;
 
@@ -38490,6 +39671,8 @@ Renderer.prototype.__renderWorld = function () {
   // weather layer, on the same aux 2D canvas, just before the composite.
   if (settings.isHpManaArcsEnabled()) {
     this.__renderPlayerStatArcs();
+  } else if (this.__arcOverlay) {
+    this.__arcOverlay.style.display = "none";
   }
 
   // Composite aux canvas (weather) onto WebGL screen — skips if not dirty
@@ -38808,14 +39991,30 @@ Renderer.prototype.__renderAnimation = function (animation, thing) {
 
 }
 
+// Lowest Spec per-tile draw caps (OTCv8 adaptive-renderer style): stacked
+// spell-effect pileups and buried item mountains stop costing draws — you
+// could only see the top few anyway. Items keep the NEWEST-on-top semantics
+// (the last N in stack order draw); effects keep the newest N.
+Renderer.prototype.LOWEST_SPEC_TILE_ITEM_MAX = 5;
+Renderer.prototype.LOWEST_SPEC_TILE_EFFECT_MAX = 2;
+
 Renderer.prototype.__renderTileAnimations = function (tile) {
 
   /*
    * Function Renderer.__renderTileAnimations
    * Renders the animations that are present on the tile
+   * Lowest Spec: only the newest LOWEST_SPEC_TILE_EFFECT_MAX effects draw
    */
 
+  let skip = this.__lowestSpecFrame
+    ? Math.max(0, tile.__animations.size - Renderer.prototype.LOWEST_SPEC_TILE_EFFECT_MAX)
+    : 0;
+
   tile.__animations.forEach(function (animation) {
+    if (skip > 0) {
+      skip--;
+      return;
+    }
     this.__renderAnimation(animation, tile);
   }, this);
 
@@ -38927,6 +40126,23 @@ Renderer.prototype.__renderTileObjects = function (tile, posX, posY) {
     this.screen.drawSprite(item, renderPos, 32);
   }
 
+  // Lowest Spec: only the top LOWEST_SPEC_TILE_ITEM_MAX stack items draw —
+  // the buried ones are covered anyway. Count the eligible (drawable) items
+  // first so we know how many to skip from the bottom; the pre-pass only
+  // runs for lowest-spec players on tiles deeper than the cap.
+  let skipBuried = 0;
+  if (this.__lowestSpecFrame && itemsLength > Renderer.prototype.LOWEST_SPEC_TILE_ITEM_MAX) {
+    let eligible = 0;
+    for (let i = 0; i < itemsLength; i++) {
+      let it = items[i];
+      if (it.isSplash()) continue;
+      if (it.hasFlag(PropBitFlag.prototype.flags.DatFlagGroundBorder)) continue;
+      if (it.hasFlag(PropBitFlag.prototype.flags.DatFlagOnTop)) continue;
+      eligible++;
+    }
+    skipBuried = Math.max(0, eligible - Renderer.prototype.LOWEST_SPEC_TILE_ITEM_MAX);
+  }
+
   // Render the regular items on the tile (excluding splashes, ground borders, and on-top items)
   for (let i = 0; i < itemsLength; i++) {
     let item = items[i];
@@ -38939,6 +40155,18 @@ Renderer.prototype.__renderTileObjects = function (tile, posX, posY) {
       continue;
     }
     if (item.hasFlag(PropBitFlag.prototype.flags.DatFlagOnTop)) {
+      continue;
+    }
+
+    // Buried under the Lowest Spec cap: skip the draw work, but KEEP the
+    // elevation contribution — creatures and items above a parcel stack
+    // must keep their stack offset even when the stack isn't fully drawn
+    if (skipBuried > 0) {
+      skipBuried--;
+      if (item.isElevation()) {
+        tile.addElevation(item.getDataObject().properties.elevation);
+        elevation = tile.__renderElevation;
+      }
       continue;
     }
 
@@ -39136,6 +40364,11 @@ Renderer.prototype.__renderDeferred = function (tile) {
   }
 
   tile.__deferredCreatures.forEach(function (creature) {
+    // Guard: a stale/removed entry in the deferred set must never crash the
+    // frame — an uncaught throw here re-fires EVERY frame (Opus 2026-07-06:
+    // "+17 suppressed" per-frame bursts reading __position of undefined;
+    // the render loop was the burst-pattern candidate).
+    if (!creature || !creature.__position) return;
     let creatureTile = gameClient.world.getTileFromWorldPosition(creature.__position);
     if (!creatureTile) return;
     this.__renderCreature(creatureTile, creature, true);
@@ -39532,8 +40765,9 @@ Renderer.prototype.__defer = function (tile, creature) {
   // Deferred rendering happens to the tile the player moved from
   let deferTile = this.__getDeferTile(tile, creature);
 
-  // Make sure the tile exists and is not itself
-  if (deferTile !== null) {
+  // Make sure the tile exists and is not itself (and never defer a missing
+  // creature — a stale undefined in the set crashes the render loop)
+  if (deferTile !== null && creature) {
     deferTile.__deferredCreatures.add(creature);
   }
 
@@ -39734,7 +40968,7 @@ Renderer.prototype.__createAnimationLayers = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/sprite-batch.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/sprite-batch.js ===== */
 
 const SpriteBatch = function(canvas) {
 
@@ -39787,6 +41021,15 @@ const SpriteBatch = function(canvas) {
 
   // Interleaved vertex data: [x, y, u, v, alpha] per vertex, 4 verts per quad
   this.__vertexData = new Float32Array(this.__maxQuads * 4 * 5);
+
+  // Masked-outfit batch ("GPU outfit colors"): outfits are colorized in the
+  // shader from the shared sprite atlas instead of pre-composing a recolored
+  // copy per creature on the CPU. Vertex layout per vertex (19 floats):
+  // [x, y, u, v, maskU, maskV, alpha, head.rgb, body.rgb, legs.rgb, feet.rgb]
+  this.__maxMaskQuads = 1024;
+  this.__maskQuadCount = 0;
+  this.__maskVertexData = new Float32Array(this.__maxMaskQuads * 4 * 19);
+  this.__maskTexture = null;
 
   // Currently bound texture
   this.__boundTexture = null;
@@ -39845,6 +41088,11 @@ SpriteBatch.prototype.__initGL = function() {
     SpriteBatch.prototype.COMPOSITE_FRAGMENT_SHADER
   );
 
+  this.__maskProgram = this.__createProgram(
+    SpriteBatch.prototype.MASK_VERTEX_SHADER,
+    SpriteBatch.prototype.MASK_FRAGMENT_SHADER
+  );
+
   // Get uniform locations for sprite program
   gl.useProgram(this.__spriteProgram);
   this.__spriteUniforms = {
@@ -39875,6 +41123,14 @@ SpriteBatch.prototype.__initGL = function() {
   this.__compositeUniforms = {
     "lightMap": gl.getUniformLocation(this.__compositeProgram, "u_lightMap"),
     "ambientDarkness": gl.getUniformLocation(this.__compositeProgram, "u_ambientDarkness")
+  };
+
+  // Get uniform locations for the masked-outfit program
+  gl.useProgram(this.__maskProgram);
+  this.__maskUniforms = {
+    "projection": gl.getUniformLocation(this.__maskProgram, "u_projection"),
+    "atlas": gl.getUniformLocation(this.__maskProgram, "u_atlas"),
+    "tint": gl.getUniformLocation(this.__maskProgram, "u_tint")
   };
 
   // Create VAO and buffers
@@ -39909,6 +41165,37 @@ SpriteBatch.prototype.__initGL = function() {
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
 
   gl.bindVertexArray(null);
+
+  // Masked-outfit VAO — 19 floats per vertex (76-byte stride), reuses the
+  // quad index buffer above (__maxMaskQuads <= __maxQuads keeps it in range)
+  this.__maskVao = gl.createVertexArray();
+  gl.bindVertexArray(this.__maskVao);
+  this.__maskVbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, this.__maskVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, this.__maskVertexData.byteLength, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 76, 0);    // position
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 76, 8);    // texcoord
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 76, 16);   // mask texcoord
+  gl.enableVertexAttribArray(3);
+  gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 76, 24);   // alpha
+  gl.enableVertexAttribArray(4);
+  gl.vertexAttribPointer(4, 3, gl.FLOAT, false, 76, 28);   // head color
+  gl.enableVertexAttribArray(5);
+  gl.vertexAttribPointer(5, 3, gl.FLOAT, false, 76, 40);   // body color
+  gl.enableVertexAttribArray(6);
+  gl.vertexAttribPointer(6, 3, gl.FLOAT, false, 76, 52);   // legs color
+  gl.enableVertexAttribArray(7);
+  gl.vertexAttribPointer(7, 3, gl.FLOAT, false, 76, 64);   // feet color
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.__ibo);
+  gl.bindVertexArray(null);
+
+  // Reset masked-batch state (matters on context restore: the previous
+  // texture object is dead and any queued quads referenced it)
+  this.__maskQuadCount = 0;
+  this.__maskTexture = null;
 
   // Rect VAO (for drawing rectangles)
   this.__rectVao = gl.createVertexArray();
@@ -40166,6 +41453,7 @@ SpriteBatch.prototype.begin = function() {
    */
 
   this.__quadCount = 0;
+  this.__maskQuadCount = 0;
   this.__globalAlpha = 1.0;
   this.__tintR = 1.0;
   this.__tintG = 1.0;
@@ -40194,7 +41482,16 @@ SpriteBatch.prototype.flush = function() {
 
   if (this.__contextLost) {
     this.__quadCount = 0;
+    this.__maskQuadCount = 0;
     return;
+  }
+
+  // Pending masked-outfit quads were queued BEFORE whatever triggered this
+  // flush (rects, tint change, end-of-frame) — they must hit the GPU first
+  // to keep painter's order. Mutual flushing in draw()/drawMasked() keeps
+  // at most one of the two batches non-empty, so no recursion.
+  if (this.__maskQuadCount > 0) {
+    this.flushMasked();
   }
 
   if (this.__quadCount === 0) {
@@ -40235,6 +41532,11 @@ SpriteBatch.prototype.draw = function(srcX, srcY, srcW, srcH, dstX, dstY, dstW, 
    * Source coords are atlas pixels, destination coords are screen pixels
    */
 
+  // Masked-outfit quads queued before this regular quad must draw first
+  if (this.__maskQuadCount > 0) {
+    this.flushMasked();
+  }
+
   // Safety flush if batch is full
   if (this.__quadCount >= this.__maxQuads) {
     this.flush();
@@ -40265,6 +41567,118 @@ SpriteBatch.prototype.draw = function(srcX, srcY, srcW, srcH, dstX, dstY, dstW, 
   vd[offset + 15] = x0; vd[offset + 16] = y1; vd[offset + 17] = u0; vd[offset + 18] = v1; vd[offset + 19] = alpha;
 
   this.__quadCount++;
+
+}
+
+SpriteBatch.prototype.drawMasked = function(texture, srcX, srcY, maskX, maskY, dstX, dstY, dstW, dstH, alpha, atlasW, atlasH, colors) {
+
+  /*
+   * Function SpriteBatch.drawMasked
+   * Queues a 32x32 outfit quad colorized in the shader: the fragment shader
+   * samples the color-template sprite at (maskX, maskY) — pure yellow, red,
+   * green, blue mark the head/body/legs/feet zones — and multiplies the base
+   * texel by the matching color. Replaces the CPU per-creature compose
+   * (SpriteBuffer.__compose). `colors` = Float32Array(12), rgb x 4 in 0-1.
+   * Base and mask must live in the same atlas `texture`.
+   */
+
+  // Regular quads queued before this one must hit the GPU first
+  if (this.__quadCount > 0) {
+    this.flush();
+  }
+
+  // Texture switch or full batch: drain the masked queue
+  if (texture !== this.__maskTexture) {
+    this.flushMasked();
+    this.__maskTexture = texture;
+  }
+
+  if (this.__maskQuadCount >= this.__maxMaskQuads) {
+    this.flushMasked();
+  }
+
+  let u0 = srcX / atlasW;
+  let v0 = srcY / atlasH;
+  let u1 = (srcX + 32) / atlasW;
+  let v1 = (srcY + 32) / atlasH;
+  let mu0 = maskX / atlasW;
+  let mv0 = maskY / atlasH;
+  let mu1 = (maskX + 32) / atlasW;
+  let mv1 = (maskY + 32) / atlasH;
+
+  let x0 = dstX;
+  let y0 = dstY;
+  let x1 = dstX + dstW;
+  let y1 = dstY + dstH;
+
+  let vd = this.__maskVertexData;
+  let o = this.__maskQuadCount * 4 * 19;
+
+  // Corner order matches the shared quad index buffer: TL, TR, BR, BL
+  let xs = [x0, x1, x1, x0];
+  let ys = [y0, y0, y1, y1];
+  let us = [u0, u1, u1, u0];
+  let vs = [v0, v0, v1, v1];
+  let mus = [mu0, mu1, mu1, mu0];
+  let mvs = [mv0, mv0, mv1, mv1];
+
+  for (let i = 0; i < 4; i++) {
+    vd[o++] = xs[i];
+    vd[o++] = ys[i];
+    vd[o++] = us[i];
+    vd[o++] = vs[i];
+    vd[o++] = mus[i];
+    vd[o++] = mvs[i];
+    vd[o++] = alpha;
+    for (let c = 0; c < 12; c++) {
+      vd[o++] = colors[c];
+    }
+  }
+
+  this.__maskQuadCount++;
+
+}
+
+SpriteBatch.prototype.flushMasked = function() {
+
+  /*
+   * Function SpriteBatch.flushMasked
+   * Submits queued masked-outfit vertex data to the GPU. Reads the tint
+   * multipliers at flush time (setTint drains this queue via flush() before
+   * changing them, so queued quads always flush under their own tint).
+   */
+
+  if (this.__contextLost) {
+    this.__maskQuadCount = 0;
+    return;
+  }
+
+  if (this.__maskQuadCount === 0) {
+    return;
+  }
+
+  this.__flushCount++;
+
+  let gl = this.__gl;
+
+  gl.useProgram(this.__maskProgram);
+  gl.uniformMatrix3fv(this.__maskUniforms.projection, false, this.__projection);
+  gl.uniform1i(this.__maskUniforms.atlas, 0);
+  gl.uniform3f(this.__maskUniforms.tint, this.__tintR, this.__tintG, this.__tintB);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, this.__maskTexture);
+
+  gl.bindVertexArray(this.__maskVao);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, this.__maskVbo);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.__maskVertexData.subarray(0, this.__maskQuadCount * 4 * 19));
+
+  gl.drawElements(gl.TRIANGLES, this.__maskQuadCount * 6, gl.UNSIGNED_SHORT, 0);
+
+  gl.bindVertexArray(null);
+
+  this.__maskQuadCount = 0;
 
 }
 
@@ -40944,6 +42358,72 @@ SpriteBatch.prototype.SPRITE_FRAGMENT_SHADER = [
   "}"
 ].join("\n");
 
+// Masked-outfit program: colorizes outfits in the shader. The mask sprite
+// (second .dat layer) marks zones with pure colors: yellow = head, red =
+// body, green = legs, blue = feet. Mirrors SpriteBuffer.__compose exactly —
+// masks are pure so the 0.9/0.1 thresholds are equality in practice.
+SpriteBatch.prototype.MASK_VERTEX_SHADER = [
+  "#version 300 es",
+  "layout(location = 0) in vec2 a_position;",
+  "layout(location = 1) in vec2 a_texCoord;",
+  "layout(location = 2) in vec2 a_maskCoord;",
+  "layout(location = 3) in float a_alpha;",
+  "layout(location = 4) in vec3 a_head;",
+  "layout(location = 5) in vec3 a_body;",
+  "layout(location = 6) in vec3 a_legs;",
+  "layout(location = 7) in vec3 a_feet;",
+  "uniform mat3 u_projection;",
+  "out vec2 v_texCoord;",
+  "out vec2 v_maskCoord;",
+  "out float v_alpha;",
+  "out vec3 v_head;",
+  "out vec3 v_body;",
+  "out vec3 v_legs;",
+  "out vec3 v_feet;",
+  "void main() {",
+  "  vec2 clipPos = (u_projection * vec3(a_position, 1.0)).xy;",
+  "  gl_Position = vec4(clipPos, 0.0, 1.0);",
+  "  v_texCoord = a_texCoord;",
+  "  v_maskCoord = a_maskCoord;",
+  "  v_alpha = a_alpha;",
+  "  v_head = a_head;",
+  "  v_body = a_body;",
+  "  v_legs = a_legs;",
+  "  v_feet = a_feet;",
+  "}"
+].join("\n");
+
+SpriteBatch.prototype.MASK_FRAGMENT_SHADER = [
+  "#version 300 es",
+  "precision mediump float;",
+  "in vec2 v_texCoord;",
+  "in vec2 v_maskCoord;",
+  "in float v_alpha;",
+  "in vec3 v_head;",
+  "in vec3 v_body;",
+  "in vec3 v_legs;",
+  "in vec3 v_feet;",
+  "uniform sampler2D u_atlas;",
+  "uniform vec3 u_tint;",
+  "out vec4 fragColor;",
+  "void main() {",
+  "  vec4 texel = texture(u_atlas, v_texCoord);",
+  "  if (texel.a < 0.01) discard;",
+  "  vec4 m = texture(u_atlas, v_maskCoord);",
+  "  vec3 c = vec3(1.0);",
+  "  if (m.a > 0.5) {",
+  "    bool r = m.r > 0.9;",
+  "    bool g = m.g > 0.9;",
+  "    bool b = m.b > 0.9;",
+  "    if (r && g && !b) { c = v_head; }",
+  "    else if (r && !g && !b) { c = v_body; }",
+  "    else if (!r && g && !b) { c = v_legs; }",
+  "    else if (!r && !g && b) { c = v_feet; }",
+  "  }",
+  "  fragColor = vec4(texel.rgb * c * min(u_tint, vec3(1.0)) + max(u_tint - vec3(1.0), vec3(0.0)), texel.a * v_alpha);",
+  "}"
+].join("\n");
+
 SpriteBatch.prototype.RECT_VERTEX_SHADER = [
   "#version 300 es",
   "layout(location = 0) in vec2 a_position;",
@@ -41602,7 +43082,7 @@ SpriteBatch.prototype.WATER_BLEND_SHADER = [
 ].join("\n");
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/sprite-buffer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/sprite-buffer.js ===== */
 
 const SpriteBuffer = function(size) {
 
@@ -42221,8 +43701,85 @@ SpriteBuffer.prototype.__loadSingleSprite = function(address) {
 
 }
 
+// ---- Shared outfit-buffer cache (2026-07-08, stair-hop crowd lag) -----------
+// Composed outfit sprites are expensive on phones (multi-layer canvas recolor
+// + GL upload per frame/direction) and depend ONLY on the outfit signature.
+// Creatures with identical outfits therefore SHARE one SpriteBuffer: a
+// re-introduced creature (someone hopping stairs next to you) or a pack of
+// same-species monsters composes each frame ONCE instead of per instance.
+// Reference-counted — owners call releaseShared() instead of destroy(), and
+// a buffer's GL texture is freed only when idle AND evicted (LRU cap), so a
+// shared buffer can never be pulled out from under a live creature.
+SpriteBuffer.__shared = new Map();      // key -> { buffer, refs, lastUse }
+SpriteBuffer.__SHARED_IDLE_MAX = 48;    // idle signatures kept warm
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/sprite.js ===== */
+SpriteBuffer.acquireShared = function (key, size) {
+
+  /*
+   * Function SpriteBuffer.acquireShared
+   * Returns the shared buffer for an outfit signature, creating it on the
+   * first request. Callers MUST pair with releaseShared().
+   */
+
+  let entry = SpriteBuffer.__shared.get(key);
+  if (entry) {
+    entry.refs++;
+    entry.lastUse = Date.now();
+    return entry.buffer;
+  }
+  let buffer = new SpriteBuffer(size);
+  buffer.__sharedKey = key;
+  SpriteBuffer.__shared.set(key, { "buffer": buffer, "refs": 1, "lastUse": Date.now() });
+  return buffer;
+
+};
+
+SpriteBuffer.releaseShared = function (buffer) {
+
+  /*
+   * Function SpriteBuffer.releaseShared
+   * Drops one reference to a shared buffer; non-shared buffers (legacy /
+   * modal previews) are destroyed directly, preserving old behaviour.
+   */
+
+  if (!buffer) return;
+  if (!buffer.__sharedKey) {
+    if (typeof buffer.destroy === "function") buffer.destroy();
+    return;
+  }
+  let entry = SpriteBuffer.__shared.get(buffer.__sharedKey);
+  if (!entry || entry.buffer !== buffer) return;   // already evicted (was idle)
+  entry.refs = Math.max(0, entry.refs - 1);
+  entry.lastUse = Date.now();
+  if (entry.refs === 0) SpriteBuffer.__pruneShared();
+
+};
+
+SpriteBuffer.__pruneShared = function () {
+
+  /*
+   * Function SpriteBuffer.__pruneShared
+   * Evicts the oldest IDLE (refs 0) shared buffers beyond the cap; eviction
+   * destroys the buffer, freeing its GL texture. In-use buffers are never
+   * evicted.
+   */
+
+  let idle = [];
+  SpriteBuffer.__shared.forEach(function (entry, key) {
+    if (entry.refs === 0) idle.push([key, entry]);
+  });
+  if (idle.length <= SpriteBuffer.__SHARED_IDLE_MAX) return;
+  idle.sort(function (a, b) { return a[1].lastUse - b[1].lastUse; });
+  let excess = idle.length - SpriteBuffer.__SHARED_IDLE_MAX;
+  for (let i = 0; i < excess; i++) {
+    SpriteBuffer.__shared.delete(idle[i][0]);
+    try { idle[i][1].buffer.destroy(); } catch (e) { /* best-effort */ }
+  }
+
+};
+
+
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/sprite.js ===== */
 
 const Sprite = function(src, position, size, glTexture, atlasWidth, atlasHeight) {
 
@@ -42245,7 +43802,7 @@ const Sprite = function(src, position, size, glTexture, atlasWidth, atlasHeight)
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/rendering/weather-canvas.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/weather-canvas.js ===== */
 
 const WeatherCanvas = function(screen) {
 
@@ -43909,7 +45466,7 @@ WeatherCanvas.prototype.drawPattern = function(pattern, x, y) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/chat-resizer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/chat-resizer.js ===== */
 
 const ChatResizer = function () {
     /*
@@ -44101,7 +45658,7 @@ ChatResizer.prototype.__pinChatBottom = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/fight-mode-selector.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/fight-mode-selector.js ===== */
 
 const FightModeSelector = function () {
 
@@ -44201,6 +45758,35 @@ FightModeSelector.prototype.syncToServer = function () {
     // drift after a reconnect/relog). Self-gating new opcode.
     if (typeof PkLockRequestPacket !== "undefined") {
         gameClient.send(new PkLockRequestPacket());
+    }
+
+    // Same treatment for the combat stance (owner 2026-07-08: the fight-mode
+    // buttons could drift from server truth in edge cases). The request also
+    // latches the capability server-side, so every later change is echoed
+    // back and adopted — the buttons become a view of server state.
+    if (typeof StanceRequestPacket !== "undefined") {
+        gameClient.send(new StanceRequestPacket());
+    }
+
+};
+
+FightModeSelector.prototype.adoptServerStance = function (fightMode, chaseMode) {
+
+    /*
+     * Function FightModeSelector.adoptServerStance
+     * Adopts the server's authoritative stance (STANCE_STATE reply/echo)
+     * WITHOUT re-sending — the buttons render server truth.
+     */
+
+    if (fightMode >= 0 && fightMode <= 2 && fightMode !== this.currentFightMode) {
+        this.currentFightMode = fightMode;
+        localStorage.setItem("fight-mode", fightMode);
+        this.__updateFightVisualState();
+    }
+    if (chaseMode >= 0 && chaseMode <= 2 && chaseMode !== this.currentChaseMode) {
+        this.currentChaseMode = chaseMode;
+        localStorage.setItem("chase-mode", chaseMode);
+        this.__updateChaseVisualState();
     }
 
 };
@@ -44414,7 +46000,7 @@ FightModeSelector.prototype.__updatePkLockVisual = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/hotbar-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/hotbar-manager.js ===== */
 
 const HotbarManager = function () {
 
@@ -47635,7 +49221,7 @@ HotbarManager.prototype.__getKeySpan = function (slotIndex) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/interface.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/interface.js ===== */
 
 const Interface = function () {
   /*
@@ -48285,7 +49871,7 @@ Interface.prototype.SPELLS.set(64, { name: "Conjure Poisoned Arrow", description
 Interface.prototype.SPELLS.set(65, { name: "Conjure Power Bolt", description: "Creates 5 power bolts", icon: { x: 8, y: 10 }, runeId: 3450, words: "exevo con vis", mana: 200, level: 14, vocations: ["paladin"] });
 Interface.prototype.SPELLS.set(67, { name: "Summon Creature", description: "Summons a creature to fight for you", icon: { x: 9, y: 9 }, words: "utevo res", mana: 60, level: 1, vocations: ["sorcerer", "druid"] });
 Interface.prototype.SPELLS.set(71, { name: "Wild Growth Rune", description: "Creates a Wild Growth rune", icon: { x: 11, y: 4 }, runeId: 3156, words: "adevo grav vita", mana: 750, level: 27, vocations: ["druid"] });
-Interface.prototype.SPELLS.set(70, { name: "Envenom", description: "Creates an Envenom rune", icon: { x: 8, y: 10 }, runeId: 3156, words: "adevo res pox", mana: 400, level: 7, vocations: ["druid"] });
+Interface.prototype.SPELLS.set(70, { name: "Envenom", description: "Creates an Envenom rune", icon: { x: 8, y: 10 }, runeId: 3179, words: "adevo res pox", mana: 400, level: 21, vocations: ["druid"] });
 
 Interface.prototype.getSpell = function (id) {
   /*
@@ -49420,7 +51006,7 @@ Interface.prototype.__enableListeners = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/layout-editor.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/layout-editor.js ===== */
 
 const LayoutEditor = function () {
 
@@ -50576,7 +52162,7 @@ LayoutEditor.prototype.__forcePanelsVisible = function (show) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-chat-body.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-chat-body.js ===== */
 
 "use strict";
 
@@ -50611,7 +52197,7 @@ ChatBodyMenu.prototype.click = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-chat-header.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-chat-header.js ===== */
 
 const ChatHeaderMenu = function(id) {
 
@@ -50660,7 +52246,7 @@ ChatHeaderMenu.prototype.click = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-container.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-container.js ===== */
 
 const ContainerMenu = function (id) {
 
@@ -50715,6 +52301,35 @@ ContainerMenu.prototype.click = function (event) {
 
     // Take action depending on the button
     switch (this.__getAction(event)) {
+        case "set-name": {
+            let so = this.slotObject;
+            let parentCid = so.which ? so.which.__containerId : null;
+            if (parentCid === null || parentCid === undefined) break;
+            let modal = gameClient.interface.modalManager.get("enter-name-modal");
+            if (!modal) break;
+            modal.setConfirmCallback(function (name) {
+                name = String(name || "").trim();
+                if (name.length === 0) return;
+                let cm = gameClient.interface && gameClient.interface.channelManager;
+                if (!cm) return;
+                cm.sendMessageText("/namebag " + parentCid + " " + so.index + " " + name, undefined, true);
+                // refresh the slot chips once the server has applied it
+                gameClient.networkManager.__requestBagNames();   // debounced + history/provenance-exempt
+            });
+            gameClient.interface.modalManager.open("enter-name-modal");
+            break;
+        }
+        case "clear-name": {
+            let so2 = this.slotObject;
+            let parentCid2 = so2.which ? so2.which.__containerId : null;
+            if (parentCid2 === null || parentCid2 === undefined) break;
+            let cm2 = gameClient.interface && gameClient.interface.channelManager;
+            if (cm2) {
+                cm2.sendMessageText("/namebag " + parentCid2 + " " + so2.index + " clear", undefined, true);
+                gameClient.networkManager.__requestBagNames();   // debounced + history/provenance-exempt
+            }
+            break;
+        }
         case "look":
             gameClient.mouse.look(this.slotObject);
             break;
@@ -50743,16 +52358,39 @@ ContainerMenu.prototype.click = function (event) {
                 // Auto-retry on toggle-close — same as the open-here case
                 // and the direct right-click in mouse.js. If the bag is
                 // already open elsewhere, server's first toggle closes it
-                // and the user has to click again. The 300ms re-send
-                // handles it transparently.
+                // and the user has to click again. Latency-tolerant window;
+                // cleared on a successful open (handleContainerOpen) so it's
+                // safe to hold this long.
                 if (isContainerItem) {
                     gameClient.__forceOpenAfterClose = this.slotObject;
                     clearTimeout(gameClient.__forceOpenAfterCloseTimeout);
                     gameClient.__forceOpenAfterCloseTimeout = setTimeout(function() {
                       gameClient.__forceOpenAfterClose = null;
-                    }, 300);
+                    }, 1500);
                 }
             }
+            gameClient.mouse.use(this.slotObject);
+            break;
+        case "open-window":
+            // Mobile long-press: route the resulting CONTAINER_OPEN into the
+            // floating centered panel (consumed in getContainerPanelFor).
+            gameClient.__nextOpenInFloatPanel = true;
+            clearTimeout(gameClient.__nextOpenInFloatPanelTimeout);
+            gameClient.__nextOpenInFloatPanelTimeout = setTimeout(function () {
+                gameClient.__nextOpenInFloatPanel = false;
+            }, 2500);
+            // Bag ALREADY open: the server's first use TOGGLES it closed, so we
+            // must re-send on the close to actually pop it out. This uses its
+            // OWN flag with a mobile-latency-tolerant window instead of the
+            // shared __forceOpenAfterClose (300ms) — that expired before the
+            // close round-trip completed on phones, so the bag just closed and
+            // never reopened (player report 2026-07-07). handleContainerClose
+            // re-asserts the float routing flag before re-sending.
+            gameClient.__floatReopenAfterClose = this.slotObject;
+            clearTimeout(gameClient.__floatReopenAfterCloseTimeout);
+            gameClient.__floatReopenAfterCloseTimeout = setTimeout(function () {
+                gameClient.__floatReopenAfterClose = null;
+            }, 2500);
             gameClient.mouse.use(this.slotObject);
             break;
         case "open-here":
@@ -50783,7 +52421,7 @@ ContainerMenu.prototype.click = function (event) {
                 clearTimeout(gameClient.__forceOpenAfterCloseTimeout);
                 gameClient.__forceOpenAfterCloseTimeout = setTimeout(function() {
                   gameClient.__forceOpenAfterClose = null;
-                }, 300);
+                }, 1500);   // latency-tolerant; cleared on a successful open (handleContainerOpen)
             }
             gameClient.mouse.use(this.slotObject);
             break;
@@ -50804,7 +52442,7 @@ ContainerMenu.prototype.click = function (event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-friend-list.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-friend-list.js ===== */
 
 const FriendListMenu = function(id) {
 
@@ -50951,7 +52589,7 @@ FriendListMenu.prototype.open = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-friend-window.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-friend-window.js ===== */
 
 const FriendWindowMenu = function(id) {
 
@@ -51041,7 +52679,7 @@ FriendWindowMenu.prototype.addFriend = function(friend) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-hotbar.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-hotbar.js ===== */
 
 "use strict";
 
@@ -51112,7 +52750,7 @@ HotbarMenu.prototype.click = function (event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-manager.js ===== */
 
 const MenuManager = function () {
 
@@ -51234,7 +52872,7 @@ MenuManager.prototype.__defocus = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-message.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-message.js ===== */
 
 const MessageMenu = function(id) {
 
@@ -51528,7 +53166,7 @@ MessageMenu.prototype.whisper = function(target) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu-screen.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-screen.js ===== */
 
 const ScreenMenu = function(id) {
 
@@ -51572,6 +53210,25 @@ ScreenMenu.prototype.click = function(event) {
       } else {
         gameClient.mouse.use(object);
       }
+      break;
+    }
+    case "open": {
+      // Explicit container open (player report 2026-07-08): bypasses the
+      // rotate branch above — the whole reason trunks had no way to open.
+      gameClient.mouse.use(object);
+      break;
+    }
+    case "open-window": {
+      // Open in its own window even when the container is open/nested
+      // elsewhere: arm the toggle-retry (a use on an already-open container
+      // first CLOSES it server-side; the retry re-uses so it lands open) —
+      // the same machinery the in-container menu uses.
+      gameClient.__forceOpenAfterClose = object;
+      clearTimeout(gameClient.__forceOpenAfterCloseTimeout);
+      gameClient.__forceOpenAfterCloseTimeout = setTimeout(function () {
+        gameClient.__forceOpenAfterClose = null;
+      }, 1500);
+      gameClient.mouse.use(object);
       break;
     }
     case "attack":
@@ -51679,7 +53336,7 @@ ScreenMenu.prototype.click = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/menus/menu.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu.js ===== */
 
 const Menu = function (id) {
 
@@ -51831,7 +53488,7 @@ Menu.prototype.buttonClose = function (event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/minimap-markers.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/minimap-markers.js ===== */
 
 /*
  * MinimapMarkers — client-local, player-placed minimap markers.
@@ -51859,7 +53516,7 @@ const MinimapMarkers = (function () {
     { name: "Gold",     glyph: "$", color: "#ffd700" },
     { name: "Caution",  glyph: "!", color: "#ff9800" },
     { name: "Quest",    glyph: "?", color: "#4fc3f7" },
-    { name: "Special",  glyph: "♦", color: "#e06ce0" },  // diamond
+    { name: "Special",  glyph: "♦︎", color: "#e06ce0" },  // diamond (+U+FE0E: emoji-capable codepoint — emoji render ignores the pink tint)
     { name: "Point",    glyph: "●", color: "#5b9dff" }   // dot
   ];
 
@@ -51981,7 +53638,7 @@ const MinimapMarkers = (function () {
 })();
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/mobile-chat.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/mobile-chat.js ===== */
 
 "use strict";
 
@@ -52215,6 +53872,14 @@ MobileChat.prototype.__bindEvents = function() {
       e.stopPropagation();
       if(self.__state === "bar" || self.__state === "full") {
         self.__openKeyboard();
+      } else if(self.__state === "keyboard" && self.__useNativeKeyboard()) {
+        // Device-keyboard mode: the OS keyboard can be dismissed (swipe-down /
+        // Done) while __state stays "keyboard" — re-focus the native field
+        // within THIS tap gesture to bring it back (setExternalInput blurs then
+        // focuses, so it reopens even when focus never left the field). Without
+        // this, a dismissed keyboard could only be recovered by a full reload —
+        // the same wedge as the man-symbol path.
+        self.__openNativeInput();
       }
     }, { passive: false });
   }
@@ -52450,13 +54115,27 @@ MobileChat.prototype.openPrivateChat = function(name) {
   // Sync preview to show the private channel messages
   this.__renderPreview();
 
-  // Auto-open keyboard so the player can start typing immediately
+  // Auto-open keyboard so the player can start typing immediately.
   let self = this;
-  setTimeout(function() {
-    if (self.__state === "bar") {
-      self.__openKeyboard();
-    }
-  }, 50);
+  if (this.__useNativeKeyboard()) {
+    // Device-keyboard mode: the native input's focus() MUST run synchronously
+    // inside the triggering tap gesture. iOS ignores focus() called from a
+    // setTimeout, so the OS keyboard never opened — AND __openKeyboard still
+    // flipped __state to "keyboard", so the input tap handler (which only
+    // re-opens from "bar"/"full") no-op'd and the chat was wedged until a full
+    // browser reload (Antoua 2026-07-08: "open a new chat with the man symbol,
+    // the device keyboard won't show again, have to close the browser fully").
+    // Every caller (DM confirm, friend list, chat menu) is a touch handler, so
+    // opening inline keeps focus() within the gesture. VK mode has no gesture
+    // requirement and keeps the 50 ms bar-settle delay below.
+    if (this.__state === "bar") this.__openKeyboard();
+  } else {
+    setTimeout(function() {
+      if (self.__state === "bar") {
+        self.__openKeyboard();
+      }
+    }, 50);
+  }
 
 };
 
@@ -53071,6 +54750,10 @@ MobileChat.prototype.__syncChannelPill = function() {
  * Message Rendering (Full Chat)
  * ============================ */
 
+// Scroll-up hold expiry — after this long, the next incoming live message
+// snaps the log/preview back to the latest line
+MobileChat.prototype.SCROLL_HOLD_MS = 60000;
+
 MobileChat.prototype.__renderMessages = function(preserveScroll) {
 
   /*
@@ -53110,8 +54793,17 @@ MobileChat.prototype.__renderMessages = function(preserveScroll) {
   // scroll listener catches up). Restoring scrollTop after a wipe wasn't enough
   // on mobile — still snapped to current (Jay Ashborne report 2026-06-24).
   if(preserveScroll && !stickToBottom) {
-    this.__logHasBuffered = true;
-    return;
+    // Scroll-up hold expiry (owner request 2026-07-02): the hold is a
+    // reading/copying aid, not a permanent detach — after SCROLL_HOLD_MS
+    // the next incoming line falls through to a full rebuild + snap.
+    if(!this.__logScrolledUpAt) {
+      this.__logScrolledUpAt = Date.now();
+    }
+    if(Date.now() - this.__logScrolledUpAt <= MobileChat.prototype.SCROLL_HOLD_MS) {
+      this.__logHasBuffered = true;
+      return;
+    }
+    this.__logScrolledUpAt = 0;
   }
 
   this.__logMessages.innerHTML = "";
@@ -53156,8 +54848,9 @@ MobileChat.prototype.__renderMessages = function(preserveScroll) {
     this.__logMessages.scrollTop = prevScrollTop;
   }
 
-  // Fully rendered — nothing buffered/skipped remains.
+  // Fully rendered — nothing buffered/skipped remains; any scroll-up hold ends
   this.__logHasBuffered = false;
+  this.__logScrolledUpAt = 0;
 
 };
 
@@ -53189,8 +54882,15 @@ MobileChat.prototype.__renderPreview = function(preserveScroll) {
   // preview under the user's finger while they read history. Buffer the line
   // and catch up when they scroll back to the bottom.
   if(preserveScroll && this.__previewExpanded && !stickToBottom) {
-    this.__previewHasBuffered = true;
-    return;
+    // Same scroll-up hold expiry as the full log (see __renderMessages)
+    if(!this.__previewScrolledUpAt) {
+      this.__previewScrolledUpAt = Date.now();
+    }
+    if(Date.now() - this.__previewScrolledUpAt <= MobileChat.prototype.SCROLL_HOLD_MS) {
+      this.__previewHasBuffered = true;
+      return;
+    }
+    this.__previewScrolledUpAt = 0;
   }
 
   this.__preview.innerHTML = "";
@@ -53363,9 +55063,19 @@ MobileChat.prototype.__openDMPrompt = function() {
 
   let self = this;
 
-  // Save original bar content and replace with DM input
-  this.__savedBarHTML = this.__bar.innerHTML;
-  this.__bar.innerHTML = "";
+  // Hide the bar's own children IN PLACE — never innerHTML-replace them.
+  // The old save/restore approach DETACHED every original node: the
+  // constructor-bound listeners died and __nativeInput kept pointing at
+  // the dead .mobile-chat-native-input, so in device-keyboard mode the
+  // next text-bar tap ran __openNativeInput on a ghost and the chat
+  // wedged until reload (owner report 2026-07-08). Hiding keeps nodes,
+  // listeners and references alive.
+  this.__dmHiddenChildren = [];
+  for (let ci = 0; ci < this.__bar.children.length; ci++) {
+    let child = this.__bar.children[ci];
+    this.__dmHiddenChildren.push([child, child.style.display]);
+    child.style.display = "none";
+  }
   this.__bar.classList.add("mobile-dm-bar");
 
   let input = document.createElement("input");
@@ -53457,9 +55167,21 @@ MobileChat.prototype.__closeDMPrompt = function() {
 
   this.__state = "bar";
 
-  // Restore original bar content
-  if (this.__bar && this.__savedBarHTML) {
-    this.__bar.innerHTML = this.__savedBarHTML;
+  // Remove the DM prompt nodes and unhide the bar's own children — they
+  // were never detached (see __openDMPrompt), so every reference and
+  // listener (including the native input) is still live: no re-query,
+  // no re-bind.
+  if (this.__bar) {
+    let dmInput = this.__bar.querySelector(".mobile-dm-input");
+    let dmConfirm = this.__bar.querySelector(".mobile-dm-confirm");
+    if (dmInput && dmInput.parentNode) dmInput.parentNode.removeChild(dmInput);
+    if (dmConfirm && dmConfirm.parentNode) dmConfirm.parentNode.removeChild(dmConfirm);
+    if (this.__dmHiddenChildren) {
+      for (let ci = 0; ci < this.__dmHiddenChildren.length; ci++) {
+        this.__dmHiddenChildren[ci][0].style.display = this.__dmHiddenChildren[ci][1];
+      }
+      this.__dmHiddenChildren = null;
+    }
     this.__bar.classList.remove("mobile-dm-bar");
     this.__bar.classList.remove("chat-bar-floating");
     this.__bar.style.bottom = "";
@@ -53467,85 +55189,9 @@ MobileChat.prototype.__closeDMPrompt = function() {
     this.__bar.style.right = "";
     this.__bar.style.background = "";
     this.__savedBarHTML = null;
-
-    // Re-bind DOM references that were inside the bar
-    this.__input = this.__bar.querySelector(".mobile-chat-msg");
-    this.__sendBtn = this.__bar.querySelector(".mobile-chat-send");
-    this.__expandBtn = this.__bar.querySelector(".mobile-chat-expand");
-    this.__channelPill = this.__bar.querySelector(".mobile-chat-channel-pill");
-    this.__dmBtn = this.__bar.querySelector(".mobile-chat-dm");
-
-    // Update the keyboard's input display to the new DOM element
-    if (this.__keyboard && this.__input) {
-      this.__keyboard.__inputDisplay = this.__input;
-    }
-
-    // Re-bind events on restored elements
-    this.__rebindBarEvents();
   }
 
   this.__dmOverlay = null;
-
-};
-
-MobileChat.prototype.__rebindBarEvents = function() {
-
-  /*
-   * Function MobileChat.__rebindBarEvents
-   * Re-binds touch events on bar elements after innerHTML restore
-   */
-
-  let self = this;
-
-  if (this.__dmBtn) {
-    this.__dmBtn.addEventListener("touchstart", function(e) {
-      e.stopPropagation();
-    }, { passive: true });
-    this.__dmBtn.addEventListener("touchend", function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      self.__openDMPrompt();
-    }, { passive: false });
-  }
-
-  if (this.__expandBtn) {
-    this.__expandBtn.addEventListener("mousedown", function(e) {
-      e.preventDefault();
-    });
-    this.__expandBtn.addEventListener("touchstart", function(e) {
-      e.stopPropagation();
-    }, { passive: true });
-    this.__expandBtn.addEventListener("touchend", function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      if (self.__state === "bar" || self.__state === "keyboard") {
-        self.__openFullChat();
-      } else if (self.__state === "full") {
-        self.__closeLog();
-      }
-    }, { passive: false });
-  }
-
-  if (this.__channelPill) {
-    this.__channelPill.addEventListener("touchstart", function(e) {
-      e.stopPropagation();
-    }, { passive: true });
-    this.__channelPill.addEventListener("touchend", function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      self.__cycleChannel();
-    }, { passive: false });
-  }
-
-  if (this.__input) {
-    this.__input.addEventListener("touchend", function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      if (self.__state === "bar" || self.__state === "full") {
-        self.__openKeyboard();
-      }
-    }, { passive: false });
-  }
 
 };
 
@@ -53570,7 +55216,7 @@ MobileChat.prototype.handleBackButton = function() {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/mobile-container-panel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/mobile-container-panel.js ===== */
 
 const MobileContainerPanel = function (panelId, layoutConfigId) {
 
@@ -53672,13 +55318,20 @@ MobileContainerPanel.prototype.addContainer = function (containerId, title) {
 
   // Track the first non-depot container as the equipped backpack
   // (neither depot — global nor Star Fishisland — may claim the backpack slot)
-  if (this.__backpackContainerId === null && containerId !== CONST.CONTAINER.DEPOT && containerId !== CONST.CONTAINER.STARFISH_DEPOT) {
+  // Server truth: the equipped backpack-slot container arrives already
+  // titled "Main Backpack" (container-manager) — no client heuristics.
+  if (title === "Main Backpack") {
     this.__backpackContainerId = containerId;
   }
 
-  // Truncate title for tab display, prefix backpack with *
-  let prefix = (containerId === this.__backpackContainerId) ? "*" : "";
-  let displayTitle = prefix + (title.length > 12 ? title.substring(0, 10) + ".." : title);
+  // The equipped backpack's tab reads "Main Backpack" (owner 2026-07-03 —
+  // the old "*"-prefix marker was cryptic); other tabs truncate as before.
+  let displayTitle;
+  if (containerId === this.__backpackContainerId) {
+    displayTitle = "Main Backpack";
+  } else {
+    displayTitle = title.length > 12 ? title.substring(0, 10) + ".." : title;
+  }
 
   let titleSpan = document.createElement("span");
   titleSpan.textContent = displayTitle;
@@ -53933,7 +55586,97 @@ MobileContainerPanel.prototype.__handleTabClose = function (containerId, event) 
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-captcha.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-automations.js ===== */
+
+"use strict";
+
+const AutomationsModal = function (id) {
+
+  /*
+   * Class AutomationsModal
+   * Hub → Automations: journal-style tabs (Free | Premium). The Free tab
+   * hosts the auto-loot/eat/refill checkboxes (MOVED from Settings —
+   * element ids unchanged so settings.js bindings and persisted state
+   * survive). The Premium tab hosts the Loot List (+ destinations) entry;
+   * free accounts see a Get-Premium note and a greyed button.
+   */
+
+  Modal.call(this, id);
+
+  this.__tabButtons = Array.from(this.element.querySelectorAll(".auto-tab"));
+  this.__tabContents = {
+    "free": document.getElementById("auto-tab-free"),
+    "premium": document.getElementById("auto-tab-premium")
+  };
+  let self = this;
+  this.__tabButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      // Premium tab IS the loot list for premium accounts — open the module
+      // directly (owner 2026-07-03); free accounts see the CTA tab instead.
+      if (btn.dataset.tab === "premium") {
+        let premium = false;
+        try { premium = !!(gameClient.__premiumUntil && new Date(gameClient.__premiumUntil + "Z") > new Date()); } catch (e) {}
+        if (premium) {
+          let cm = gameClient.interface && gameClient.interface.channelManager;
+          if (cm && typeof cm.sendMessageText === "function") cm.sendMessageText("/lootlist");
+          return;
+        }
+      }
+      self.__switchTab(btn.dataset.tab);
+    });
+  });
+
+  // Free accounts: "Get Premium" opens the website store — same link the
+  // login screen's Shop button uses.
+  let getPremium = document.getElementById("automations-get-premium");
+  if (getPremium) {
+    getPremium.addEventListener("click", function () {
+      window.open(window.location.protocol + "//" + window.location.hostname + ":3000/store.html", "_blank");
+    });
+  }
+
+  // Settings keeps a pointer button so the old home still leads here.
+  let fromSettings = document.getElementById("settings-open-automations");
+  if (fromSettings) {
+    fromSettings.addEventListener("click", function () {
+      gameClient.interface.modalManager.open("automations-modal");
+    });
+  }
+
+};
+
+AutomationsModal.prototype = Object.create(Modal.prototype);
+AutomationsModal.constructor = AutomationsModal;
+
+AutomationsModal.prototype.handleOpen = function () {
+
+  let premium = false;
+  try {
+    premium = !!(gameClient.__premiumUntil && new Date(gameClient.__premiumUntil + "Z") > new Date());
+  } catch (e) {}
+  let note = document.getElementById("automations-premium-note");
+  if (note) {
+    note.textContent = premium
+      ? "Premium active — all automation features unlocked."
+      : "These features need a premium account.";
+    note.style.color = premium ? "#8ec97a" : "#e0a030";
+  }
+};
+
+AutomationsModal.prototype.__switchTab = function (tab) {
+
+  this.__tabButtons.forEach(function (btn) {
+    btn.classList.toggle("active", btn.dataset.tab === tab);
+  });
+  Object.keys(this.__tabContents).forEach(function (name) {
+    let el = this.__tabContents[name];
+    if (el) el.style.display = (name === tab) ? "" : "none";
+  }.bind(this));
+
+};
+
+
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-captcha.js ===== */
 
 /* =============================================================================
  * Captcha modal i18n
@@ -55330,7 +57073,7 @@ CaptchaModal.prototype.__createTile = function (index, spriteId, spriteType) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-character-select.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-character-select.js ===== */
 
 const CharacterSelectModal = function(element) {
 
@@ -55416,6 +57159,7 @@ CharacterSelectModal.prototype.handleOpen = function(options) {
   this.__sessionToken = options.sessionToken;
   this.__host = options.host;
   this.__characters = options.characters;
+  this.__worlds = options.worlds || null;   // multi-world: {id:{name,pvp,online}}
   this.__premiumUntil = options.premiumUntil || null;
   this.__hasEmail = !!options.hasEmail;
 
@@ -55536,6 +57280,27 @@ CharacterSelectModal.prototype.__renderCharacterList = function() {
     infoSpan.textContent = "Lvl %s - %s".format(character.level, vocationLabel);
 
     row.appendChild(nameSpan);
+
+    // Multi-world: compact world PILL between name and level once more
+    // than one world is enabled — single-world accounts see no change.
+    // The row is a 3-column flex (name ellipsizes, pill + level never
+    // shrink), so long names can't collide with the level column on any
+    // width/orientation. Pill text color = status light: GREEN online,
+    // RED offline (owner spec — no "(Offline)" suffix); neutral gold
+    // when liveness is unknown (old server reply).
+    if (this.__worlds && Object.keys(this.__worlds).length > 1) {
+      let w = this.__worlds[character.world || "main"];
+      let worldSpan = document.createElement("span");
+      worldSpan.className = "character-select-world";
+      worldSpan.style.color = "#e5c46a";
+      let label = w ? w.name : (character.world || "main");
+      if (w && typeof w.online === "boolean") {
+        worldSpan.style.color = w.online ? "#5cb85c" : "#e06c5a";
+      }
+      worldSpan.textContent = label;
+      row.appendChild(worldSpan);
+    }
+
     row.appendChild(infoSpan);
 
     row.addEventListener("click", this.__handleSelectCharacter.bind(this, row, character.name));
@@ -55800,7 +57565,176 @@ CharacterSelectModal.prototype.__validateNameField = function(field) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-chat.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-character.js ===== */
+
+"use strict";
+
+const CharacterModal = function (id) {
+
+  /*
+   * Class CharacterModal
+   * Hub → Character: one window, journal-style TABS (Frags | Blessings |
+   * Outfit). Frags/Blessings render from the CHARACTER_INFO payload that
+   * arrives when the window opens (cached for tab switches and the outfit
+   * dialog's back button — no extra round-trips). The Outfit tab is a
+   * launcher: it opens the outfit dialog with a dynamic back target so its
+   * standard ‹ button returns here. Chrome (‹ / ◐) comes from the
+   * modal-manager framework — never hand-rolled.
+   */
+
+  Modal.call(this, id);
+
+  this.__lastInfo = null;
+  this.__activeTab = "frags";
+
+  this.__tabButtons = Array.from(this.element.querySelectorAll(".char-tab"));
+  this.__tabContents = {
+    "frags": document.getElementById("char-tab-frags"),
+    "blessings": document.getElementById("char-tab-blessings")
+  };
+
+  let self = this;
+  this.__tabButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      let tab = btn.dataset.tab;
+      if (tab === "outfit") {
+        // Launcher tab: the outfit dialog is its own window (canvas preview,
+        // color picker). Standard ‹ returns here; HUD-opened dialogs never
+        // get one (target cleared in OutfitModal.handleClose).
+        let mgr = gameClient.interface.modalManager;
+        let outfit = mgr.get("outfit-modal");
+        if (outfit) outfit.__backTarget = "character-modal";
+        return mgr.open("outfit-modal");
+      }
+      self.__switchTab(tab);
+    });
+  });
+
+};
+
+CharacterModal.prototype = Object.create(Modal.prototype);
+CharacterModal.constructor = CharacterModal;
+
+CharacterModal.prototype.handleOpen = function (info) {
+
+  // Reopened without fresh data (outfit back button) → render the cache.
+  if (info) this.__lastInfo = info;
+  info = this.__lastInfo;
+  if (!info) return;
+
+  let nameEl = document.getElementById("character-header");
+  if (nameEl && gameClient.player) {
+    let name = gameClient.player.name || "";
+    let level = (gameClient.player.skills && gameClient.player.skills.level) || "";
+    nameEl.textContent = name + (level ? " — Level " + level : "");
+  }
+
+  this.__renderFrags(info.frags || {});
+  this.__renderBlessings(info.blessings || {});
+  this.__switchTab(this.__activeTab === "outfit" ? "frags" : this.__activeTab);
+
+};
+
+CharacterModal.prototype.__switchTab = function (tab) {
+
+  this.__activeTab = tab;
+
+  this.__tabButtons.forEach(function (btn) {
+    btn.classList.toggle("active", btn.dataset.tab === tab);
+  });
+
+  Object.keys(this.__tabContents).forEach(function (name) {
+    let el = this.__tabContents[name];
+    if (el) el.style.display = (name === tab) ? "" : "none";
+  }.bind(this));
+
+};
+
+// ---- render helpers (Hunt Analyzer row language) ----
+
+CharacterModal.prototype.__esc = function (str) {
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+};
+
+CharacterModal.prototype.__row = function (label, value, sub, valueColor) {
+  return "<div style=\"display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06);\">"
+    + "<span style=\"color:#bbb;\">" + this.__esc(label) + "</span>"
+    + "<span><b style=\"color:" + (valueColor || "#eee") + "\">" + this.__esc(value) + "</b>"
+    + (sub ? "<span style=\"color:#888;font-size:11px;margin-left:8px;\">" + this.__esc(sub) + "</span>" : "")
+    + "</span></div>";
+};
+
+CharacterModal.prototype.__renderFrags = function (f) {
+
+  let el = this.__tabContents.frags;
+  if (!el) return;
+  let self = this;
+  let fmt = this.__formatDuration;
+  let fragRow = function (label, count, cap, dropMs) {
+    let sub = (dropMs !== null && dropMs !== undefined && count > 0)
+      ? "drops in " + fmt(dropMs) : null;
+    let color = count >= cap && cap > 0 ? "#e66" : "#eee";
+    return self.__row(label, count + " / " + cap, sub, color);
+  };
+  let skullColors = { "None": "#8c8", "White": "#eee", "Red": "#e66", "Black": "#e66", "Pink (cheater)": "#e6a" };
+  el.innerHTML = fragRow("Daily", f.daily || 0, f.dailyCap || 0, f.dailyDropMs)
+    + fragRow("Weekly", f.weekly || 0, f.weeklyCap || 0, f.weeklyDropMs)
+    + fragRow("Monthly", f.monthly || 0, f.monthlyCap || 0, f.monthlyDropMs)
+    + this.__row("Skull", f.skull || "None", f.skullExpiresMs ? "expires in " + fmt(f.skullExpiresMs) : null,
+        skullColors[f.skull] || "#eee");
+
+};
+
+CharacterModal.prototype.__renderBlessings = function (b) {
+
+  let el = this.__tabContents.blessings;
+  if (!el) return;
+  let esc = this.__esc;
+  let names = b.pilgrimage || [];
+  let html = this.__row("Pilgrimage", names.length + " / 5", null, names.length === 5 ? "#8c8" : "#eee");
+  if (names.length > 0) {
+    html += "<div style=\"padding:4px 0 2px;\">" + names.map(function (n) {
+      return "<div style=\"color:#9c9;font-size:12px;padding:1px 0 1px 10px;\">✦ " + esc(n) + "</div>";
+    }).join("") + "</div>";
+  }
+  html += this.__row("Temple blessing", b.temple ? (names.length === 5 ? "Held in reserve" : "Active") : "None",
+    null, b.temple ? "#8c8" : "#888");
+  if (b.halfSpark) {
+    let otherNpc = b.halfSpark === "Earth" ? "Pydar (Fire half)" : "Kawill (Earth half)";
+    html += this.__row("Half Spark", b.halfSpark + " half held", "visit " + otherNpc, "#fc6");
+  }
+  if (typeof b.lossPct === "number") {
+    html += this.__row("On death", b.lossPct + "% XP/skill loss",
+      b.itemsProtected ? "items protected" : "items drop without AoL",
+      b.lossPct === 0 ? "#8c8" : "#e96");
+  }
+  if (b.consumeNote) {
+    html += "<div style=\"color:#888;font-size:11px;margin-top:6px;\">" + esc(b.consumeNote) + "</div>";
+  }
+  el.innerHTML = html;
+
+};
+
+CharacterModal.prototype.__formatDuration = function (ms) {
+
+  /*
+   * Function CharacterModal.__formatDuration
+   * Compact duration: "2d 5h", "5h 12m", "12m", "45s".
+   */
+
+  let s = Math.max(0, Math.floor(ms / 1000));
+  let d = Math.floor(s / 86400);
+  let h = Math.floor((s % 86400) / 3600);
+  let m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + "d " + h + "h";
+  if (h > 0) return h + "h " + m + "m";
+  if (m > 0) return m + "m";
+  return (s % 60) + "s";
+
+};
+
+
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-chat.js ===== */
 
 "use strict";
 
@@ -55928,7 +57862,7 @@ ChatModal.prototype.__handleFocus = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-chess.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-chess.js ===== */
 
 const ChessModal = function (id) {
 
@@ -55992,7 +57926,12 @@ const ChessModal = function (id) {
 ChessModal.prototype = Object.create(Modal.prototype);
 ChessModal.prototype.constructor = ChessModal;
 
-ChessModal.prototype.GLYPH = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
+// ︎ = VARIATION SELECTOR-15 (text presentation). U+265F ♟ defaults to
+// EMOJI presentation (Unicode 11) — Windows/Android canvas then draws the
+// color-emoji bitmap and IGNORES fillStyle, so WHITE pawns rendered black
+// (Konfa 2026-07-04). The other five glyphs have no emoji mapping but get
+// the selector too for uniformity. Same fix as the D-pad arrows.
+ChessModal.prototype.GLYPH = { k: "♚︎", q: "♛︎", r: "♜︎", b: "♝︎", n: "♞︎", p: "♟︎" };
 
 ChessModal.prototype.__cmd = function (text) {
   let cm = gameClient.interface && gameClient.interface.channelManager;
@@ -56296,7 +58235,7 @@ ChessModal.prototype.__handleSquare = function (index) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-confirm.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-confirm.js ===== */
 
 const ConfirmModal = function(element) {
 
@@ -56347,7 +58286,7 @@ ConfirmModal.prototype.handleConfirm = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-create-account.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-create-account.js ===== */
 
 const CreateAccountModal = function(element) {
 
@@ -56659,7 +58598,7 @@ CreateAccountModal.prototype.handleConfirm = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-death.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-death.js ===== */
 
 "use strict";
 
@@ -56685,13 +58624,18 @@ DeathModal.prototype.handleConfirm = function () {
      * When confirmed, logout and auto-reconnect the same character
      */
 
-    // Mark as intentional close so __handleClose does a clean reset
+    // Mark as intentional close so __handleClose does a clean reset, and flag
+    // the death respawn so it re-opens the login feedback floater AFTER that
+    // reset — interface.reset() closes every modal, including the one opened
+    // below, which left the player with zero "logging in" feedback
     gameClient.networkManager.__intentionalClose = true;
+    gameClient.networkManager.__deathReconnectPending = true;
 
     // Send logout packet
     gameClient.send(new LogoutPacket());
 
     // Show connecting indicator so the player knows something is happening
+    // (covers the gap until the socket close; __handleClose re-opens it)
     gameClient.interface.modalManager.open("floater-connecting", "Reconnecting...");
 
     // Auto-reconnect the same character after socket closes
@@ -56718,7 +58662,7 @@ DeathModal.prototype.handleCancel = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-enter-name.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-enter-name.js ===== */
 
 const EnterNameModal = function(element) {
 
@@ -56867,7 +58811,7 @@ EnterNameModal.prototype.__cleanupKeyboard = function(input) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-games.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-games.js ===== */
 
 const GamesModal = function (id) {
 
@@ -57056,7 +59000,7 @@ GamesModal.prototype.onLeaderboard = function (info) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-guild.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-guild.js ===== */
 
 const GuildModal = function(element) {
 
@@ -57410,7 +59354,7 @@ GuildModal.prototype.__escape = function(str) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-hotbar-add.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-hotbar-add.js ===== */
 
 const HotbarAddModal = function (element) {
 
@@ -57519,11 +59463,18 @@ const HotbarAddModal = function (element) {
 HotbarAddModal.prototype = Object.create(Modal.prototype);
 HotbarAddModal.prototype.constructor = HotbarAddModal;
 
-// Seasoned, gourmet, and cooked food SIDs that lack DatFlagMultiUse but should appear in hotbar
+// EVERY edible SID from the server's food table — foods lack
+// DatFlagMultiUse, so without this whitelist they never appear in the
+// hotbar picker (player report 2026-07-05: green mushroom). Mirrors
+// data/760/actions/definitions/food.js; when foods are added there,
+// regenerate this list from its "ticks" keys.
 HotbarAddModal.USABLE_FOOD_SIDS = {
-  9912: true, 9913: true, 9914: true, 9915: true, 9916: true, 9917: true, // gourmet food
-  9921: true, 9922: true, 9923: true, 9924: true,                         // seasoned food
-  9925: true, 9926: true, 9927: true, 9928: true, 9929: true, 9930: true  // cooked mushrooms/egg/toast
+  2362: true, 2666: true, 2667: true, 2668: true, 2669: true, 2670: true, 2671: true, 2672: true, 2673: true, 2674: true,
+  2675: true, 2676: true, 2677: true, 2678: true, 2679: true, 2680: true, 2681: true, 2682: true, 2683: true, 2684: true,
+  2685: true, 2686: true, 2687: true, 2688: true, 2689: true, 2690: true, 2691: true, 2695: true, 2696: true, 2787: true,
+  2788: true, 2789: true, 2790: true, 2791: true, 2792: true, 2793: true, 2794: true, 2795: true, 2796: true, 9908: true,
+  9909: true, 9910: true, 9911: true, 9921: true, 9922: true, 9923: true, 9924: true, 9925: true, 9926: true, 9927: true,
+  9928: true, 9929: true, 9930: true
 };
 
 HotbarAddModal.prototype.handleOpen = function (index) {
@@ -58220,6 +60171,41 @@ HotbarAddModal.prototype.__internalButtonClick = function (target) {
 
 }
 
+HotbarAddModal.prototype.handleConfirm = function () {
+
+  /*
+   * Function HotbarAddModal.handleConfirm
+   * Enter confirms the ACTIVE tab (owner 2026-07-08: Enter previously fell
+   * through to the base handler, which closed the modal WITHOUT saving —
+   * silently discarding typed text). Returning false keeps the modal open
+   * (ModalManager only closes on a non-false return).
+   */
+
+  // Text tab: identical to clicking the confirm-text button (refuses
+  // empty/oversize input, so Enter can never silently discard).
+  if (this.__textPanel && this.__textPanel.style.display !== "none") {
+    return this.__internalButtonClick({ getAttribute: function () { return "confirm-text"; } });
+  }
+
+  // Spells tab: Enter adds the TOP spell still visible under the search
+  // filter — type "exura", hit Enter, done. The row's own click handler
+  // assigns the slot AND closes the modal, so return false to stop the
+  // manager from double-closing.
+  if (this.__spellsPanel && this.__spellsPanel.style.display !== "none") {
+    let rows = this.__spellList.children;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].style.display === "none") continue;
+      rows[i].click();
+      return false;
+    }
+    return false;
+  }
+
+  // Items / actions tabs are click-driven — Enter keeps the modal open.
+  return false;
+
+}
+
 HotbarAddModal.prototype.__showMobileKeyboard = function () {
 
   /*
@@ -58289,7 +60275,7 @@ HotbarAddModal.prototype.__hideMobileKeyboard = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-house-info.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-house-info.js ===== */
 
 const HouseInfoModal = function(element) {
 
@@ -58310,7 +60296,8 @@ const HouseInfoModal = function(element) {
     "guests": document.getElementById("house-tab-guests"),
     "subowners": document.getElementById("house-tab-subowners"),
     "doors": document.getElementById("house-tab-doors"),
-    "transfer": document.getElementById("house-tab-transfer")
+    "transfer": document.getElementById("house-tab-transfer"),
+    "leave": document.getElementById("house-tab-leave")
   };
 
   this.__tabButtons.forEach(function (btn) {
@@ -58374,6 +60361,8 @@ HouseInfoModal.prototype.handleOpen = function(info) {
     // Transfer tab: shown to an owner who can sell, OR to a buyer with an
     // incoming offer (who is otherwise not privileged here).
     if (tab === "transfer") visible = (info.isOwner && info.transferEnabled) || !!info.pendingTransfer;
+    // Leave tab: owner-only (give up / abandon the house).
+    if (tab === "leave") visible = !!info.isOwner;
     btn.style.display = visible ? "" : "none";
   });
 
@@ -58383,6 +60372,7 @@ HouseInfoModal.prototype.handleOpen = function(info) {
   this.__renderSubowners(info);
   this.__renderDoors(info);
   this.__renderTransfer(info);
+  this.__renderLeave(info);
 
   // If we're refreshing with a tab already active, keep it; otherwise pick default.
   let startTab = this.__activeTab;
@@ -58402,6 +60392,7 @@ HouseInfoModal.prototype.handleOpen = function(info) {
 HouseInfoModal.prototype.__isTabVisible = function(tab, info) {
   if (tab === "overview") return true;
   if (tab === "transfer") return (info.isOwner && info.transferEnabled) || !!info.pendingTransfer;
+  if (tab === "leave") return !!info.isOwner;
   if (!info.isPrivileged) return false;
   if (tab === "subowners") return !!info.isOwner;
   return true;
@@ -58459,7 +60450,18 @@ HouseInfoModal.prototype.__renderOverview = function(info) {
   }.bind(this));
   html += "</dl>";
 
-  if (!info.isPrivileged) {
+  // Unowned house + viewer owns none yet → offer a Buy button (runs /buyhouse;
+  // the server re-checks position + funds and shows the purchase confirm).
+  if (info.canBuy) {
+    let afford = (info.bankBalance || 0) >= info.price;
+    html += "<p class='house-note'>This house is unowned. You can buy it from your bank balance"
+      + " (" + (info.bankBalance || 0).toLocaleString() + " gold).</p>";
+    html += "<button id='house-buy-btn' type='button'" + (afford ? "" : " disabled")
+      + ">Buy this house — " + info.price.toLocaleString() + " gold</button>";
+    if (!afford) {
+      html += "<p class='house-note'>You don't have enough gold in the bank for this house yet.</p>";
+    }
+  } else if (!info.isPrivileged) {
     html += "<p class='house-note'>Log in as the owner or a sub-owner to see and edit guest and door lists.</p>";
   } else if (info.isOwner) {
     html += "<p class='house-note'>You are the owner. Manage access from the Guests, Sub-owners, and Doors tabs.</p>";
@@ -58468,6 +60470,66 @@ HouseInfoModal.prototype.__renderOverview = function(info) {
   }
 
   this.__tabContents.overview.innerHTML = html;
+
+  // Wire the Buy button (innerHTML wiped any previous listener). /buyhouse
+  // opens the server's purchase confirm dialog; close this window so the
+  // confirm isn't hidden behind it.
+  let buyBtn = document.getElementById("house-buy-btn");
+  if (buyBtn) {
+    buyBtn.addEventListener("click", function () {
+      if (typeof ChannelMessagePacket === "undefined") return;
+      gameClient.send(new ChannelMessagePacket(0x00, 0, "/buyhouse"));
+      if (gameClient.interface && gameClient.interface.modalManager) {
+        gameClient.interface.modalManager.close();
+      }
+    });
+  }
+
+}
+
+HouseInfoModal.prototype.__renderLeave = function(info) {
+
+  /*
+   * Function HouseInfoModal.__renderLeave
+   * Owner-only "give up the house" panel — the client half of /leavehouse.
+   * Spells out the consequences (released to the market, NO refund, items go
+   * to depot) before the button, which opens the server's abandon confirm.
+   */
+
+  if (!info.isOwner) {
+    this.__tabContents.leave.innerHTML = "";
+    return;
+  }
+
+  let name = this.__escape(info.name || "your house");
+  let html = "";
+  html += "<p class='house-note'>Leaving <strong>" + name + "</strong> gives it up completely:</p>";
+  // Plain single-column bulleted list. (NOT house-stat-list — that's a
+  // two-column auto/1fr grid for the Overview's short label/value pairs;
+  // reusing it here threw these long sentences into two columns and squished
+  // the right one into a one-word-per-line strip — player report 2026-07-08.)
+  html += "<ul style='margin:6px 0 10px 0; padding-left:20px; list-style:disc; display:block; line-height:1.45;'>";
+  html += "<li style='margin-bottom:6px;'>You are removed as the owner and it is released to the open market for anyone to buy.</li>";
+  html += "<li style='margin-bottom:6px;'><span style='color:#ff6666;'>No gold is refunded</span> — you do not get the purchase price back.</li>";
+  html += "<li style='margin-bottom:6px;'>All items inside are moved to your depot.</li>";
+  html += "<li>To sell it to a specific player for gold instead, use the <strong>Transfer</strong> tab.</li>";
+  html += "</ul>";
+  html += "<button id='house-leave-btn' type='button'>Give up " + name + "</button>";
+
+  this.__tabContents.leave.innerHTML = html;
+
+  let leaveBtn = document.getElementById("house-leave-btn");
+  if (leaveBtn) {
+    leaveBtn.addEventListener("click", function () {
+      // /leavehouse -> server abandon confirm dialog. Close this window so the
+      // confirm dialog is visible.
+      if (typeof ChannelMessagePacket === "undefined") return;
+      gameClient.send(new ChannelMessagePacket(0x00, 0, "/leavehouse"));
+      if (gameClient.interface && gameClient.interface.modalManager) {
+        gameClient.interface.modalManager.close();
+      }
+    });
+  }
 
 }
 
@@ -58898,7 +60960,7 @@ HouseInfoModal.prototype.__escape = function(str) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-hunt-info.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-hunt-info.js ===== */
 
 const HuntInfoModal = function(element) {
 
@@ -59204,7 +61266,7 @@ HuntInfoModal.prototype.__escape = function (s) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-ignore.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-ignore.js ===== */
 
 const IgnoreModal = function(element) {
 
@@ -59360,7 +61422,7 @@ IgnoreModal.prototype.__escape = function(str) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-login-pin.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-login-pin.js ===== */
 
 const LoginPinModal = function (element) {
 
@@ -59471,7 +61533,7 @@ LoginPinModal.prototype.__submit = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-lootlist.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-lootlist.js ===== */
 
 const LootListModal = function (element) {
 
@@ -59506,9 +61568,7 @@ const LootListModal = function (element) {
   this.__presetNameConfirm = document.getElementById("lootlist-preset-name-confirm");
   this.__presetNameCancel = document.getElementById("lootlist-preset-name-cancel");
   this.__count = document.getElementById("lootlist-count");
-  this.__currentState = document.getElementById("lootlist-current-state");
-  this.__enableBtn = document.getElementById("lootlist-enable-btn");
-  this.__disableBtn = document.getElementById("lootlist-disable-btn");
+  this.__toggleBtn = document.getElementById("lootlist-toggle-btn");
   this.__currentEnabled = true;  // server-side state, updated on handleOpen
 
   this.__items = [];              // flat list from server
@@ -59531,11 +61591,15 @@ const LootListModal = function (element) {
   if (this.__filterSelected) {
     this.__filterSelected.addEventListener("change", this.__renderList.bind(this));
   }
-  if (this.__enableBtn) {
-    this.__enableBtn.addEventListener("click", this.__handleSave.bind(this, true));
-  }
-  if (this.__disableBtn) {
-    this.__disableBtn.addEventListener("click", this.__handleSave.bind(this, false));
+  if (this.__toggleBtn) {
+    // One state-toggle: the button SHOWS the current state (green Enabled /
+    // red Disabled) and clicking flips it — owner 2026-07-04: the old
+    // Enable+Disable action pair read backwards (label = action, color =
+    // state). Saves the current selection with the flip, stays open so the
+    // player sees the state change.
+    this.__toggleBtn.addEventListener("click", function () {
+      this.__handleSave(this.__currentEnabled !== true);
+    }.bind(this));
   }
   if (this.__presetSelect) {
     this.__presetSelect.addEventListener("change", this.__handlePresetSelect.bind(this));
@@ -59577,6 +61641,12 @@ LootListModal.PRESET_CAP = 8;
 
 LootListModal.prototype.handleOpen = function (info) {
 
+  // Snapshot the just-loaded state AFTER the synchronous open work below
+  // completes (selection/routes/enabled are all set within this call) —
+  // handleClose compares against it to decide whether to auto-save.
+  let __fpSelf = this;
+  setTimeout(function () { __fpSelf.__openFingerprint = __fpSelf.__stateFingerprint(); }, 0);
+
   /*
    * Function LootListModal.handleOpen
    * Populates the modal from the server payload.
@@ -59586,6 +61656,9 @@ LootListModal.prototype.handleOpen = function (info) {
 
   this.__items = Array.isArray(info.items) ? info.items : [];
   this.__selected = new Set(Array.isArray(info.selected) ? info.selected : []);
+  // Loot router: the player's named bags (destination options) + saved routes
+  this.__bags = Array.isArray(info.bags) ? info.bags : [];
+  this.__routes = (info.routes && typeof info.routes === "object") ? Object.assign({}, info.routes) : {};
   this.__activeLetter = "A";  // default to "A" on open — fast (~30 rows)
   this.__raresSnapshot = null;
 
@@ -59708,6 +61781,16 @@ LootListModal.prototype.__createRow = function (entry) {
   cb.checked = this.__selected.has(entry.sid);
   cb.addEventListener("change", function () {
     if (cb.checked) {
+      // HARD CAP 500 — the save packet holds at most 500 sids (1024-byte
+      // inbound wire budget) and used to SILENTLY slice the tail: items
+      // past #500 (and their destinations!) vanished on every save —
+      // 'sometimes it routes, sometimes main bp' (JOHbola 2026-07-04,
+      // rares bulk-tick pushed his list past the cap). Block visibly.
+      if (this.__selected.size >= this.MAX_ITEMS) {
+        cb.checked = false;
+        this.__showCapHint();
+        return;
+      }
       this.__selected.add(entry.sid);
       row.classList.add("selected");
     } else {
@@ -59745,11 +61828,93 @@ LootListModal.prototype.__createRow = function (entry) {
     nameLine.appendChild(tag);
   }
 
+  // Loot router destination: a small cycle button — Main BP -> each named
+  // bag -> back. Default (no route) = main backpack, which is also the
+  // server's fallback whenever the chosen bag isn't available.
+  let routeBtn = document.createElement("button");
+  routeBtn.type = "button";
+  routeBtn.className = "lootlist-route-btn";
+  let self2 = this;
+  let paintRoute = function () {
+    let r = self2.__routes[entry.sid];
+    routeBtn.textContent = r ? ("→ " + r) : "→ Main BP";
+    routeBtn.classList.toggle("routed", !!r);
+    // green = destination bag currently exists; red = missing (falls back
+    // to the main backpack until a bag carries that name again)
+    let exists = !r || (self2.__bags || []).indexOf(r) !== -1;
+    routeBtn.classList.toggle("route-ok", !!r && exists);
+    routeBtn.classList.toggle("route-missing", !!r && !exists);
+    if (r && !exists) routeBtn.title = "Bag not found — loot goes to your main backpack until a bag is named '" + r + "'";
+    else if ((self2.__bags || []).length === 0) routeBtn.title = "Name a bag to unlock loot destinations — click for how.";
+    else routeBtn.title = "Click to cycle where this item is looted to.";
+  };
+  routeBtn.addEventListener("click", function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();   // don't toggle the row checkbox
+    if ((self2.__bags || []).length === 0) {
+      return self2.__showRouteHint();
+    }
+    let opts = [null].concat(self2.__bags || []);
+    let cur = self2.__routes[entry.sid] || null;
+    let idx = opts.indexOf(cur);
+    let next = opts[(idx + 1) % opts.length];
+    if (next) self2.__routes[entry.sid] = next;
+    else delete self2.__routes[entry.sid];
+    paintRoute();
+  });
+  paintRoute();
+
   row.appendChild(cb);
   row.appendChild(canvas.canvas);
   row.appendChild(nameLine);
+  // ALWAYS shown (owner 2026-07-04): with no named bags the button still
+  // reads '-> Main BP' and clicking it teaches how to unlock destinations
+  // — hiding it made the whole routing feature undiscoverable.
+  row.appendChild(routeBtn);
 
   return row;
+
+};
+
+// Wire-budget ceiling: the LOOT_LIST_UPDATE packet fits at most 500 sids
+// (plus the route tail) inside the 1024-byte inbound cap. Must match the
+// slice guards in client protocol.js and server handleLootListUpdate.
+LootListModal.prototype.MAX_ITEMS = 500;
+
+LootListModal.prototype.__showCapHint = function () {
+
+  /*
+   * Function LootListModal.__showCapHint
+   * Visible refusal when the 500-item ceiling is hit — the old behavior
+   * SILENTLY sliced the overflow (and its destinations) out of every
+   * save, which read as random routing failure (JOHbola 2026-07-04).
+   */
+
+  let el = document.getElementById("lootlist-route-hint");
+  if (!el) return;
+  el.textContent = "Loot list limit reached — at most " + this.MAX_ITEMS + " items. Untick something first.";
+  el.style.display = "";
+  clearTimeout(this.__routeHintT);
+  this.__routeHintT = setTimeout(function () { el.style.display = "none"; }, 6000);
+
+};
+
+LootListModal.prototype.__showRouteHint = function () {
+
+  /*
+   * Function LootListModal.__showRouteHint
+   * Teaching moment for loot routing (owner 2026-07-04): clicking the
+   * always-visible '-> Main BP' button with NO named bags explains how to
+   * create destinations instead of silently doing nothing. Auto-hides.
+   */
+
+  let el = document.getElementById("lootlist-route-hint");
+  if (!el) return;
+  let mobile = gameClient.touch && gameClient.touch.isMobileMode;
+  el.textContent = "Name a container first — " + (mobile ? "long-press" : "right-click") + " a bag in your backpack, Set Name.";
+  el.style.display = "";
+  clearTimeout(this.__routeHintT);
+  this.__routeHintT = setTimeout(function () { el.style.display = "none"; }, 8000);
 
 };
 
@@ -59767,6 +61932,10 @@ LootListModal.prototype.__renderList = function () {
   if (!this.__list) return;
   this.__list.innerHTML = "";
   this.__rowEls = [];
+  // Stale lazy state from a previous "All" render must not leak into
+  // letter/filter views (search drains __lazyQueue — see __applySearchFilter).
+  this.__lazyQueue = null;
+  if (this.__lazyObserver) { this.__lazyObserver.disconnect(); this.__lazyObserver = null; }
 
   let letter = this.__activeLetter;
   let onlySelected = this.__filterSelected && this.__filterSelected.checked;
@@ -59799,30 +61968,59 @@ LootListModal.prototype.__renderChunked = function (items) {
 
   /*
    * Function LootListModal.__renderChunked
-   * Paints "All" in 60-row batches via requestAnimationFrame so the
-   * modal doesn't lock the main thread for ~1-2 seconds. Cancelable
-   * by another __renderList call (the next call clears innerHTML).
+   * LAZY renderer for "All" (owner 2026-07-04: the rAF chunk-marathon
+   * still caused a noticeable open lag — ~10 frames of 60 sprite draws
+   * each). Renders the first LAZY_BATCH rows synchronously (same cost as
+   * a letter view) and appends the next batch only when a sentinel at the
+   * list's end scrolls within 200px of view (IntersectionObserver). An
+   * active SEARCH drains matching rows out of the unrendered queue (see
+   * __applySearchFilter) so search always covers the full item set.
    */
 
-  let CHUNK = 60;
-  let i = 0;
+  let LAZY_BATCH = 40;
   let renderToken = ++this.__renderToken;
-  let step = function () {
-    if (renderToken !== this.__renderToken) return;  // superseded
+  let self = this;
+  this.__lazyQueue = items.slice();
+
+  if (this.__lazyObserver) { this.__lazyObserver.disconnect(); this.__lazyObserver = null; }
+  let sentinel = document.createElement("div");
+  sentinel.className = "lootlist-lazy-sentinel";
+
+  let renderBatch = function () {
+    if (renderToken !== self.__renderToken) return;
     let frag = document.createDocumentFragment();
-    let end = Math.min(i + CHUNK, items.length);
-    for (; i < end; i++) {
-      let row = this.__createRow(items[i]);
+    let n = 0;
+    while (n < LAZY_BATCH && self.__lazyQueue.length > 0) {
+      let row = self.__createRow(self.__lazyQueue.shift());
       frag.appendChild(row);
-      this.__rowEls.push(row);
+      self.__rowEls.push(row);
+      n++;
     }
-    this.__list.appendChild(frag);
-    // Re-apply the active search query to the newly added rows so typing
-    // while All is still painting doesn't show non-matching results.
-    this.__applySearchFilter();
-    if (i < items.length) requestAnimationFrame(step);
-  }.bind(this);
-  requestAnimationFrame(step);
+    self.__list.appendChild(frag);
+    self.__list.appendChild(sentinel);   // keep the sentinel last
+    self.__applySearchFilter();
+    if (self.__lazyQueue.length === 0) {
+      if (self.__lazyObserver) { self.__lazyObserver.disconnect(); self.__lazyObserver = null; }
+      sentinel.remove();
+    }
+  };
+
+  renderBatch();   // first screenful synchronously — open feels instant
+
+  if (this.__lazyQueue.length > 0 && typeof IntersectionObserver === "function") {
+    this.__lazyObserver = new IntersectionObserver(function (entries) {
+      if (entries.some(function (e) { return e.isIntersecting; })) renderBatch();
+    }, { root: this.__list, rootMargin: "200px" });
+    this.__lazyObserver.observe(sentinel);
+  } else if (this.__lazyQueue.length > 0) {
+    // No IntersectionObserver (ancient webview): drain in rAF chunks as before.
+    let step = function () {
+      if (renderToken !== self.__renderToken) return;
+      renderBatch();
+      if (self.__lazyQueue.length > 0) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
 
 };
 
@@ -59845,6 +62043,26 @@ LootListModal.prototype.__applySearchFilter = function () {
     row.style.display = visible ? "" : "none";
   }
 
+  // Lazy "All" + active search: matches may still sit in the unrendered
+  // queue — drain THOSE rows now (misses stay queued for scroll). Without
+  // this, searching while lazily rendered only covered the first batches.
+  if (q && this.__lazyQueue && this.__lazyQueue.length > 0) {
+    let keep = [];
+    let frag = document.createDocumentFragment();
+    for (let i = 0; i < this.__lazyQueue.length; i++) {
+      let entry = this.__lazyQueue[i];
+      if ((entry.name || "").toLowerCase().indexOf(q) !== -1) {
+        let row = this.__createRow(entry);
+        frag.appendChild(row);
+        this.__rowEls.push(row);
+      } else {
+        keep.push(entry);
+      }
+    }
+    this.__lazyQueue = keep;
+    this.__list.appendChild(frag);
+  }
+
 };
 
 LootListModal.prototype.__handleRaresToggle = function () {
@@ -59863,10 +62081,16 @@ LootListModal.prototype.__handleRaresToggle = function () {
   if (on) {
     // Snapshot current selection so OFF can roll back precisely
     this.__raresSnapshot = new Set(this.__selected);
-    // Bulk-add every rare item to the selection
+    // Bulk-add every rare item to the selection — RESPECTING the 500 cap
+    // (this bulk-tick is exactly how JOHbola's list silently overflowed
+    // and dropped his power-bolt/dragon-slayer entries + routes).
+    let capped = false;
     this.__items.forEach(function (entry) {
-      if (entry.isRare) this.__selected.add(entry.sid);
+      if (!entry.isRare) return;
+      if (this.__selected.size >= this.MAX_ITEMS) { capped = true; return; }
+      this.__selected.add(entry.sid);
     }.bind(this));
+    if (capped) this.__showCapHint();
   } else if (this.__raresSnapshot) {
     // Roll back to the pre-toggle selection
     this.__selected = this.__raresSnapshot;
@@ -59883,8 +62107,52 @@ LootListModal.prototype.__updateCount = function () {
 
   if (this.__count) {
     let n = this.__selected.size;
-    this.__count.textContent = n + " item" + (n === 1 ? "" : "s") + " selected";
+    // Show the ceiling once the list is big enough for it to matter —
+    // "487 / 500 items" warns long before the cap blocks a tick.
+    this.__count.textContent = n >= 400
+      ? (n + " / " + this.MAX_ITEMS + " items selected")
+      : (n + " item" + (n === 1 ? "" : "s") + " selected");
+    this.__count.classList.toggle("lootlist-count-max", n >= this.MAX_ITEMS);
   }
+
+};
+
+LootListModal.prototype.__stateFingerprint = function () {
+
+  /*
+   * Function LootListModal.__stateFingerprint
+   * Serializes what a save would send (selection + routes-for-selection +
+   * enabled) so handleClose only commits when something actually changed.
+   */
+
+  let items = Array.from(this.__selected).sort(function (a, b) { return a - b; });
+  // Routes are sent UNFILTERED (all known routes, not just selected items):
+  // filtering meant every save PERMANENTLY dropped the destination of
+  // anything unticked at that moment (the rares-toggle OFF untick +
+  // save-on-close combo ate JOHbola's power bolt / dragon slayer routes).
+  // Owner design intent: destinations persist; re-ticking an item finds
+  // its old destination waiting. Deletion still works — the picker's
+  // 'Main BP' cycle deletes from __routes itself.
+  let routes = Object.assign({}, this.__routes || {});
+  return JSON.stringify([items, routes, this.__currentEnabled === true]);
+
+};
+
+LootListModal.prototype.handleClose = function () {
+
+  /*
+   * Function LootListModal.handleClose
+   * Closing the window SAVES (owner 2026-07-04: 'if you click the module
+   * away nothing is saved' — the toggle no longer doubles as the save
+   * button). Commits selection + routes, preserving the enabled state —
+   * only when something changed since open (no packet on a look-and-close).
+   */
+
+  try {
+    if (this.__openFingerprint !== undefined && this.__stateFingerprint() !== this.__openFingerprint) {
+      this.__commitSelection();
+    }
+  } catch (e) { /* closing must never throw */ }
 
 };
 
@@ -59899,11 +62167,17 @@ LootListModal.prototype.__handleSave = function (enabled) {
 
   let items = Array.from(this.__selected);
   try {
-    gameClient.send(new LootListUpdatePacket(items, enabled === true));
+    // MUST send routes (filtered to the selection) — the packet writer
+    // always writes the route tail, so omitting routes sent count=0 and
+    // the server REPLACED __lootRoutes with {} — every Enable/Disable
+    // click silently wiped all loot destinations (found 2026-07-04).
+    // ALL routes, unfiltered — see __stateFingerprint for why.
+    gameClient.send(new LootListUpdatePacket(items, enabled === true, Object.assign({}, this.__routes || {})));
   } catch (e) {
     console.error("[lootlist] save failed:", e);
   }
-  gameClient.interface.modalManager.close();
+  this.__currentEnabled = enabled === true;
+  this.__updateStateBadge();
 
 };
 
@@ -59919,7 +62193,8 @@ LootListModal.prototype.__commitSelection = function () {
    */
 
   try {
-    gameClient.send(new LootListUpdatePacket(Array.from(this.__selected), this.__currentEnabled));
+    // ALL routes, unfiltered — see __stateFingerprint for why.
+    gameClient.send(new LootListUpdatePacket(Array.from(this.__selected), this.__currentEnabled, Object.assign({}, this.__routes || {})));
   } catch (e) {
     console.error("[lootlist] commit failed:", e);
   }
@@ -59936,14 +62211,15 @@ LootListModal.prototype.__updateStateBadge = function () {
    * needing a separate checkbox.
    */
 
-  if (this.__currentState) {
+  if (this.__toggleBtn) {
     let active = this.__currentEnabled === true;
-    this.__currentState.textContent = active ? "Currently: ENABLED" : "Currently: PAUSED";
-    this.__currentState.classList.toggle("on", active);
-    this.__currentState.classList.toggle("off", !active);
+    this.__toggleBtn.textContent = active ? "Enabled" : "Disabled";
+    this.__toggleBtn.title = active
+      ? "Auto-looting is ON. Click to pause (your list and destinations are kept)."
+      : "Auto-looting is OFF. Click to enable.";
+    this.__toggleBtn.classList.toggle("on", active);
+    this.__toggleBtn.classList.toggle("off", !active);
   }
-  if (this.__enableBtn) this.__enableBtn.classList.toggle("active", this.__currentEnabled === true);
-  if (this.__disableBtn) this.__disableBtn.classList.toggle("active", this.__currentEnabled === false);
 
 };
 
@@ -60018,6 +62294,8 @@ LootListModal.prototype.__handlePresetSelect = function () {
   if (!p) return;
 
   this.__selected = new Set(Array.isArray(p.items) ? p.items : []);
+  // Presets carry destinations too (routes: sid -> bag name)
+  if (p.routes && typeof p.routes === "object") this.__routes = Object.assign({}, p.routes);
 
   // Re-render so freshly-selected rows show in the right state — and so
   // "show selected only" reflects the new selection if it's active.
@@ -60068,6 +62346,7 @@ LootListModal.prototype.__handlePresetSaveConfirm = function () {
 
   presets[name] = {
     items: Array.from(this.__selected),
+    routes: Object.assign({}, this.__routes || {}),
     savedAt: Date.now()
   };
 
@@ -60194,7 +62473,7 @@ LootListModal.prototype.__flashPresetSaved = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-manager.js ===== */
 
 const ModalManager = function () {
 
@@ -60223,6 +62502,8 @@ const ModalManager = function () {
   this.register(IgnoreModal, "ignore-modal");
   this.register(PartyInfoModal, "party-info-modal");
   this.register(TaskInfoModal, "task-info-modal");
+  this.register(CharacterModal, "character-modal");
+  this.register(AutomationsModal, "automations-modal");
   this.register(SpawnMapModal, "spawn-map-modal");
   this.register(MenuModal, "menu-modal");
   this.register(GamesModal, "games-modal");
@@ -60572,6 +62853,7 @@ ModalManager.prototype.open = function (id, options) {
   this.__openedModal.show();
   this.__openedModal.handleOpen(options);
   this.__applyBackButton(prevId);
+  this.__applyCloseButton();
   // After it's shown + populated, keep a tall window from cropping off the top.
   if (gameClient.interface && gameClient.interface.__clampOpenedModal) {
     gameClient.interface.__clampOpenedModal(this.__openedModal.element);
@@ -60639,6 +62921,9 @@ ModalManager.prototype.SEETHROUGH_MODAL_IDS = {
   "spawn-map-modal": true,
   "house-info-modal": true,
   "chat-modal": true,            // the "Channels" window (Hub → Channels)
+  "character-modal": true,       // Hub → Character (frags/blessings/outfit tabs)
+  "automations-modal": true,     // Hub → Automations (Free | Premium tabs)
+  "outfit-modal": true,
   // Settings (reachable without going through the Hub).
   "settings-modal": true
 };
@@ -60652,8 +62937,80 @@ ModalManager.prototype.MODAL_PARENT = {
   "games-modal": "menu-modal",        // Games window  → Hub
   "chess-modal": "games-modal",       // each game     → Games window
   "simple-game-modal": "games-modal",
-  "table-game-modal": "games-modal"
+  "table-game-modal": "games-modal",
+  "character-modal": "menu-modal",    // Character     → Hub
+  "automations-modal": "menu-modal",  // Automations   → Hub
+  "lootlist-modal": "automations-modal" // Loot List    → Automations
 };
+
+ModalManager.prototype.__chromeInsert = function (el, btn, rank) {
+
+  /*
+   * Function ModalManager.__chromeInsert
+   * UNIFORM chrome bar: one flex container pinned top-right per modal
+   * holds all header buttons in canonical order (rank 0 = see-through,
+   * 1 = back, 2 = close). Flexbox owns spacing and collapse — a hidden
+   * button occupies no space, so the row is always tight and aligned BY
+   * CONSTRUCTION. This replaced per-button absolute slots, which left
+   * gaps whenever a button was absent (owner: 'still a mess').
+   */
+
+  let bar = el.querySelector(":scope > .modal-chrome");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.className = "modal-chrome";
+    el.insertBefore(bar, el.firstChild);
+  }
+  btn.dataset.rank = String(rank);
+  for (let i = 0; i < bar.children.length; i++) {
+    if (parseInt(bar.children[i].dataset.rank || "9", 10) > rank) {
+      bar.insertBefore(btn, bar.children[i]);
+      return;
+    }
+  }
+  bar.appendChild(btn);
+
+}
+
+ModalManager.prototype.__applyCloseButton = function () {
+
+  /*
+   * Function ModalManager.__applyCloseButton
+   * UNIFORM window chrome (owner 2026-07-03: 'use uniform buttons — the
+   * problem is we're using different elements'): the X was per-modal
+   * MARKUP while < and the see-through eye are injected, so they never
+   * aligned reliably. The manager now injects the X too (same element
+   * family, .modal-x-btn) and hides the modal's legacy markup X. Click
+   * follows the backdrop-cancel semantics: handleCancel() === false
+   * blocks dismissal (captcha etc.).
+   */
+
+  let modal = this.__openedModal;
+  if (!modal || !modal.element) return;
+  let el = modal.element;
+
+  el.querySelectorAll(":scope > .close-button-transparent").forEach(function (b) {
+    b.style.display = "none";
+  });
+
+  let x = el.querySelector(".modal-x-btn");
+  if (!x) {
+    let self = this;
+    x = document.createElement("button");
+    x.type = "button";
+    x.className = "modal-x-btn symbol-button";
+    x.innerHTML = "✕";
+    x.title = "Close";
+    x.addEventListener("click", function () {
+      if (!self.isOpened()) return;
+      if (self.__openedModal.handleCancel() === false) return;
+      self.close();
+    });
+    this.__chromeInsert(el, x, 2);
+  }
+  x.style.display = "";
+
+}
 
 ModalManager.prototype.__applyBackButton = function (prevId) {
 
@@ -60674,8 +63031,12 @@ ModalManager.prototype.__applyBackButton = function (prevId) {
   let el = modal.element;
   let back = el.querySelector(".modal-back-btn");
 
-  // Where does < go? Static parent wins; else the Hub if we came from it.
+  // Where does < go? Static parent wins; then a DYNAMIC parent an opener set
+  // on the modal instance (modal.__backTarget — e.g. the outfit dialog goes
+  // back to Character ONLY when Character opened it, never from the HUD
+  // button); else the Hub if we came straight from it.
   let target = this.MODAL_PARENT[el.id]
+    || modal.__backTarget
     || (prevId === this.HUB_MODAL_ID ? this.HUB_MODAL_ID : null);
 
   if (target) {
@@ -60684,16 +63045,18 @@ ModalManager.prototype.__applyBackButton = function (prevId) {
       back = document.createElement("button");
       back.type = "button";
       back.className = "modal-back-btn symbol-button";
-      back.innerHTML = "‹";   // ‹ — back chevron
+      back.innerHTML = "&#10094;";   // ❮ heavy chevron — the light ‹ read too small at any font size
       // Read the live target at click time so the same reused button always
       // navigates to the current window's parent.
       back.addEventListener("click", function () {
         self.open(back.getAttribute("data-back") || self.HUB_MODAL_ID);
       });
-      el.insertBefore(back, el.firstChild);
+      self.__chromeInsert(el, back, 1);
     }
     back.setAttribute("data-back", target);
-    back.title = (target === "games-modal") ? "Back to Games" : "Back to Hub";
+    back.title = (target === "games-modal") ? "Back to Games"
+      : (target === "character-modal") ? "Back to Character"
+      : (target === "automations-modal") ? "Back to Automations" : "Back to Hub";
     back.style.display = "";
   } else if (back) {
     back.style.display = "none";
@@ -60743,7 +63106,7 @@ ModalManager.prototype.__applySeeThroughToggle = function () {
       document.body.classList.toggle("games-seethrough-active", now);
       self.__refreshSeeThroughToggle(btn, now);
     });
-    el.insertBefore(btn, el.firstChild);
+    this.__chromeInsert(el, btn, 0);
   }
 
   btn.style.display = "";
@@ -60766,7 +63129,7 @@ ModalManager.prototype.__refreshSeeThroughToggle = function (btn, on) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-map.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-map.js ===== */
 
 const MapModal = function (element) {
 
@@ -61691,7 +64054,7 @@ MapModal.prototype.__drawMarkers = function () {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-marker.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-marker.js ===== */
 
 const MarkerModal = function(id) {
 
@@ -61829,7 +64192,7 @@ MarkerModal.prototype.__handleDelete = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-menu.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-menu.js ===== */
 
 const MenuModal = function (id) {
 
@@ -61852,9 +64215,9 @@ const MenuModal = function (id) {
   // data-menu value → the slash command to fire (or null = handled specially).
   this.__COMMANDS = {
     "journal": "/journal",
+    "character": "/charinfo",
     "house": "/house",
     "party": "/party",
-    "lootlist": "/lootlist",
     "hunt": "/hunt"
   };
 
@@ -61938,6 +64301,45 @@ MenuModal.prototype.handleOpen = function () {
     acct.classList.toggle("menu-account-premium", premium);
   }
 
+  // In-game time, bottom-left corner (game-balance style; owner 2026-07-03).
+  // The client clock is already server-synced (WORLD_TIME -> Clock.setPhase),
+  // so this is purely local. Ticks every second while the Hub is open —
+  // the game clock runs faster than real time.
+  this.__updateGametime();
+  let self2 = this;
+  this.__gametimeTimer = setInterval(function () { self2.__updateGametime(); }, 1000);
+
+};
+
+MenuModal.prototype.handleClose = function () {
+
+  /*
+   * Function MenuModal.handleClose
+   * Stops the in-game clock tick while the Hub is closed.
+   */
+
+  if (this.__gametimeTimer) {
+    clearInterval(this.__gametimeTimer);
+    this.__gametimeTimer = null;
+  }
+
+};
+
+MenuModal.prototype.__updateGametime = function () {
+
+  /*
+   * Function MenuModal.__updateGametime
+   * Renders the world clock into the Hub's bottom-left corner.
+   */
+
+  let el = document.getElementById("menu-gametime");
+  if (!el) return;
+  try {
+    el.textContent = "Time: " + gameClient.world.clock.getTimeString();
+  } catch (e) {
+    el.textContent = "";
+  }
+
 };
 
 MenuModal.prototype.__handleClick = function (which) {
@@ -61963,6 +64365,12 @@ MenuModal.prototype.__handleClick = function (which) {
   // Quest Log is a client-side modal — open it directly (closes this menu).
   if (which === "quests") {
     gameClient.interface.modalManager.open("quest-log-modal");
+    return;
+  }
+
+  // Automations is a client-side modal (Free | Premium tabs).
+  if (which === "automations") {
+    gameClient.interface.modalManager.open("automations-modal");
     return;
   }
 
@@ -62024,7 +64432,7 @@ MenuModal.prototype.__handleClick = function (which) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-move-item.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-move-item.js ===== */
 
 const MoveItemModal = function(element) {
 
@@ -62234,7 +64642,7 @@ MoveItemModal.prototype.__adjustCount = function(delta) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-oauth-create.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-oauth-create.js ===== */
 
 const OAuthCreateModal = function (element) {
 
@@ -62423,7 +64831,8 @@ OAuthCreateModal.prototype.handleConfirm = function () {
     "body": JSON.stringify({
       "sessionToken": this.__sessionToken,
       "name": name,
-      "sex": sex
+      "sex": sex,
+      "world": window.__creationWorld || "main"
     })
   }).then(function (response) {
     if (!response.ok) {
@@ -62438,7 +64847,8 @@ OAuthCreateModal.prototype.handleConfirm = function () {
       "characters": response.characters,
       "premiumUntil": response.premiumUntil || null,
       "sessionToken": response.sessionToken,
-      "host": response.host
+      "host": response.host,
+      "worlds": response.worlds || null
     });
   }).catch(function (error) {
     if (errorEl) { errorEl.textContent = error; errorEl.style.display = "block"; }
@@ -62449,7 +64859,7 @@ OAuthCreateModal.prototype.handleConfirm = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-offer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-offer.js ===== */
 
 const OfferModal = function (element) {
 
@@ -63004,7 +65414,7 @@ OfferModal.prototype.__bindSliderTouch = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-outfit.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-outfit.js ===== */
 
 const OutfitModal = function(id) {
 
@@ -63043,6 +65453,7 @@ OutfitModal.prototype.disableAddons = function() {
 }
 
 OutfitModal.prototype.handleOpen = function(options) {
+
 
   /*
    * Function OutfitModal.handleOpen
@@ -63392,8 +65803,20 @@ OutfitModal.prototype.__renderOutfit = function() {
 
 }
 
+OutfitModal.prototype.handleClose = function () {
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-party-info.js ===== */
+  /*
+   * Function OutfitModal.handleClose
+   * Drops the dynamic back target (set by the Character modal's outfit
+   * button) so a later HUD-opened dialog doesn't show a back button.
+   */
+
+  this.__backTarget = null;
+
+};
+
+
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-party-info.js ===== */
 
 const PartyInfoModal = function(element) {
 
@@ -63674,7 +66097,7 @@ PartyInfoModal.prototype.__renderParty = function(info) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-queue.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-queue.js ===== */
 
 const QueueModal = function (id) {
 
@@ -63737,7 +66160,7 @@ QueueModal.prototype.update = function (position, totalAhead, premiumDays) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-readable.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-readable.js ===== */
 
 const ReadableModal = function (id) {
 
@@ -63761,7 +66184,15 @@ ReadableModal.prototype.handleOpen = function (packet) {
   let writerLine = document.getElementById("book-writer-line");
 
   textarea.value = packet.content.replace(/\\n/g, "\n");
-  textarea.disabled = !packet.writeable;
+  // readOnly, NOT disabled: disabled textareas can't be text-selected in
+  // Chromium at all, so players couldn't copy from books/letters (player
+  // report 2026-07-05). readOnly keeps the text selectable/copyable while
+  // still blocking edits; the [readonly] CSS twin keeps the muted look.
+  textarea.disabled = false;
+  textarea.readOnly = !packet.writeable;
+  // Muted look via class, NOT :read-only — the mobile VK path sets the
+  // readonly attribute on WRITEABLE books too (OS-keyboard suppression).
+  textarea.classList.toggle("book-readonly", !packet.writeable);
 
   // Show placeholder hint for labels so players know the expected format
   if (packet.name.toLowerCase() === "label" && packet.writeable) {
@@ -63789,6 +66220,14 @@ ReadableModal.prototype.handleOpen = function (packet) {
 
   // Show/hide save button based on writeable status
   saveButton.style.display = packet.writeable ? "inline-block" : "none";
+
+  // Keyboard hint (desktop only — mobile types via the virtual keyboard):
+  // Enter saves, Shift+Enter inserts a newline.
+  let enterHint = document.getElementById("book-enter-hint");
+  if (enterHint) {
+    let isMobileHint = gameClient.touch && gameClient.touch.isMobileMode;
+    enterHint.style.display = (packet.writeable && !isMobileHint) ? "" : "none";
+  }
 
   this.setTitle(packet.name);
 
@@ -63962,7 +66401,7 @@ ReadableModal.prototype.__cleanupKeyboard = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-shop.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-shop.js ===== */
 
 const ShopModal = function (element) {
 
@@ -64283,7 +66722,7 @@ ShopModal.prototype.__handleSelectOffer = function (canvas, offer, index) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-shrine.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-shrine.js ===== */
 
 // Shrine modal i18n — same 8 locales as the captcha, and it REUSES the
 // captcha's locale machinery (captchaResolveLocale / captchaSetOverride /
@@ -64605,7 +67044,7 @@ ShrineModal.prototype.__clearTimers = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-simplegame.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-simplegame.js ===== */
 
 const SimpleGameModal = function (id) {
 
@@ -64839,7 +67278,7 @@ SimpleGameModal.prototype.__stopClock = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-spawn-map.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-spawn-map.js ===== */
 
 const SpawnMapModal = function (id) {
 
@@ -65204,7 +67643,7 @@ SpawnMapModal.prototype.__panBy = function (clientX, clientY) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-spellbook.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-spellbook.js ===== */
 
 const SpellbookModal = function (element) {
 
@@ -65387,7 +67826,7 @@ SpellbookModal.prototype.handleOpen = function (index) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-tablegame.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-tablegame.js ===== */
 
 const TableGameModal = function (id) {
 
@@ -65877,7 +68316,11 @@ TableGameModal.prototype.__pkCard = function (card) {
   if (!card) return '<span class="pk-card pk-empty"></span>';
   let R = { 11: "J", 12: "Q", 13: "K", 14: "A" };
   let r = R[card.r] || (card.r === 10 ? "10" : String(card.r));
-  let SU = { s: "♠", h: "♥", d: "♦", c: "♣" };
+  // U+FE0E (text presentation) on every suit: the suit codepoints are
+  // emoji-capable, and some Android/Samsung/Windows font stacks render
+  // them as COLOR EMOJI which ignores the pk-red CSS (♦ comes out BLUE on
+  // Samsung). Same class as the chess-pawn fix (Konfa 2026-07-04).
+  let SU = { s: "♠︎", h: "♥︎", d: "♦︎", c: "♣︎" };
   let red = (card.s === "h" || card.s === "d");
   return '<span class="pk-card' + (red ? " pk-red" : "") + '">' + r + '<span class="pk-suit">' + (SU[card.s] || "") + '</span></span>';
 };
@@ -65916,7 +68359,7 @@ TableGameModal.prototype.__pkPod = function (seat, isYou, yourCards, winnerSet, 
   let act = (seat.act && !seat.folded) ? ('<div class="pk-pod-act">' + this.__esc(seat.act) + '</div>') : (seat.folded ? '<div class="pk-pod-act pk-act-fold-lbl">Folded</div>' : "");
   return '<div class="' + cls + '">' +
     '<div class="pk-pod-cards">' + cards + bet + '</div>' +
-    '<div class="pk-pod-name" title="' + this.__esc(seat.name) + '">' + this.__esc(this.__shortName(seat.name, 11)) + chip + blind + allin + '</div>' +
+    '<div class="pk-pod-name" title="' + this.__esc(seat.name) + '">' + '<span class="pk-pod-nametext">' + this.__esc(this.__shortName(seat.name, 11)) + '</span>' + chip + blind + allin + '</div>' +
     '<div class="pk-pod-stack">💰 ' + (seat.stack || 0) + '</div>' +
     act +
     '</div>';
@@ -66079,7 +68522,7 @@ TableGameModal.prototype.__pkSetRaise = function (to, minTo, maxTo, isBet) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-task-info.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-task-info.js ===== */
 
 const TaskInfoModal = function(element) {
 
@@ -66636,8 +69079,12 @@ TaskInfoModal.prototype.__mapClustersFor = function (name) {
   let m = this.__map;
   let out = [];
   if (!m.data) return out;
+  // Case-INSENSITIVE: task defs say "Crypt Shambler", the spawn list says
+  // "Crypt shambler" — the exact-match compare made the task button claim
+  // 'no known spawns' (owner report 2026-07-04).
+  let want = String(name).toLowerCase();
   for (let i = 0; i < m.data.clusters.length; i++) {
-    if (m.data.clusters[i].n === name) out.push(m.data.clusters[i]);
+    if (String(m.data.clusters[i].n).toLowerCase() === want) out.push(m.data.clusters[i]);
   }
   return out;
 };
@@ -66670,7 +69117,7 @@ TaskInfoModal.prototype.__openSpawnMapFor = function (name) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-text.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-text.js ===== */
 
 const TextModal = function(id) {
 
@@ -66741,7 +69188,7 @@ TextModal.prototype.handleCancel = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-trade-select.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-trade-select.js ===== */
 
 const TradeSelectModal = function (element) {
 
@@ -66889,7 +69336,7 @@ TradeSelectModal.prototype.__handleSelectPlayer = function (player) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-trade-with.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-trade-with.js ===== */
 
 const TradeWithModal = function (element) {
 
@@ -67495,7 +69942,7 @@ TradeWithModal.prototype.__makeCloseButton = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-trade.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-trade.js ===== */
 
 const TradeModal = function(element) {
 
@@ -67701,7 +70148,7 @@ TradeModal.prototype.__sendKeepingToggle = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal-travel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-travel.js ===== */
 
 const TravelModal = function (element) {
 
@@ -67858,7 +70305,7 @@ TravelModal.prototype.handleConfirm = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/modals/modal.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal.js ===== */
 
 const Modal = function(id) {
 
@@ -68163,7 +70610,7 @@ Modal.prototype.__buttonClick = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/notification.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/notification.js ===== */
 
 const NotificationManager = function() {
 
@@ -68279,7 +70726,7 @@ NotificationManager.prototype.deferCancel = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/npc-dialog.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/npc-dialog.js ===== */
 
 const NpcDialog = function() {
 
@@ -68479,7 +70926,7 @@ NpcDialog.prototype.isVisible = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/quest-tracker.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/quest-tracker.js ===== */
 
 const QuestTracker = function () {
     /*
@@ -68585,7 +71032,7 @@ QuestTracker.prototype.toggle = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/screen-element-character.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element-character.js ===== */
 
 const CharacterElement = function (creature) {
   /*
@@ -69043,7 +71490,7 @@ CharacterElement.prototype.__setupNpcIcon = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/screen-element-floating.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element-floating.js ===== */
 
 const FloatingElement = function (message, position, color) {
 
@@ -69145,7 +71592,7 @@ FloatingElement.prototype.setColor = function (color) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/screen-element-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element-manager.js ===== */
 
 const ScreenElementManager = function () {
 
@@ -69334,10 +71781,34 @@ ScreenElementManager.prototype.createFloatingTextElement = function (message, po
     return null;
   }
 
+  // Lowest Spec: hard-cap concurrent floating texts (damage numbers, heals,
+  // xp). Every one is a DOM element, and layout/compositing churn from big
+  // fights is a top low-end cost — evict the oldest floating element to make
+  // room. Chat texts (MessageElement) are never evicted. The evicted
+  // element's scheduled expiry event re-runs deleteTextElement harmlessly.
+  if (gameClient.interface.settings.isLowestSpecMode()) {
+    let floatingCount = 0;
+    let oldestFloating = null;
+    this.activeTextElements.forEach(function (element) {
+      if (element instanceof FloatingElement) {
+        floatingCount++;
+        if (oldestFloating === null) {
+          oldestFloating = element;
+        }
+      }
+    });
+    if (floatingCount >= this.LOWEST_SPEC_FLOATING_TEXT_MAX) {
+      this.deleteTextElement(oldestFloating);
+    }
+  }
+
   // Create a new text element to add to the DOM
   this.__createTextElement(new FloatingElement(message, position, color));
 
 }
+
+// Lowest Spec cap on simultaneous floating texts (see createFloatingTextElement)
+ScreenElementManager.prototype.LOWEST_SPEC_FLOATING_TEXT_MAX = 12;
 
 ScreenElementManager.prototype.__createTextElement = function (messageElement) {
 
@@ -69488,7 +71959,7 @@ ScreenElementManager.prototype.deleteTextElement = function (textElement) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/screen-element-message.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element-message.js ===== */
 
 const MessageElement = function (entity, message, color, loudness) {
 
@@ -69609,7 +72080,7 @@ MessageElement.prototype.setTextPosition = function () {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/screen-element.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element.js ===== */
 
 const ScreenElement = function (id) {
 
@@ -69845,7 +72316,7 @@ ScreenElement.prototype.__getAbsoluteOffset = function (position) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/screen-recorder.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-recorder.js ===== */
 
 "use strict";
 
@@ -70118,7 +72589,7 @@ ScreenRecorder.prototype.__hideIndicator = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/settings.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/settings.js ===== */
 
 const Settings = function (element) {
 
@@ -70757,6 +73228,20 @@ Settings.prototype.isPreciseAttackClick = function () {
 
 }
 
+Settings.prototype.isGpuOutfitColorsEnabled = function () {
+
+  /*
+   * Function Settings.isGpuOutfitColorsEnabled
+   * Returns true if outfit colorization runs in the WebGL shader (default ON)
+   * instead of the CPU per-creature composed cache — see
+   * Canvas.__drawOutfitCellGL / SpriteBatch.drawMasked. The checkbox is the
+   * safety valve if outfit colors ever render wrong on a device.
+   */
+
+  return this.__state["gpu-outfit-colors"] !== false;
+
+}
+
 Settings.prototype.isDragIndicatorEnabled = function () {
 
   /*
@@ -71319,6 +73804,7 @@ Settings.prototype.__toggle = function (event) {
     case "smart-walking":
     case "precise-attack-click":
     case "drag-indicator":
+    case "gpu-outfit-colors":
     case "burst-walk":
     case "semi-burst-walk":
     // === STRICT-WALK (experimental) === orthogonal boolean: plain on/off,
@@ -71395,6 +73881,18 @@ Settings.prototype.__toggle = function (event) {
           let el = document.getElementById(id);
           if (el) el.checked = false;
         });
+      }
+      // Low Spec / Lowest Spec are one ladder — Lowest already includes
+      // everything Low does, so both checked at once is confusing. Enabling
+      // one forces the other off (UI checkbox + persisted state). Runs
+      // BEFORE the low-spec side-effect block below, so the dependent
+      // controls and tile-cache rebuild see the settled state.
+      if (event.target.checked && (event.target.id === "low-spec-mode"
+          || event.target.id === "lowest-spec-mode")) {
+        let otherSpec = event.target.id === "low-spec-mode" ? "lowest-spec-mode" : "low-spec-mode";
+        this.__state[otherSpec] = false;
+        let otherEl = document.getElementById(otherSpec);
+        if (otherEl) otherEl.checked = false;
       }
       if (event.target.id === "physical-keyboard") {
         document.body.classList.toggle("has-keyboard", event.target.checked);
@@ -71631,6 +74129,12 @@ Settings.prototype.__init = function () {
     this.__state["precise-attack-click"] = false;
   }
 
+  // Low/Lowest Spec are a ladder (mutex in __toggle) — settle state saved
+  // before the mutex existed: both on = Lowest wins.
+  if (this.__state["low-spec-mode"] && this.__state["lowest-spec-mode"]) {
+    this.__state["low-spec-mode"] = false;
+  }
+
   // "Auto-turn Strike/Wave" defaults ON for EVERYONE (new + returning) — it's the
   // existing behaviour; the setting just lets you turn it off. Seed true when the
   // saved state predates it so returning players keep auto-turn until they opt out.
@@ -71788,6 +74292,7 @@ Settings.prototype.__getCleanState = function () {
     "smart-walking": getChecked("smart-walking"),
     "precise-attack-click": getChecked("precise-attack-click", true),
     "drag-indicator": getChecked("drag-indicator", true),
+    "gpu-outfit-colors": getChecked("gpu-outfit-colors", true),
     "open-containers-same-window": getChecked("open-containers-same-window", true),
     "extra-hotbar": getChecked("extra-hotbar"),
     "hotbar-edit-slot": getChecked("hotbar-edit-slot"),
@@ -71901,6 +74406,7 @@ Settings.prototype.__applyState = function (id) {
     case "smart-walking":
     case "precise-attack-click":
     case "drag-indicator":
+    case "gpu-outfit-colors":
     case "extra-hotbar":
     case "hotbar-edit-slot":
     case "enable-weather":
@@ -71997,7 +74503,7 @@ Settings.prototype.__applyState = function (id) {
   }
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/status-bar.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/status-bar.js ===== */
 
 const StatusBar = function () {
 
@@ -72531,7 +75037,7 @@ StatusBar.prototype.__updateMagicShieldIndicator = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/tooltip.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/tooltip.js ===== */
 
 const Tooltip = function () {
     this.element = document.createElement("div");
@@ -73014,7 +75520,7 @@ Tooltip.prototype.__getContainerContentsWeight = function (item) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/tutorial-highlight.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/tutorial-highlight.js ===== */
 
 "use strict";
 
@@ -73215,7 +75721,7 @@ TutorialHighlight.prototype.reset = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/virtual-keyboard.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/virtual-keyboard.js ===== */
 
 "use strict";
 
@@ -74743,7 +77249,7 @@ VirtualKeyboard.prototype.__showMobileControls = function() {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/window-battle.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-battle.js ===== */
 
 const BattleWindow = function (element) {
 
@@ -74757,6 +77263,47 @@ const BattleWindow = function (element) {
 
   InteractiveWindow.call(this, element);
 
+  // Scroll-hold: while the player is actively scrolling the list, the
+  // per-step distance re-sort must NOT run — sortByDistance re-appends
+  // every row (appendChild removes + re-inserts the node), which aborts a
+  // native touch-scroll gesture mid-flight. While walking that's every
+  // step, making the list unscrollable on mobile (Welky 2026-07-06,
+  // long-standing report). Any touch or wheel on the list extends a
+  // rolling hold; the sort resumes on the first movement step after the
+  // gesture (and its momentum) ends. Rows' HP/mana text still updates
+  // in place during the hold — only reordering is deferred.
+  this.__scrollHoldUntil = 0;
+  // Row REMOVALS deferred during the hold (Welky 2026-07-06 follow-up:
+  // "still not scrollable while moving"): the sort deferral above wasn't
+  // enough — while walking, creatures leave the viewport every step and
+  // removeCreature() detached their rows mid-gesture. Removing a node in
+  // the touched scroll chain aborts the native gesture just like the
+  // re-append did, so the list stayed unscrollable in dense spawns. Rows
+  // now queue here during the hold (a dead/left creature lingers on
+  // screen for <1s while actively scrolling) and flush when it ends.
+  this.__pendingRemovals = new Set();
+  this.__pendingFlushTimer = null;
+  let self = this;
+  let extendHold = function () {
+    self.__scrollHoldUntil = Date.now() + 800;
+    // Flush queued removals shortly after the gesture (and momentum) end,
+    // even if the player never takes another step (sortByDistance would
+    // otherwise be the only flusher, and it only runs on movement).
+    clearTimeout(self.__pendingFlushTimer);
+    self.__pendingFlushTimer = setTimeout(function () {
+      self.__flushPendingRemovals();
+    }, 850);
+  };
+  let body = this.getBody();
+  if (body) {
+    body.addEventListener("touchstart", extendHold, { passive: true });
+    body.addEventListener("touchmove", extendHold, { passive: true });
+    body.addEventListener("wheel", extendHold, { passive: true });
+    // scroll keeps firing during iOS momentum after the finger lifts —
+    // extends the hold through the whole glide, not just the touch.
+    body.addEventListener("scroll", extendHold, { passive: true });
+  }
+
 }
 
 // Set the prototype and constructor
@@ -74765,6 +77312,14 @@ BattleWindow.prototype.constructor = BattleWindow;
 
 BattleWindow.prototype.removeCreature = function (id) {
 
+  // Mid-scroll: detaching a row in the touched scroll chain aborts the
+  // native gesture — queue the removal for after the hold instead. The
+  // row keeps rendering (stale) for at most ~850ms.
+  if (Date.now() < this.__scrollHoldUntil) {
+    this.__pendingRemovals.add(id);
+    return;
+  }
+
   let element = this.getBody().querySelector('[id="%s"]'.format(id));
 
   if (element === null) {
@@ -74772,6 +77327,28 @@ BattleWindow.prototype.removeCreature = function (id) {
   }
 
   element.remove();
+
+}
+
+BattleWindow.prototype.__flushPendingRemovals = function () {
+
+  /*
+   * Function BattleWindow.__flushPendingRemovals
+   * Applies row removals queued while a touch-scroll gesture was live.
+   * Called by the post-gesture timer and by sortByDistance once the hold
+   * has expired (whichever comes first). Re-queues itself via
+   * removeCreature's own guard if a new gesture started meanwhile.
+   */
+
+  if (this.__pendingRemovals.size === 0) return;
+  if (Date.now() < this.__scrollHoldUntil) return;   // new gesture — stay queued
+
+  let self = this;
+  let ids = Array.from(this.__pendingRemovals);
+  this.__pendingRemovals.clear();
+  ids.forEach(function (id) {
+    self.removeCreature(id);
+  });
 
 }
 
@@ -75014,6 +77591,34 @@ BattleWindow.prototype.sortByDistance = function () {
    * stairhopping — and buried the monster you actually wanted to click.
    */
 
+  // User is (or just was) scrolling the list — skip this re-sort so the
+  // gesture survives. The next movement step after the hold expires sorts
+  // again; if the player stands still, positions haven't changed anyway.
+  // First movement step after a hold also flushes any row removals that
+  // were queued during the gesture (dead/left creatures un-linger).
+  this.__flushPendingRemovals();
+  if (Date.now() < this.__scrollHoldUntil) {
+    return;
+  }
+
+  // Coalesce sort bursts (player report 2026-07-08: phone lag in mob-dense
+  // spots when someone stair-hops next to you — every hop fires an
+  // add/remove pair, each re-sorting a huge list). At most one sort per
+  // 150ms; a burst schedules ONE trailing sort that re-runs all guards.
+  let now = Date.now();
+  if (now - (this.__lastSortAt || 0) < 150) {
+    if (!this.__sortQueued) {
+      this.__sortQueued = true;
+      let self = this;
+      setTimeout(function () {
+        self.__sortQueued = false;
+        self.sortByDistance();
+      }, 160);
+    }
+    return;
+  }
+  this.__lastSortAt = now;
+
   let body = this.getBody();
   let children = Array.from(body.children);
 
@@ -75072,6 +77677,20 @@ BattleWindow.prototype.sortByDistance = function () {
 
     return distA - distB;
   });
+
+  // Skip the DOM work entirely when the order is already correct — the
+  // common case for most add/step events. Re-appending N rows forces
+  // layout every time, which is what large lists + phones choke on.
+  let changed = false;
+  for (let i = 0; i < children.length; i++) {
+    if (body.children[i] !== children[i]) {
+      changed = true;
+      break;
+    }
+  }
+  if (!changed) {
+    return;
+  }
 
   // Re-append in sorted order (moves existing nodes, no new DOM elements)
   children.forEach(function (child) {
@@ -75353,7 +77972,7 @@ BattleWindow.prototype.addCreature = function (creature) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/window-friend.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-friend.js ===== */
 
 const FriendWindow = function(element) {
 
@@ -75482,7 +78101,7 @@ FriendWindow.prototype.__createFriendEntry = function(entry) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/window-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-manager.js ===== */
 
 const WindowManager = function () {
 
@@ -75590,6 +78209,64 @@ WindowManager.prototype.LAYOUT_VERSION = 1;
 WindowManager.prototype.CONTAINER_GEOMETRY_KEY = "container-geometry";
 WindowManager.prototype.CONTAINER_GEOMETRY_VERSION = 1;
 
+// OTCv8-style per-container height memory (owner 2026-07-06: "lets fully copy
+// theirs its the gold standard — purely for desktop"). Heights are keyed by
+// the container's OPEN-ORDER index (Container.__restoreKey — the equivalent of
+// OTCv8's small reused container:getId(); our server container ids are guids
+// re-minted every login, so they can't key cross-session memory) and are
+// honored ONLY for containers (re)opened within the game-start restore window
+// — i.e. the server re-pushing your open containers on login/reconnect, so a
+// relog looks exactly like you left it. A mid-play open CLEARS the entry and
+// sizes to content instead (OTCv8's clearSettings rule). Saved on resize-drag
+// end and on minimize (so expand restores the pre-minimize height). Bounded:
+// keys never exceed the number of simultaneously open containers.
+WindowManager.prototype.CONTAINER_HEIGHTS_KEY = "container-heights";
+
+WindowManager.prototype.__readContainerHeights = function () {
+  // Returns the saved { containerId: heightPx } map, or {} on any failure.
+  if (this.__isMobile) return {};
+  try {
+    let parsed = JSON.parse(localStorage.getItem(this.CONTAINER_HEIGHTS_KEY));
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) { return {}; }
+};
+
+WindowManager.prototype.loadContainerHeight = function (containerId) {
+  // Returns the saved body height in px for a session container id, or null.
+  // Upper-clamped on READ too, so a poisoned store from an older build can
+  // never restore a giant window (player report 2026-07-08).
+  let h = this.__readContainerHeights()[containerId];
+  if (!(typeof h === "number" && isFinite(h) && h >= 34)) return null;
+  let ceiling = Math.floor((window.innerHeight || 900) * 0.4);
+  return Math.min(Math.floor(h), ceiling);
+};
+
+WindowManager.prototype.saveContainerHeight = function (containerId, height) {
+  // Best-effort; ignores junk so a bad value can never corrupt the store.
+  if (this.__isMobile) return;
+  try {
+    let h = Math.floor(height);
+    if (!isFinite(h) || h < 34) return;
+    // Never persist beyond the drag system's own ceiling — heals stores
+    // poisoned by older builds on the next save.
+    h = Math.min(h, Math.floor((window.innerHeight || 900) * 0.4));
+    let heights = this.__readContainerHeights();
+    heights[containerId] = h;
+    localStorage.setItem(this.CONTAINER_HEIGHTS_KEY, JSON.stringify(heights));
+  } catch (e) { /* best-effort */ }
+};
+
+WindowManager.prototype.clearContainerHeight = function (containerId) {
+  // OTCv8 clearSettings equivalent — a mid-play open resets this id's memory.
+  if (this.__isMobile) return;
+  try {
+    let heights = this.__readContainerHeights();
+    if (!(containerId in heights)) return;
+    delete heights[containerId];
+    localStorage.setItem(this.CONTAINER_HEIGHTS_KEY, JSON.stringify(heights));
+  } catch (e) { /* best-effort */ }
+};
+
 WindowManager.prototype.__readContainerGeometry = function () {
   // Returns the saved { itemId: {column, minimized} } map, or {} on any failure.
   if (this.__isMobile) return {};
@@ -75607,6 +78284,8 @@ WindowManager.prototype.__readContainerGeometry = function () {
 
 WindowManager.prototype.loadContainerGeometry = function (itemId) {
   // Returns {column, minimized} for a container item id, or null if absent/invalid.
+  // (Body HEIGHT is deliberately NOT here — it lives in the OTCv8-style
+  // per-session-container-id store above, with different restore semantics.)
   let items = this.__readContainerGeometry();
   let geom = items[itemId];
   if (!geom || (geom.column !== "left" && geom.column !== "right")) return null;
@@ -75966,7 +78645,24 @@ WindowManager.prototype.__handleMove = function (event) {
   // the column — leaves room for sibling windows above and below.
   let remaining = window.innerHeight - bodyTopVp - 20;
   let absoluteMax = Math.floor(window.innerHeight * 0.33);
-  let maxHeight = Math.max(minHeight, Math.min(remaining, absoluteMax));
+  // CONTAINER windows additionally stop at their full rows (OTCv8's own
+  // clamp): a 20-slot backpack ends at 5 rows instead of stretching into a
+  // void of empty body — a player report (2026-07-08) showed backpacks
+  // dragged into huge empty windows, which the minimize snapshot then kept
+  // re-saving. Battle/skills/friends keep the viewport-based caps only.
+  let rowsMax = Infinity;
+  try {
+    let el = this.state.currentMouseElement;
+    if (typeof gameClient !== "undefined" && gameClient.player
+        && gameClient.player.__openedContainers) {
+      gameClient.player.__openedContainers.forEach(function (c) {
+        if (c && c.window === el && c.size > 0) {
+          rowsMax = Math.ceil(c.size / 4) * 34;
+        }
+      });
+    }
+  } catch (e) { /* generic caps still apply */ }
+  let maxHeight = Math.max(minHeight, Math.min(remaining, absoluteMax, rowsMax));
   let clamped = Math.max(minHeight, Math.min(desired, maxHeight));
   body.style.height = clamped + "px";
 
@@ -76098,11 +78794,33 @@ WindowManager.prototype.__handleMouseUp = function (event) {
    * Callback fired when mouse is pushed up
    */
 
+  // A resize drag just ended on a CONTAINER window — persist its new body
+  // height under the session container id (OTCv8 onHeightChange -> settings;
+  // Deadlymage 2026-07-06: "bags retaining their size after disconnects /
+  // rejoins"). Battle/skills/friends resizes are not container state.
+  // Snapshotting here (not per mousemove) keeps the drag itself cheap.
+  if (this.state.currentMouseElement !== null) {
+    try {
+      let el = this.state.currentMouseElement;
+      let resized = null;
+      if (typeof gameClient !== "undefined" && gameClient.player
+          && gameClient.player.__openedContainers) {
+        gameClient.player.__openedContainers.forEach(function (c) {
+          if (c && c.window === el) resized = c;
+        });
+      }
+      if (resized !== null) {
+        let h = parseInt(el.getBody().style.height, 10);
+        if (isFinite(h)) this.saveContainerHeight(resized.__restoreKey(), h);
+      }
+    } catch (e) { /* best-effort */ }
+  }
+
   this.state.currentMouseElement = null;
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/window-questlog.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-questlog.js ===== */
 
 const WindowQuestLog = function (id) {
 
@@ -76385,7 +79103,7 @@ WindowQuestLog.prototype.setQuestDetails = function (questId, missions) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/window-skill.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-skill.js ===== */
 
 const SkillWindow = function (element) {
 
@@ -76855,7 +79573,7 @@ function __showSkillTapTooltip(row, text) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/window-trade.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-trade.js ===== */
 
 const TradeWindow = function (element) {
 
@@ -77280,7 +79998,7 @@ TradeWindow.prototype.__clearCanvas = function (canvasId) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/window.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window.js ===== */
 
 const InteractiveWindow = function (element) {
 
@@ -77606,7 +80324,7 @@ InteractiveWindow.prototype.addTo = function (stackElement) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/ui/word-suggestions.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/word-suggestions.js ===== */
 
 const WordSuggestions = function (virtualKeyboard) {
 
@@ -79117,7 +81835,7 @@ SuggestionTrie.prototype.topMatches = function (prefix, limit, usageMap, gameWor
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/__proto__.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/__proto__.js ===== */
 
 "use strict";
 
@@ -79227,7 +81945,7 @@ Number.prototype.clamp = function(min, max) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/animation.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/animation.js ===== */
 
 const Animation = function(id) {
 
@@ -79416,7 +82134,7 @@ LoopedAnimation.prototype.getFrame = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/binary-heap.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/binary-heap.js ===== */
 
 "use strict";
 
@@ -79618,7 +82336,7 @@ BinaryHeap.prototype.bubbleUp = function(n) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/bitflag.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/bitflag.js ===== */
 
 "use strict";
 
@@ -79754,7 +82472,7 @@ const FinBitFlag = BitFlagGenerator([
   "DatFlagChargeable"
 ]);
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/book.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/book.js ===== */
 
 "use strict";
 
@@ -79798,7 +82516,7 @@ Book.prototype.setContent = function(content) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/box-animation.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/box-animation.js ===== */
 
 const BoxAnimation = function(color) {
 
@@ -79831,7 +82549,7 @@ BoxAnimation.prototype.__generateDurations = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/casting-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/casting-manager.js ===== */
 
 const CastingManager = function() {
 
@@ -79890,7 +82608,7 @@ CastingManager.prototype.getCastFraction = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/channel-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/channel-manager.js ===== */
 
 "use strict";
 
@@ -80858,12 +83576,16 @@ ChannelManager.prototype.__containsBlockedLink = function(message) {
 
 }
 
-ChannelManager.prototype.sendMessageText = function(text, channelIndex) {
+ChannelManager.prototype.sendMessageText = function(text, channelIndex, noHistory) {
 
   /*
    * Function ChannelManager.sendMessageText
    * Sends a message from arbitrary text input (mobile chat or desktop)
-   * Optionally accepts a channelIndex to target a specific channel
+   * Optionally accepts a channelIndex to target a specific channel.
+   * noHistory: true for AUTOMATION-origin sends (auto /bagnames, context-
+   * menu /namebag) — Shift+Up recall must only surface what the player
+   * actually TYPED (owner report 2026-07-04: '/bagnames was suddenly in
+   * my shift up chat history').
    */
 
   let message = text.trim().substring(0, 120);
@@ -80876,7 +83598,7 @@ ChannelManager.prototype.sendMessageText = function(text, channelIndex) {
   // recall this message later. Single push site covers desktop and
   // mobile (mobile bypasses handleMessageSend). Consecutive duplicates
   // are deduped inside __pushSendHistory.
-  this.__pushSendHistory(message);
+  if (noHistory !== true) this.__pushSendHistory(message);
 
   // /report confirm interception (owner request): typed reports get the
   // same small confirm dialog as the context-menu path. sendMessageText is
@@ -81238,7 +83960,7 @@ ChannelManager.prototype.setActiveChannel = function(index) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/channel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/channel.js ===== */
 
 const Channel = function(name, id) {
 
@@ -81358,6 +84080,10 @@ Channel.prototype.isEmpty = function() {
 
 }
 
+// Scroll-up hold expiry — after this long, the next incoming live message
+// snaps the chat back to the latest line (see render)
+Channel.prototype.SCROLL_HOLD_MS = 60000;
+
 Channel.prototype.__isScrolledDown = function(chatbox) {
 
   /*
@@ -81385,6 +84111,23 @@ Channel.prototype.render = function(preserveScroll) {
   // Get the chatbox element from the DOM
   let chatbox = document.getElementById("chat-text-area");
 
+  // Track when the user scrolled away from the bottom (lazy one-time hook).
+  // The scroll-up hold keeps incoming messages from yanking the view while
+  // reading/copying, but it EXPIRES: after SCROLL_HOLD_MS the next live
+  // message snaps back to the latest (owner request 2026-07-02) — the hold
+  // is a reading aid, not a permanent detach. Scrolling back to the bottom
+  // (by hand or programmatically) clears the stamp.
+  if(!chatbox.__scrollHoldHooked) {
+    chatbox.__scrollHoldHooked = true;
+    chatbox.addEventListener("scroll", function() {
+      if((chatbox.scrollHeight - chatbox.offsetHeight) - chatbox.scrollTop <= 5) {
+        chatbox.__scrolledUpAt = 0;
+      } else if(!chatbox.__scrolledUpAt) {
+        chatbox.__scrolledUpAt = Date.now();
+      }
+    }, { "passive": true });
+  }
+
   // Measure scroll intent BEFORE wiping. Stick to the bottom only when the
   // user is already there (__isScrolledDown); otherwise remember the offset
   // and restore it after the rebuild so an incoming message does not yank
@@ -81394,6 +84137,13 @@ Channel.prototype.render = function(preserveScroll) {
   if(preserveScroll && chatbox.childNodes.length > 0) {
     prevScrollTop = chatbox.scrollTop;
     stickToBottom = this.__isScrolledDown(chatbox);
+
+    // Hold expired: resume following the conversation
+    if(!stickToBottom && chatbox.__scrolledUpAt &&
+       (Date.now() - chatbox.__scrolledUpAt > Channel.prototype.SCROLL_HOLD_MS)) {
+      stickToBottom = true;
+      chatbox.__scrolledUpAt = 0;
+    }
   }
 
   chatbox.innerHTML = "";
@@ -81537,7 +84287,7 @@ Channel.prototype.__createElement = function(name) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/clock.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/clock.js ===== */
 
 "use strict";
 
@@ -81638,7 +84388,7 @@ Clock.prototype.updateClockDOM = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/dataobject.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/dataobject.js ===== */
 
 "use strict";
 
@@ -81709,7 +84459,7 @@ DataObject.prototype.getFrameGroup = function(group) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/distance-animation.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/distance-animation.js ===== */
 
 "use strict";
 
@@ -81827,7 +84577,7 @@ DistanceAnimation.prototype.getPattern = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/enum.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/enum.js ===== */
 
 const Enum = function(array) {
 
@@ -81848,7 +84598,7 @@ const Enum = function(array) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/error.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/error.js ===== */
 
 const ConnectionError = function(message) {
   this.name = "ConnectionError";
@@ -81872,7 +84622,7 @@ const ServerError = function(message) {
 ServerError.prototype = Error.prototype;
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/eventemitter.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/eventemitter.js ===== */
 
 const EventEmitter = function() {
 
@@ -81950,7 +84700,7 @@ EventEmitter.prototype.clear = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/fluid-container.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/fluid-container.js ===== */
 
 const FluidThing = function(id, count, fluidType) {
 
@@ -82138,7 +84888,7 @@ FluidThing.prototype.getFluidName = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/frame-group.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/frame-group.js ===== */
 
 const FrameGroup = function () {
 
@@ -82361,7 +85111,7 @@ FrameGroup.prototype.getNumberSprites = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/heap-event.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/heap-event.js ===== */
 
 const HeapEvent = function(callback, when) {
 
@@ -82448,7 +85198,7 @@ HeapEvent.prototype.remainingFraction = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/local-channel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/local-channel.js ===== */
 
 const LocalChannel = function(name) {
 
@@ -82466,7 +85216,7 @@ LocalChannel.prototype = Object.create(Channel.prototype);
 LocalChannel.prototype.constructor = LocalChannel;
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/message-character.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/message-character.js ===== */
 
 const CharacterMessage = function(message, type, name, color, loudness, level) {
 
@@ -82567,7 +85317,7 @@ CharacterMessage.prototype.createNode = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/message.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/message.js ===== */
 
 const Message = function(message, color) {
 
@@ -82667,7 +85417,7 @@ Message.prototype.__formatTime = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/object-buffer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/object-buffer.js ===== */
 
 const ObjectBuffer = function () {
 
@@ -83372,7 +86122,7 @@ ObjectBuffer.prototype.__readFlags = function (packet) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/position.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/position.js ===== */
 
 const Position = function (x, y, z) {
 
@@ -83780,7 +86530,7 @@ Position.prototype.besides = function (position) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/private-channel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/private-channel.js ===== */
 
 const PrivateChannel = function(name) {
 
@@ -83808,7 +86558,7 @@ PrivateChannel.prototype.__getEmptyMessage = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/replay-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/replay-manager.js ===== */
 
 const ReplayManager = function() {
 
@@ -84077,7 +86827,7 @@ ReplayManager.prototype.recordPacket = function(buffer) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-02r/src/utils/rgba.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/rgba.js ===== */
 
 const RGBA = function(r, g, b, a) {
 
@@ -84132,3 +86882,9 @@ RGBA.prototype.interpolate = function(color, fraction) {
   );
 
 }
+
+
+/* ===== FAILED: https://raw.githubusercontent.com/pasqualguerrero/minibia-bot/refs/heads/main/pz-bot.js =====
+TypeError: Failed to fetch
+===== */
+
