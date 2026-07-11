@@ -1,4 +1,4 @@
-# Minibia Bot
+# Minibia Bot (v)
 
 ## Load From GitHub In Chrome Or Edge
 
