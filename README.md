@@ -38,7 +38,7 @@ This repo now has a simple source layout for browser-loaded Minibia routines, wh
 **Reload In Game**
 
 ```js
-fetch("http://127.0.0.1:8000/pz-bot.js")
+fetch("http://127.0.0.1:9009/pz-bot.js")
   .then((r) => r.text())
   .then((code) => eval(code));
 ```
@@ -49,7 +49,7 @@ If the browser blocks that request because of CORS, run:
 python3 cors_http_server.py
 ```
 
-That serves this folder on `http://127.0.0.1:8000/` with `Access-Control-Allow-Origin: *`.
+That serves this folder on `http://127.0.0.1:9009/` with `Access-Control-Allow-Origin: *`.
 
 **Main API**
 

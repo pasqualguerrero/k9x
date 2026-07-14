@@ -15,6 +15,7 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
       minHpPercent: 50,
       minFoodSeconds: 30,
       runeSpellWords: "adori vita vis",
+      runeHotbarSlot: null,
       runeManaCost: 600,
       runeCooldownMs: 3500,
       enabled: false,
@@ -25,6 +26,26 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
 
   function persistConfig() {
     bot.storage.set(configStorageKey, { ...config });
+  }
+
+  function normalizeHotbarSlot(slot) {
+    const value = Number(slot);
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+
+    const normalized = Math.trunc(value);
+    if (normalized < 1 || normalized > 12) {
+      return null;
+    }
+
+    return normalized;
+  }
+
+  function hasCastMethod() {
+    const slot = normalizeHotbarSlot(config.runeHotbarSlot);
+    const words = String(config.runeSpellWords || "").trim();
+    return !!slot || !!words;
   }
 
   function readStats() {
@@ -58,9 +79,12 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
 
   function getGateStatus(now = Date.now()) {
     const { hp, mana, food } = readStats();
+    const castMethodReady = hasCastMethod();
+
     if (!hp || !mana) {
       return {
         hasStats: false,
+        hasCastMethod: castMethodReady,
         enoughHp: false,
         enoughMana: false,
         enoughFood: false,
@@ -80,12 +104,14 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
 
     return {
       hasStats: true,
+      hasCastMethod: castMethodReady,
       enoughHp,
       enoughMana,
       enoughFood,
       cooldownReady,
       cooldownRemainingMs,
-      canMakeRune: enoughHp && enoughMana && enoughFood && cooldownReady,
+      canMakeRune:
+        castMethodReady && enoughHp && enoughMana && enoughFood && cooldownReady,
     };
   }
 
@@ -98,12 +124,20 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
       return false;
     }
 
-    const castResult = bot.castSpell({ words: config.runeSpellWords });
+    const slot = normalizeHotbarSlot(config.runeHotbarSlot);
+    const words = String(config.runeSpellWords || "").trim();
+    const castResult = bot.castSpell({
+      words,
+      hotbarSlot: slot,
+      fallbackChat: !slot && !!words,
+    });
+
     if (castResult.ok) {
       state.lastRuneAt = Date.now();
-      bot.log("cast rune spell", {
-        spellWords: config.runeSpellWords,
+      bot.log("cast rune", {
         method: castResult.method,
+        spellWords: words || null,
+        slot: castResult.slot ?? slot ?? null,
         sid: castResult.sid ?? null,
       });
     }
@@ -219,6 +253,10 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
   }
 
   function updateConfig(nextConfig = {}) {
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "runeHotbarSlot")) {
+      nextConfig.runeHotbarSlot = normalizeHotbarSlot(nextConfig.runeHotbarSlot);
+    }
+
     Object.assign(config, nextConfig);
     config.tickMs = 250;
     persistConfig();
@@ -238,6 +276,7 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
     getGateStatus,
     canMakeRune,
     tryMakeRune,
+    normalizeHotbarSlot,
     config,
     updateConfig,
   };

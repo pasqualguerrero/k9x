@@ -15,6 +15,6 @@ class CORSRequestHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), CORSRequestHandler)
-    print("Serving with CORS on http://0.0.0.0:8000/")
+    server = ThreadingHTTPServer(("0.0.0.0", 9009), CORSRequestHandler)
+    print("Serving with CORS on http://0.0.0.0:9009/")
     server.serve_forever()

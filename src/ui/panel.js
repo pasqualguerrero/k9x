@@ -3,6 +3,7 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const panelPositionKey = "k9x.ui.panelPosition";
   const panelCollapsedKey = "k9x.ui.panelCollapsed";
+  const sectionCollapsedKey = "k9x.ui.sectionCollapsed";
 
   function destroy() {
     document.getElementById("k9x-panel")?.remove();
@@ -23,6 +24,57 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   function getSavedPanelCollapsed() {
     return !!bot.storage.get(panelCollapsedKey, false);
+  }
+
+  function getSavedSectionCollapsed() {
+    const saved = bot.storage.get(sectionCollapsedKey, {});
+    return saved && typeof saved === "object" ? saved : {};
+  }
+
+  function saveSectionCollapsed(state) {
+    bot.storage.set(sectionCollapsedKey, state);
+  }
+
+  function setSectionCollapsed(section, collapsed) {
+    if (!section) return;
+
+    const nextCollapsed = !!collapsed;
+    const header = section.querySelector(".mb-collapsible-header");
+    const body = section.querySelector(".mb-collapsible-body");
+    const toggle = section.querySelector(".mb-collapsible-toggle");
+
+    section.dataset.sectionCollapsed = nextCollapsed ? "true" : "false";
+
+    if (header) {
+      header.setAttribute("aria-expanded", nextCollapsed ? "false" : "true");
+    }
+
+    if (body) {
+      body.hidden = nextCollapsed;
+    }
+
+    if (toggle) {
+      toggle.textContent = nextCollapsed ? "+" : "−";
+    }
+  }
+
+  function enableCollapsibleSections(panel) {
+    const saved = { ...getSavedSectionCollapsed() };
+
+    panel.querySelectorAll("[data-collapsible]").forEach((section) => {
+      const key = section.dataset.collapsible;
+      if (!key) return;
+
+      setSectionCollapsed(section, !!saved[key]);
+
+      const header = section.querySelector(".mb-collapsible-header");
+      header?.addEventListener("click", () => {
+        const nextCollapsed = section.dataset.sectionCollapsed !== "true";
+        setSectionCollapsed(section, nextCollapsed);
+        saved[key] = nextCollapsed;
+        saveSectionCollapsed(saved);
+      });
+    });
   }
 
   function refreshHomeLabel() {
@@ -194,10 +246,32 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   function refreshRuneStatus() {
     const runeToggle = document.getElementById("k9x-rune-enabled");
-    const running = !!bot.rune?.status?.().running;
+    const runeStatusNote = document.getElementById("k9x-rune-status");
+    const status = bot.rune?.status?.();
+    const running = !!status?.running;
 
     if (runeToggle) {
       runeToggle.checked = running;
+    }
+
+    if (runeStatusNote && status) {
+      const gates = status.gates || {};
+
+      if (!running) {
+        runeStatusNote.textContent = "Status: stopped";
+      } else if (!gates.hasStats) {
+        runeStatusNote.textContent = "Status: running (waiting for player stats)";
+      } else if (gates.canMakeRune) {
+        runeStatusNote.textContent = "Status: running (ready to cast)";
+      } else {
+        const waiting = [];
+        if (!gates.enoughHp) waiting.push("HP");
+        if (!gates.enoughMana) waiting.push("mana");
+        if (!gates.hasCastMethod) waiting.push("hotkey or spell");
+        if (!gates.enoughFood) waiting.push("food");
+        if (!gates.cooldownReady) waiting.push("cooldown");
+        runeStatusNote.textContent = `Status: running (waiting: ${waiting.join(", ")})`;
+      }
     }
   }
 
@@ -774,6 +848,50 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         background: linear-gradient(180deg, #3a5659, #24393c);
       }
 
+      #k9x-panel .mb-collapsible-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        width: 100%;
+        margin: 0 0 8px;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: #a9c5c3;
+        font: inherit;
+        font-weight: 700;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      #k9x-panel .mb-collapsible-header:hover {
+        background: transparent;
+        color: #d3ebe8;
+      }
+
+      #k9x-panel .mb-collapsible-header .mb-label {
+        margin: 0;
+      }
+
+      #k9x-panel .mb-collapsible-toggle {
+        flex-shrink: 0;
+        width: 20px;
+        text-align: center;
+        color: #88a7a5;
+        font-weight: 700;
+        line-height: 1;
+      }
+
+      #k9x-panel .mb-collapsible[data-section-collapsed="true"] .mb-collapsible-header {
+        margin-bottom: 0;
+      }
+
+      #k9x-panel .mb-collapsible-body[hidden] {
+        display: none !important;
+      }
+
       #k9x-panel input,
       #k9x-panel textarea {
         width: 100%;
@@ -985,7 +1103,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     panel.id = "k9x-panel";
     panel.innerHTML = `
         <div class="mb-titlebar">
-        <div class="mb-title">[k9x]</div>
+        <div class="mb-title">K9X</div>
         <button type="button" class="mb-icon-button" id="k9x-collapse" aria-label="Minimize panel" title="Minimize">−</button>
       </div>
       <div class="mb-body">
@@ -993,9 +1111,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           <div class="mb-actions mb-column-section">
             <button type="button" id="k9x-reload">Reload Bot</button>
           </div>
-          <div class="mb-section mb-column-section">
-            <div class="mb-label" id="k9x-home">Panic Runner Home: not set</div>
-            <div class="mb-stack">
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="panic">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title mb-label" id="k9x-home">Panic Runner Home: not set</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-stack">
               <button type="button" id="k9x-set-home">Set Home</button>
               <label class="mb-toggle">
                 <input type="checkbox" id="k9x-panic-unknown" />
@@ -1016,9 +1137,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <div class="mb-list" id="k9x-panic-trusted-list"></div>
             </div>
           </div>
-          <div class="mb-section mb-column-section">
-            <div class="mb-label">GM Kill Switch</div>
-            <div class="mb-stack">
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="gm-kill">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title">GM Kill Switch</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-stack">
               <div class="mb-inline">
                 <input type="text" id="k9x-panic-gm-input" placeholder="Game master name" />
                 <button type="button" class="mb-small-button" id="k9x-panic-gm-add">Add</button>
@@ -1026,16 +1150,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <div class="mb-list" id="k9x-panic-gm-list"></div>
             </div>
           </div>
-          <div class="mb-section mb-column-section">
-            <div class="mb-actions">
-              <div class="mb-row-three">
-                <label class="mb-toggle">
-                  <input type="checkbox" id="k9x-rune-enabled" />
-                  <span>Magic Level Trainer</span>
-                </label>
-                <input type="text" id="k9x-rune-spell" placeholder="Spell words" />
-                <input type="number" id="k9x-rune-mana" min="0" placeholder="Mana" />
-              </div>
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="routines">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title">Quick Routines</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-actions">
               <div class="mb-row mb-row-compact">
                 <label class="mb-toggle">
                   <input type="checkbox" id="k9x-auto-eat-enabled" />
@@ -1076,26 +1196,70 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               </div>
             </div>
           </div>
-          <div class="mb-section mb-column-section">
-            <div class="mb-note">Loaded routines: Panic Runner, magic level trainer, auto eat, auto fishing, auto invisible, auto utamo vita, equip ring, auto heal, auto attack, and talk.</div>
-          </div>
         </div>
         <div class="mb-side-column">
-          <div class="mb-section mb-column-section">
-            <div class="mb-label">Xray</div>
-            <button type="button" class="mb-small-button" id="k9x-xray-overlay-toggle">Disable Overlay</button>
-            <div class="mb-small-note" id="k9x-xray-overlay-status">Overlay: on</div>
-            <label class="mb-field" for="k9x-xray-floor-select">
-              <span class="mb-field-label">Floor Filter</span>
-              <select id="k9x-xray-floor-select">
-                <option value="all">All floors</option>
-              </select>
-            </label>
-            <div class="mb-list" id="k9x-visible-creatures-list"></div>
-          </idiv>
-          <dv class="mb-section mb-column-section">
-            <div class="mb-label">Auto Heal</div>
-            <div class="mb-stack">
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="xray">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title">Xray</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-stack">
+              <button type="button" class="mb-small-button" id="k9x-xray-overlay-toggle">Disable Overlay</button>
+              <div class="mb-small-note" id="k9x-xray-overlay-status">Overlay: on</div>
+              <label class="mb-field" for="k9x-xray-floor-select">
+                <span class="mb-field-label">Floor Filter</span>
+                <select id="k9x-xray-floor-select">
+                  <option value="all">All floors</option>
+                </select>
+              </label>
+              <div class="mb-list" id="k9x-visible-creatures-list"></div>
+            </div>
+          </div>
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="rune">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title">Magic Level Trainer</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-stack">
+              <label class="mb-toggle">
+                <input type="checkbox" id="k9x-rune-enabled" />
+                <span>Enable Magic Level Trainer</span>
+              </label>
+              <div class="mb-field-grid">
+                <label class="mb-field" for="k9x-rune-spell">
+                  <span class="mb-field-label">Spell Words</span>
+                  <input type="text" id="k9x-rune-spell" placeholder="adori vita vis" />
+                </label>
+                <label class="mb-field" for="k9x-rune-hotkey">
+                  <span class="mb-field-label">Spell Hotkey (1-12)</span>
+                  <input type="number" id="k9x-rune-hotkey" min="1" max="12" placeholder="optional" />
+                </label>
+                <label class="mb-field" for="k9x-rune-mana">
+                  <span class="mb-field-label">Mana Cost</span>
+                  <input type="number" id="k9x-rune-mana" min="0" placeholder="600" />
+                </label>
+                <label class="mb-field" for="k9x-rune-min-hp">
+                  <span class="mb-field-label">Min HP (%)</span>
+                  <input type="number" id="k9x-rune-min-hp" min="0" max="100" placeholder="50" />
+                </label>
+                <label class="mb-field" for="k9x-rune-min-food">
+                  <span class="mb-field-label">Min Food (sec)</span>
+                  <input type="number" id="k9x-rune-min-food" min="0" placeholder="30" />
+                </label>
+                <label class="mb-field" for="k9x-rune-cooldown">
+                  <span class="mb-field-label">Cooldown (ms)</span>
+                  <input type="number" id="k9x-rune-cooldown" min="0" placeholder="3500" />
+                </label>
+              </div>
+              <div class="mb-small-note" id="k9x-rune-status">Status: stopped</div>
+            </div>
+          </div>
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="heal">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title">Auto Heal</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-stack">
               <label class="mb-toggle">
                 <input type="checkbox" id="k9x-auto-heal-enabled" />
                 <span>Enable Auto Heal</span>
@@ -1120,26 +1284,32 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               </div>
               <div class="mb-small-note">Checks about twenty times per second. HP is used before mana, and unregistered hotkey presses are retried quickly.</div>
             </div>
-            <div class="mb-section mb-column-section">
-              <div class="mb-label">Talk</div>
-              <div class="mb-stack">
-                <label class="mb-toggle">
-                  <input type="checkbox" id="k9x-talk-enabled" />
-                  <span>Enable Auto Reply</span>
-                </label>
-                <input type="password" id="k9x-talk-api-key" placeholder="Gemini API key" />
-                <textarea id="k9x-talk-prompt" placeholder="Reply style prompt"></textarea>
-                <div class="mb-small-note" id="k9x-talk-status">Status: idle</div>
-                <div class="mb-small-note">Replies only to the newest unseen message in Default chat.</div>
-                <div class="mb-small-note">It will not reply to itself and will not admit it is a bot.</div>
-              </div>
+          </div>
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="talk">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title">Talk</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-stack">
+              <label class="mb-toggle">
+                <input type="checkbox" id="k9x-talk-enabled" />
+                <span>Enable Auto Reply</span>
+              </label>
+              <input type="password" id="k9x-talk-api-key" placeholder="Gemini API key" />
+              <textarea id="k9x-talk-prompt" placeholder="Reply style prompt"></textarea>
+              <div class="mb-small-note" id="k9x-talk-status">Status: idle</div>
+              <div class="mb-small-note">Replies only to the newest unseen message in Default chat.</div>
+              <div class="mb-small-note">It will not reply to itself and will not admit it is a bot.</div>
             </div>
           </div>
         </div>
         <div class="mb-talk-column">
-          <div class="mb-section mb-column-section">
-            <div class="mb-label">Auto Attack</div>
-            <div class="mb-stack">
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="attack">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title">Auto Attack</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-stack">
               <label class="mb-toggle">
                 <input type="checkbox" id="k9x-auto-attack-enabled" />
                 <span>Enable Auto Attack</span>
@@ -1178,9 +1348,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           </div>
         </div>
         <div class="mb-cave-column">
-          <div class="mb-section mb-column-section">
-            <div class="mb-label">Cave Bot</div>
-            <div class="mb-stack">
+          <div class="mb-section mb-column-section mb-collapsible" data-collapsible="cave">
+            <button type="button" class="mb-collapsible-header" aria-expanded="true">
+              <span class="mb-collapsible-title">Cave Bot</span>
+              <span class="mb-collapsible-toggle" aria-hidden="true">−</span>
+            </button>
+            <div class="mb-collapsible-body mb-stack">
               <div class="mb-field-grid">
                 <label class="mb-field" for="k9x-cave-preset-select">
                   <select id="k9x-cave-preset-select"></select>
@@ -1211,7 +1384,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       </div>
       <div class="mb-footer">
         source:
-        <a href="https://github.com/pasqualguerrero/minibia-bot" target="_blank" rel="noopener noreferrer">github.com/pasqualguerrero/minibia-bot</a>
+        <a href="https://github.com/pasqualguerrero/k9x" target="_blank" rel="noopener noreferrer">github.com/pasqualguerrero/k9x</a>
       </div>
     `;
     document.body.appendChild(panel);
@@ -1231,9 +1404,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     applySavedPanelPosition(panel);
     enableDrag(panel);
     setPanelCollapsed(panel, getSavedPanelCollapsed());
+    enableCollapsibleSections(panel);
 
     const spellInput = panel.querySelector("#k9x-rune-spell");
+    const runeHotkeyInput = panel.querySelector("#k9x-rune-hotkey");
     const manaInput = panel.querySelector("#k9x-rune-mana");
+    const runeMinHpInput = panel.querySelector("#k9x-rune-min-hp");
+    const runeMinFoodInput = panel.querySelector("#k9x-rune-min-food");
+    const runeCooldownInput = panel.querySelector("#k9x-rune-cooldown");
     const runeEnabledInput = panel.querySelector("#k9x-rune-enabled");
     const autoEatEnabledInput = panel.querySelector("#k9x-auto-eat-enabled");
     const autoEatHotkeyInput = panel.querySelector("#k9x-auto-eat-hotkey");
@@ -1360,10 +1538,55 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    function readRuneHotbarSlotFromInput() {
+      const rawValue = Number(runeHotkeyInput?.value);
+      return Number.isFinite(rawValue) && rawValue >= 1 && rawValue <= 12
+        ? Math.trunc(rawValue)
+        : null;
+    }
+
+    function readRuneConfigFromInputs() {
+      const runeSpellWords = spellInput?.value?.trim() || bot.rune?.config?.runeSpellWords || "";
+      const runeHotbarSlot = readRuneHotbarSlotFromInput() ?? bot.rune?.config?.runeHotbarSlot ?? null;
+      const runeManaCost = Math.max(0, Number(manaInput?.value) || bot.rune?.config?.runeManaCost || 0);
+      const minHpPercent = Math.min(
+        100,
+        Math.max(0, Number(runeMinHpInput?.value) ?? bot.rune?.config?.minHpPercent ?? 50)
+      );
+      const minFoodSeconds = Math.max(
+        0,
+        Number(runeMinFoodInput?.value) ?? bot.rune?.config?.minFoodSeconds ?? 30
+      );
+      const runeCooldownMs = Math.max(
+        0,
+        Number(runeCooldownInput?.value) ?? bot.rune?.config?.runeCooldownMs ?? 3500
+      );
+
+      return {
+        runeSpellWords,
+        runeHotbarSlot,
+        runeManaCost,
+        minHpPercent,
+        minFoodSeconds,
+        runeCooldownMs,
+      };
+    }
+
     if (spellInput) {
       spellInput.value = bot.rune?.config?.runeSpellWords || "";
       spellInput.addEventListener("change", () => {
         bot.rune.updateConfig({ runeSpellWords: spellInput.value.trim() });
+      });
+    }
+
+    if (runeHotkeyInput) {
+      runeHotkeyInput.value = bot.rune?.config?.runeHotbarSlot
+        ? String(bot.rune.config.runeHotbarSlot)
+        : "";
+      runeHotkeyInput.addEventListener("change", () => {
+        const runeHotbarSlot = readRuneHotbarSlotFromInput();
+        runeHotkeyInput.value = runeHotbarSlot ? String(runeHotbarSlot) : "";
+        bot.rune.updateConfig({ runeHotbarSlot });
       });
     }
 
@@ -1376,14 +1599,38 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if (runeMinHpInput) {
+      runeMinHpInput.value = String(bot.rune?.config?.minHpPercent ?? 50);
+      runeMinHpInput.addEventListener("change", () => {
+        const minHpPercent = Math.min(100, Math.max(0, Number(runeMinHpInput.value) || 0));
+        runeMinHpInput.value = String(minHpPercent);
+        bot.rune.updateConfig({ minHpPercent });
+      });
+    }
+
+    if (runeMinFoodInput) {
+      runeMinFoodInput.value = String(bot.rune?.config?.minFoodSeconds ?? 30);
+      runeMinFoodInput.addEventListener("change", () => {
+        const minFoodSeconds = Math.max(0, Number(runeMinFoodInput.value) || 0);
+        runeMinFoodInput.value = String(minFoodSeconds);
+        bot.rune.updateConfig({ minFoodSeconds });
+      });
+    }
+
+    if (runeCooldownInput) {
+      runeCooldownInput.value = String(bot.rune?.config?.runeCooldownMs ?? 3500);
+      runeCooldownInput.addEventListener("change", () => {
+        const runeCooldownMs = Math.max(0, Number(runeCooldownInput.value) || 0);
+        runeCooldownInput.value = String(runeCooldownMs);
+        bot.rune.updateConfig({ runeCooldownMs });
+      });
+    }
+
     if (runeEnabledInput) {
       runeEnabledInput.checked = !!bot.rune?.status?.().running;
       runeEnabledInput.addEventListener("change", () => {
-        const runeSpellWords = spellInput?.value?.trim() || bot.rune.config.runeSpellWords;
-        const runeManaCost = Math.max(0, Number(manaInput?.value) || bot.rune.config.runeManaCost || 0);
-
         if (runeEnabledInput.checked) {
-          bot.rune.start({ runeSpellWords, runeManaCost });
+          bot.rune.start(readRuneConfigFromInputs());
         } else {
           bot.rune.stop();
         }
@@ -1872,6 +2119,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoFishingStatusTimerId = window.setInterval(refreshAutoFishingStatus, 1000);
     bot.addCleanup(() => {
       window.clearInterval(autoFishingStatusTimerId);
+    });
+
+    const runeStatusTimerId = window.setInterval(refreshRuneStatus, 1000);
+    bot.addCleanup(() => {
+      window.clearInterval(runeStatusTimerId);
     });
 
     const caveStatusTimerId = window.setInterval(() => {
