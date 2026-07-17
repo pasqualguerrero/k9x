@@ -9626,21 +9626,18 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                   <input type="checkbox" id="k9x-auto-fishing-enabled" />
                   <span>Auto Fishing</span>
                 </label>
-                <div class="mb-small-note">On enable it asks for the rod hotkey slot, then uses it and left-clicks fast (about every 200ms). Right-click disables it.</div>
               </div>
               <div class="mb-row">
                 <label class="mb-toggle">
                   <input type="checkbox" id="k9x-auto-invisible-enabled" />
                   <span>Auto Invisible</span>
                 </label>
-                <div class="mb-small-note">Casts utana vid whenever invisibility is not active.</div>
               </div>
               <div class="mb-row">
                 <label class="mb-toggle">
                   <input type="checkbox" id="k9x-auto-magic-shield-enabled" />
                   <span>Auto Utamo Vita</span>
                 </label>
-                <div class="mb-small-note">Casts utamo vita whenever magic shield is not active.</div>
               </div>
               <div class="mb-row mb-row-compact">
                 <label class="mb-toggle">
@@ -9652,7 +9649,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                   <input type="number" id="k9x-force-light-level" min="3" max="20" placeholder="12" />
                 </label>
               </div>
-              <div class="mb-small-note">Client-only light bubble (utevo lux=9, gran lux=12, vis lux=14). Re-applies if the server clears LIGHT.</div>
               <div class="mb-row">
                 <label class="mb-toggle">
                   <input type="checkbox" id="k9x-equip-ring-enabled" />
