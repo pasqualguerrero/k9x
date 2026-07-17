@@ -3802,6 +3802,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return null;
     }
 
+    // Support Position-like objects and plain {x,y,z}.
     const x = Number(value.x);
     const y = Number(value.y);
     const z = Number(value.z);
@@ -3809,11 +3810,26 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return null;
     }
 
+    // Floor (not trunc) so negative world coords still snap to the correct tile.
     return {
-      x: Math.trunc(x),
-      y: Math.trunc(y),
-      z: Math.trunc(z),
+      x: Math.floor(x),
+      y: Math.floor(y),
+      z: Math.floor(z),
     };
+  }
+
+  function readCreaturePosition(creature) {
+    if (!creature) {
+      return null;
+    }
+
+    // Prefer live getPosition(); fall back to cached fields used by the client.
+    return normalizePosition(
+      creature.getPosition?.() ||
+      creature.__position ||
+      creature.position ||
+      null
+    );
   }
 
   function getPositionKey(position) {
@@ -3821,13 +3837,17 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   }
 
   function isAdjacentTile(from, to) {
-    if (!from || !to || Number(from.z) !== Number(to.z)) {
+    if (!from || !to) {
+      return false;
+    }
+
+    if (Number(from.z) !== Number(to.z)) {
       return false;
     }
 
     const dx = Math.abs(Number(from.x) - Number(to.x));
     const dy = Math.abs(Number(from.y) - Number(to.y));
-    // Face-to-face: same floor, Chebyshev distance 1 (8 surrounding tiles).
+    // Face-to-face: same floor, Chebyshev distance 1 (all 8 surrounding tiles).
     return (dx !== 0 || dy !== 0) && dx <= 1 && dy <= 1;
   }
 
@@ -4461,22 +4481,76 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return clicked;
   }
 
-  function getAdjacentMonsterCandidates(now = Date.now()) {
+  function getFloorMonsters() {
+    // Scan activeCreatures directly for adjacency. Do not use the xray
+    // screen range (8x6) — that path also has strict z=== checks that can
+    // drop valid same-floor mobs, which under-counts exori surrounds.
+    const player = window.gameClient?.player;
+    const myId = player?.id;
     const playerPosition = normalizePosition(bot.getPlayerPosition());
     if (!playerPosition) {
       return [];
     }
 
-    pruneSkippedTargets(now);
+    return Object.values(window.gameClient?.world?.activeCreatures || {}).filter((creature) => {
+      if (!creature || creature.id === myId) {
+        return false;
+      }
 
-    return getNearbyMonsters()
-      .filter((monster) => shouldTargetCreature(monster))
-      .filter((monster) => !isTargetSkipped(monster, now))
-      .filter((monster) => !isCreatureDead(monster))
+      // type 0 = player in this client; exori is for monsters/NPCs around you.
+      if (creature.type === 0) {
+        return false;
+      }
+
+      if (isCreatureDead(creature)) {
+        return false;
+      }
+
+      const creaturePosition = readCreaturePosition(creature);
+      if (!creaturePosition || Number(creaturePosition.z) !== Number(playerPosition.z)) {
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  function getAdjacentMonsters(options = {}) {
+    const {
+      // Target-filter (include/exclude) still applies so "relevant" mobs match attack filters.
+      applyTargetFilter = true,
+      // Skipped chase targets are still standing next to you — they must count for AOE.
+      includeSkipped = true,
+      now = Date.now(),
+    } = options;
+
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    if (!playerPosition) {
+      return [];
+    }
+
+    if (!includeSkipped) {
+      pruneSkippedTargets(now);
+    }
+
+    return getFloorMonsters()
       .filter((monster) => {
-        const monsterPosition = normalizePosition(monster?.getPosition?.() || monster?.__position);
+        if (applyTargetFilter && !shouldTargetCreature(monster)) {
+          return false;
+        }
+
+        if (!includeSkipped && isTargetSkipped(monster, now)) {
+          return false;
+        }
+
+        const monsterPosition = readCreaturePosition(monster);
         return isAdjacentTile(playerPosition, monsterPosition);
       });
+  }
+
+  function getAdjacentMonsterCandidates(now = Date.now()) {
+    // Back-compat name used by status/exports: filtered, but NOT skip-gated.
+    return getAdjacentMonsters({ applyTargetFilter: true, includeSkipped: true, now });
   }
 
   function canUseExori(now = Date.now()) {
@@ -4494,7 +4568,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     const minCreatures = normalizeExoriMinCreatures(config.exoriMinCreatures);
-    return getAdjacentMonsterCandidates(now).length >= minCreatures;
+    return getAdjacentMonsters({ applyTargetFilter: true, includeSkipped: true, now }).length >= minCreatures;
   }
 
   function triggerExori(now = Date.now()) {
@@ -4503,7 +4577,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     const slot = normalizeHotbarSlot(config.exoriHotbarSlot);
-    const adjacent = getAdjacentMonsterCandidates(now);
+    const adjacent = getAdjacentMonsters({ applyTargetFilter: true, includeSkipped: true, now });
     // Always arm cooldown on attempt so OOM / failed cast does not spam every tick
     // or block the rest of the auto-attack loop.
     state.lastExoriHotkeyAt = now;
@@ -4515,7 +4589,12 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
         slot,
         adjacentCount: adjacent.length,
         minCreatures: normalizeExoriMinCreatures(config.exoriMinCreatures),
-        monsters: adjacent.map((creature) => creature.name || "Mob"),
+        monsters: adjacent.map((creature) => ({
+          id: creature.id,
+          name: creature.name || "Mob",
+          position: readCreaturePosition(creature),
+        })),
+        playerPosition: normalizePosition(bot.getPlayerPosition()),
       });
     } else {
       bot.log("auto attack exori hotkey failed (continuing normal attack)", {
@@ -4634,7 +4713,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   function status() {
     const now = Date.now();
     const combatActive = syncCombatState(now);
-    const adjacentMonsters = getAdjacentMonsterCandidates(now);
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const adjacentFiltered = getAdjacentMonsters({ applyTargetFilter: true, includeSkipped: true, now });
+    const adjacentRaw = getAdjacentMonsters({ applyTargetFilter: false, includeSkipped: true, now });
     return {
       running: state.running,
       config: { ...config },
@@ -4647,27 +4728,37 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       combatDurationMs: state.combatStartedAt ? Math.max(0, Date.now() - state.combatStartedAt) : 0,
       targetCount: getCombatTargetCount(),
       lastChaseAt: state.lastChaseAt,
-      adjacentMonsterCount: adjacentMonsters.length,
+      playerPosition,
+      adjacentMonsterCount: adjacentFiltered.length,
+      adjacentMonsterCountRaw: adjacentRaw.length,
       canUseExori: canUseExori(now),
       currentTarget: getCurrentTarget()
         ? {
             id: getCurrentTarget().id,
             name: getCurrentTarget().name,
             type: getCurrentTarget().type,
-            position: getCurrentTarget().__position || null,
+            position: readCreaturePosition(getCurrentTarget()),
           }
         : null,
       nearbyMonsters: getNearbyMonsters().map((creature) => ({
         id: creature.id,
         name: creature.name,
         type: creature.type,
-        position: creature.__position || null,
+        position: readCreaturePosition(creature),
+        tileDistance: getTileDistance(playerPosition, readCreaturePosition(creature)),
+        allowed: shouldTargetCreature(creature),
       })),
-      adjacentMonsters: adjacentMonsters.map((creature) => ({
+      adjacentMonsters: adjacentFiltered.map((creature) => ({
         id: creature.id,
         name: creature.name,
         type: creature.type,
-        position: creature.__position || null,
+        position: readCreaturePosition(creature),
+      })),
+      adjacentMonstersRaw: adjacentRaw.map((creature) => ({
+        id: creature.id,
+        name: creature.name,
+        type: creature.type,
+        position: readCreaturePosition(creature),
       })),
     };
   }
@@ -4740,7 +4831,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     triggerRune,
     canUseExori,
     triggerExori,
+    getAdjacentMonsters,
     getAdjacentMonsterCandidates,
+    getFloorMonsters,
     getNearbyMonsters,
     getCurrentTarget,
     getCurrentFollowTarget,
