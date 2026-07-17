@@ -1250,12 +1250,21 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     lastHealth: null,
     lastTriggerAt: 0,
     lastDamageEventKey: null,
+    lastWhisperAlarmAt: 0,
+    lastWhisperKey: null,
+    // Same style of de-dupe as the talk module (keys + signatures).
+    seenWhisperKeys: [],
+    seenWhisperSignatures: [],
     pendingReturnOrigin: null,
     pendingReturnModules: null,
     returnNotBeforeAt: 0,
     lastThreatAt: 0,
     lastReturnAttemptAt: 0,
   };
+
+  // Match talk module: only care about recent chat lines for whisper alarms.
+  const maxWhisperAgeMs = 2 * 60 * 1000;
+  const systemChannelNames = new Set(["default", "console", "loot"]);
 
   const config = Object.assign(
     {
@@ -1267,6 +1276,11 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       returnRetryCooldownMs: 2000,
       unknownPlayerEnabled: false,
       healthLossEnabled: false,
+      // Alarm only (does not flee) when someone whispers nearby or PMs you.
+      whisperAlarmEnabled: false,
+      whisperAlarmCooldownMs: 2000,
+      // Private-message channels (LocalChannel named after a player) also count.
+      whisperIncludePrivate: true,
       trustedNames: [],
       gameMasterNames: [],
     },
@@ -1362,17 +1376,19 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   }
 
   function getRecentChannelMessages() {
-    return (window.gameClient?.interface?.channelManager?.channels || []).flatMap((channel) =>
-      (channel?.__contents || []).map((entry) => ({
-        channelName: channel?.name || null,
-        message: String(entry?.message || ""),
-        time: entry?.__time || null,
-      }))
-    );
+    // Kept for damage parsing (health-loss panic).
+    return getRawChatEntries().map((raw) => {
+      const entry = raw.entry || {};
+      return {
+        channelName: raw.channelName,
+        message: String(entry?.message || entry?.text || ""),
+        time: entry?.__time || entry?.time || null,
+      };
+    });
   }
 
   function parseDamageMessage(entry) {
-    const match = entry.message.match(
+    const match = String(entry.message || "").match(
       /^You lose\s+(\d+)\s+hitpoints\s+due to an attack by\s+(.+?)\.$/i
     );
 
@@ -1395,12 +1411,316 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       .map(parseDamageMessage)
       .filter(Boolean)
       .sort((a, b) => {
-        const aTime = a.time ? Date.parse(a.time) : 0;
-        const bTime = b.time ? Date.parse(b.time) : 0;
+        const aTime = getMessageTimestamp({ time: a.time });
+        const bTime = getMessageTimestamp({ time: b.time });
         return bTime - aTime;
       });
 
     return messages[0] || null;
+  }
+
+  // --- Chat helpers (mirrors talk module Default-channel listening) ---
+
+  function getSelfNames() {
+    return new Set(
+      ["you", bot.getPlayerName?.(), window.gameClient?.player?.name, window.gameClient?.player?.state?.name]
+        .map((name) => normalizeName(name))
+        .filter(Boolean)
+    );
+  }
+
+  function extractSenderFromMessage(message) {
+    const text = String(message || "").trim();
+    if (!text) {
+      return { sender: null, body: "" };
+    }
+
+    const patterns = [
+      /^\[[^\]]+\]\s*(.+?)(?:\s*\[\d+\])?\s+whispers:\s+(.+)$/i,
+      /^\[[^\]]+\]\s*(.+?)(?:\s*\[\d+\])?\s+says:\s+(.+)$/i,
+      /^\[[^\]]+\]\s*(.+?)(?:\s*\[\d+\])?\s+YELLS:\s+(.+)$/i,
+      /^\[[^\]]+\]\s*([^:\n]{2,40}):\s+(.+)$/i,
+      /^(.+?)(?:\s*\[\d+\])?\s+whispers:\s+(.+)$/i,
+      /^(.+?)(?:\s*\[\d+\])?\s+says:\s+(.+)$/i,
+      /^([^:\n]{2,40}):\s+(.+)$/i,
+      /^From\s+([^:\n]{2,40}):\s+(.+)$/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) {
+        return {
+          sender: String(match[1] || "").trim() || null,
+          body: String(match[2] || "").trim(),
+        };
+      }
+    }
+
+    return { sender: null, body: text };
+  }
+
+  function getRawChatEntries() {
+    return (window.gameClient?.interface?.channelManager?.channels || []).flatMap((channel) =>
+      (channel?.__contents || []).map((entry, index) => ({
+        channelName: channel?.name || null,
+        entry,
+        index,
+      }))
+    );
+  }
+
+  function readFormattedLine(entry) {
+    if (!entry || typeof entry.format !== "function") {
+      return "";
+    }
+
+    try {
+      return String(entry.format() || "");
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function toChatMessage(rawEntry) {
+    const entry = rawEntry?.entry || {};
+    // CharacterMessage.message is the body only; name/loudness live on the object.
+    const rawMessage = String(entry?.message || entry?.text || "").trim();
+    const formatted = readFormattedLine(entry);
+    const parsed = extractSenderFromMessage(formatted || rawMessage);
+    const sender =
+      String(entry?.author || entry?.sender || entry?.name || parsed.sender || "").trim() || null;
+    const body = String(entry?.text || parsed.body || rawMessage).trim();
+    const time = entry?.__time || entry?.time || null;
+    const senderType = entry?.type;
+    const loudness = entry?.loudness;
+    const key = [
+      rawEntry?.channelName || "",
+      time instanceof Date ? time.toISOString() : time || "",
+      sender || "",
+      rawMessage || "",
+      rawEntry?.index || 0,
+    ].join("|");
+
+    return {
+      key,
+      channelName: rawEntry?.channelName || null,
+      sender,
+      body,
+      rawMessage,
+      formatted,
+      time,
+      senderType,
+      loudness,
+    };
+  }
+
+  function getChatMessages() {
+    return getRawChatEntries().map(toChatMessage).filter((message) => message.body);
+  }
+
+  function getMessageTimestamp(message) {
+    const rawTime = message?.time;
+    if (typeof rawTime === "number" && Number.isFinite(rawTime)) {
+      return rawTime < 1e12 ? rawTime * 1000 : rawTime;
+    }
+
+    if (rawTime instanceof Date) {
+      return rawTime.getTime();
+    }
+
+    const parsed = Date.parse(String(rawTime || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function getMessageSignature(message) {
+    return [
+      normalizeName(message?.channelName),
+      normalizeName(message?.sender),
+      normalizeName(message?.body || message?.rawMessage),
+      String(getMessageTimestamp(message) || ""),
+    ].join("|");
+  }
+
+  function trimSeenWhispers() {
+    const maxSeenEntries = 200;
+    if (state.seenWhisperKeys.length > maxSeenEntries) {
+      state.seenWhisperKeys = state.seenWhisperKeys.slice(-maxSeenEntries);
+    }
+
+    if (state.seenWhisperSignatures.length > maxSeenEntries) {
+      state.seenWhisperSignatures = state.seenWhisperSignatures.slice(-maxSeenEntries);
+    }
+  }
+
+  function hasSeenWhisper(message) {
+    return (
+      state.seenWhisperKeys.includes(message?.key) ||
+      state.seenWhisperSignatures.includes(getMessageSignature(message))
+    );
+  }
+
+  function rememberSeenWhisper(message) {
+    if (!message) {
+      return;
+    }
+
+    if (message.key && !state.seenWhisperKeys.includes(message.key)) {
+      state.seenWhisperKeys.push(message.key);
+    }
+
+    const signature = getMessageSignature(message);
+    if (signature && !state.seenWhisperSignatures.includes(signature)) {
+      state.seenWhisperSignatures.push(signature);
+    }
+
+    trimSeenWhispers();
+  }
+
+  function isSelfMessage(message) {
+    if (getSelfNames().has(normalizeName(message?.sender))) {
+      return true;
+    }
+
+    return [message?.body, message?.rawMessage].some((text) => bot.isRecentSentChat?.(text, 20000));
+  }
+
+  function isTrustedSender(message) {
+    const senderName = normalizeName(message?.sender);
+    if (!senderName) {
+      return false;
+    }
+
+    return getTrustedNames().includes(senderName);
+  }
+
+  function isSystemMessage(message) {
+    const npcType = window.CONST?.TYPES?.NPC;
+    return npcType != null && message?.senderType === npcType;
+  }
+
+  function isDefaultChannelMessage(message) {
+    return normalizeName(message?.channelName) === "default";
+  }
+
+  function isPrivateChannelMessage(message) {
+    const channel = normalizeName(message?.channelName);
+    return !!channel && !systemChannelNames.has(channel);
+  }
+
+  function isWhisperMessage(message) {
+    if (!message) {
+      return false;
+    }
+
+    // Client: loudness 0 = whisper (CharacterMessage).
+    if (Number(message.loudness) === 0) {
+      return true;
+    }
+
+    // UI format path: "Name whispers: ..." (CharacterMessage.format).
+    if (/whispers:/i.test(String(message.formatted || ""))) {
+      return true;
+    }
+
+    // Private-message tabs (LocalChannel named after a player) — often what
+    // people mean by "someone whispered me".
+    if (config.whisperIncludePrivate !== false && isPrivateChannelMessage(message)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function getDefaultMessages() {
+    return getChatMessages().filter(isDefaultChannelMessage);
+  }
+
+  function getWhisperMessages() {
+    // Like talk.getDefaultMessages(), then keep only whisper-like lines.
+    // Also include private PM channels when enabled.
+    return getChatMessages().filter((message) => {
+      if (isDefaultChannelMessage(message)) {
+        return isWhisperMessage(message);
+      }
+
+      if (config.whisperIncludePrivate !== false && isPrivateChannelMessage(message)) {
+        return isWhisperMessage(message);
+      }
+
+      return false;
+    });
+  }
+
+  function getNewestPendingWhisper() {
+    const pendingMessages = getWhisperMessages().filter((message) => {
+      if (!message?.body || !message?.key) {
+        return false;
+      }
+
+      if (hasSeenWhisper(message)) {
+        return false;
+      }
+
+      if (!message.sender || isSelfMessage(message) || isSystemMessage(message) || isTrustedSender(message)) {
+        rememberSeenWhisper(message);
+        return false;
+      }
+
+      const timestamp = getMessageTimestamp(message);
+      if (timestamp && Date.now() - timestamp > maxWhisperAgeMs) {
+        rememberSeenWhisper(message);
+        return false;
+      }
+
+      return true;
+    });
+
+    if (!pendingMessages.length) {
+      return null;
+    }
+
+    return {
+      targetMessage: pendingMessages[pendingMessages.length - 1],
+      pendingMessages,
+    };
+  }
+
+  function seedSeenWhispers() {
+    getWhisperMessages().forEach((message) => rememberSeenWhisper(message));
+  }
+
+  function checkWhispers(now = Date.now()) {
+    if (!config.whisperAlarmEnabled) {
+      return false;
+    }
+
+    const pending = getNewestPendingWhisper();
+    if (!pending) {
+      return false;
+    }
+
+    // Mark the whole batch seen so backlog never re-fires.
+    pending.pendingMessages.forEach((message) => rememberSeenWhisper(message));
+
+    const cooldownMs = normalizeDelayMs(config.whisperAlarmCooldownMs, 2000);
+    if (now - state.lastWhisperAlarmAt < cooldownMs) {
+      return false;
+    }
+
+    const latest = pending.targetMessage;
+    state.lastWhisperAlarmAt = now;
+    state.lastWhisperKey = latest.key;
+    bot.playAlarm?.();
+    bot.log("panic whisper alarm", {
+      sender: latest.sender,
+      body: latest.body,
+      channelName: latest.channelName,
+      loudness: latest.loudness,
+      privateChannel: isPrivateChannelMessage(latest),
+      count: pending.pendingMessages.length,
+    });
+    // Alarm only — do not flee / stop modules.
+    return false;
   }
 
   function getReturnDelayMs() {
@@ -1681,6 +2001,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     if (!state.running) return;
 
     try {
+      // Whisper is alarm-only and must not block return-to-origin / flee logic.
+      checkWhispers();
       const triggered = checkGameMasters() || checkUnknownPlayers() || checkHealthLoss();
       if (!triggered) {
         tryReturnToOrigin();
@@ -1691,7 +2013,12 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   }
 
   function shouldRun() {
-    return !!(getGameMasterNames().length || config.unknownPlayerEnabled || config.healthLossEnabled);
+    return !!(
+      getGameMasterNames().length ||
+      config.unknownPlayerEnabled ||
+      config.healthLossEnabled ||
+      config.whisperAlarmEnabled
+    );
   }
 
   function start() {
@@ -1702,6 +2029,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     state.running = true;
     state.lastHealth = Number(bot.getPlayerState()?.health ?? 0);
     state.lastDamageEventKey = getLatestDamageEvent()?.key || null;
+    // Ignore whispers already in chat history so reloading doesn't spam alarms.
+    seedSeenWhispers();
     bot.log("panic runner started", { ...config });
     tick();
     return true;
@@ -1722,6 +2051,9 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
 
     state.lastHealth = null;
     state.lastDamageEventKey = null;
+    state.lastWhisperKey = null;
+    state.seenWhisperKeys = [];
+    state.seenWhisperSignatures = [];
     clearPendingReturn();
     bot.log("panic runner stopped");
     return true;
@@ -1729,7 +2061,13 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
 
   function syncRunningState() {
     if (shouldRun()) {
+      const wasRunning = state.running;
       start();
+      // If runner was already up (e.g. health panic) and whisper was just
+      // enabled, seed history so old chat lines do not all fire at once.
+      if (wasRunning && config.whisperAlarmEnabled) {
+        seedSeenWhispers();
+      }
     } else {
       stop();
     }
@@ -1767,6 +2105,21 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
         next.returnRetryCooldownMs,
         config.returnRetryCooldownMs
       );
+    }
+
+    if ("whisperAlarmCooldownMs" in next) {
+      next.whisperAlarmCooldownMs = normalizeDelayMs(
+        next.whisperAlarmCooldownMs,
+        config.whisperAlarmCooldownMs
+      );
+    }
+
+    if ("whisperAlarmEnabled" in next) {
+      next.whisperAlarmEnabled = !!next.whisperAlarmEnabled;
+    }
+
+    if ("whisperIncludePrivate" in next) {
+      next.whisperIncludePrivate = next.whisperIncludePrivate !== false;
     }
 
     Object.assign(config, next);
@@ -1809,6 +2162,17 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       })),
       latestDamageEvent: getLatestDamageEvent(),
       lastTriggerAt: state.lastTriggerAt,
+      lastWhisperAlarmAt: state.lastWhisperAlarmAt,
+      lastWhisperKey: state.lastWhisperKey,
+      recentWhispers: getWhisperMessages().slice(-5).map((message) => ({
+        key: message.key,
+        sender: message.sender,
+        body: message.body,
+        channelName: message.channelName,
+        loudness: message.loudness,
+        formatted: message.formatted || null,
+        time: message.time,
+      })),
       pendingReturn: state.pendingReturnOrigin
         ? {
             origin: { ...state.pendingReturnOrigin },
@@ -3853,15 +4217,24 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const slot = normalizeHotbarSlot(config.exoriHotbarSlot);
     const adjacent = getAdjacentMonsterCandidates(now);
+    // Always arm cooldown on attempt so OOM / failed cast does not spam every tick
+    // or block the rest of the auto-attack loop.
+    state.lastExoriHotkeyAt = now;
+
     const clicked = bot.clickHotbar(slot - 1);
     if (clicked) {
-      state.lastExoriHotkeyAt = now;
       markCombatActive(now);
       bot.log("used auto attack exori hotkey", {
         slot,
         adjacentCount: adjacent.length,
         minCreatures: normalizeExoriMinCreatures(config.exoriMinCreatures),
         monsters: adjacent.map((creature) => creature.name || "Mob"),
+      });
+    } else {
+      bot.log("auto attack exori hotkey failed (continuing normal attack)", {
+        slot,
+        adjacentCount: adjacent.length,
+        minCreatures: normalizeExoriMinCreatures(config.exoriMinCreatures),
       });
     }
 
@@ -3891,10 +4264,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     syncCombatState(now);
 
-    // Knight AOE first: if enough face-to-face creatures, cast exori even while targeted.
-    if (triggerExori(now)) {
-      return true;
-    }
+    // Knight AOE is best-effort only: never return early on success/failure so
+    // low mana or a failed cast cannot stall targeting, chase, or runes.
+    triggerExori(now);
 
     if (config.meleeMode) {
       const chased = syncMeleeChase(now);
@@ -7443,6 +7815,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const unknownToggle = document.getElementById("k9x-panic-unknown");
     const healthToggle = document.getElementById("k9x-panic-health");
     const returnToggle = document.getElementById("k9x-panic-return");
+    const whisperToggle = document.getElementById("k9x-panic-whisper");
     const status = bot.panic?.status?.();
 
     if (unknownToggle) {
@@ -7455,6 +7828,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     if (returnToggle) {
       returnToggle.checked = !!status?.config?.returnToOriginEnabled;
+    }
+
+    if (whisperToggle) {
+      whisperToggle.checked = !!status?.config?.whisperAlarmEnabled;
     }
   }
 
@@ -8482,6 +8859,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="k9x-panic-return" />
                 <span>Auto Return</span>
               </label>
+              <label class="mb-toggle">
+                <input type="checkbox" id="k9x-panic-whisper" />
+                <span>Whisper Alarm</span>
+              </label>
+              <div class="mb-small-note">Whisper alarm plays sound only (no flee) for nearby whispers and private messages. Trusted names are ignored.</div>
               <div class="mb-inline">
                 <input type="text" id="k9x-panic-trusted-input" placeholder="Trusted name" />
                 <button type="button" class="mb-small-button" id="k9x-panic-trusted-add">Add</button>
@@ -8807,6 +9189,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const panicUnknownInput = panel.querySelector("#k9x-panic-unknown");
     const panicHealthInput = panel.querySelector("#k9x-panic-health");
     const panicReturnInput = panel.querySelector("#k9x-panic-return");
+    const panicWhisperInput = panel.querySelector("#k9x-panic-whisper");
     const panicTrustedInput = panel.querySelector("#k9x-panic-trusted-input");
     const panicTrustedAddButton = panel.querySelector("#k9x-panic-trusted-add");
     const xrayOverlayButton = panel.querySelector("#k9x-xray-overlay-toggle");
@@ -9473,6 +9856,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       panicReturnInput.checked = !!bot.panic?.status?.().config?.returnToOriginEnabled;
       panicReturnInput.addEventListener("change", () => {
         bot.panic.updateConfig({ returnToOriginEnabled: panicReturnInput.checked });
+        refreshPanicStatus();
+      });
+    }
+
+    if (panicWhisperInput) {
+      panicWhisperInput.checked = !!bot.panic?.status?.().config?.whisperAlarmEnabled;
+      panicWhisperInput.addEventListener("change", () => {
+        bot.panic.updateConfig({ whisperAlarmEnabled: panicWhisperInput.checked });
         refreshPanicStatus();
       });
     }
