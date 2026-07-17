@@ -1139,7 +1139,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="k9x-panic-whisper" />
                 <span>Whisper Alarm</span>
               </label>
-              <div class="mb-small-note">Whisper alarm plays sound only (no flee) for nearby whispers and private messages. Trusted names are ignored.</div>
+              <div class="mb-small-note">Whisper alarm plays sound only (no flee) for incoming nearby whispers and private messages. Your own messages and trusted names are ignored.</div>
               <div class="mb-inline">
                 <input type="text" id="k9x-panic-trusted-input" placeholder="Trusted name" />
                 <button type="button" class="mb-small-button" id="k9x-panic-trusted-add">Add</button>

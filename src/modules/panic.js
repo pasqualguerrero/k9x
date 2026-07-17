@@ -22,10 +22,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
 
   // Match talk module: only care about recent chat lines for whisper alarms.
   const maxWhisperAgeMs = 2 * 60 * 1000;
-  // Never treat these tabs as private "whisper" channels.
-  // Default is listed so local Default-channel speech is only counted when
-  // loudness/format marks it as a real whisper (see isWhisperMessage).
-  const systemChannelNames = new Set([
+  // Global / system tabs — never treat as private-message channels.
+  const blockedChannelNames = new Set([
     "default",
     "console",
     "loot",
@@ -228,10 +226,41 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     return { sender: null, body: text };
   }
 
+  function isPrivateChannelObject(channel) {
+    if (!channel) {
+      return false;
+    }
+
+    if (typeof PrivateChannel === "function" && channel instanceof PrivateChannel) {
+      return true;
+    }
+
+    // Fallback if the global constructor is unavailable after reloads.
+    return channel.constructor?.name === "PrivateChannel";
+  }
+
+  function getChannelKind(channel) {
+    const name = normalizeName(channel?.name);
+    if (name === "default") {
+      return "default";
+    }
+
+    if (blockedChannelNames.has(name)) {
+      return "blocked";
+    }
+
+    if (isPrivateChannelObject(channel)) {
+      return "private";
+    }
+
+    return "other";
+  }
+
   function getRawChatEntries() {
     return (window.gameClient?.interface?.channelManager?.channels || []).flatMap((channel) =>
       (channel?.__contents || []).map((entry, index) => ({
         channelName: channel?.name || null,
+        channelKind: getChannelKind(channel),
         entry,
         index,
       }))
@@ -250,9 +279,22 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     }
   }
 
+  function getInterfaceColorHex(colorId) {
+    try {
+      const iface = window.gameClient?.interface;
+      if (!iface || typeof iface.getHexColor !== "function") {
+        return null;
+      }
+
+      return String(iface.getHexColor(colorId) || "").toLowerCase();
+    } catch (error) {
+      return null;
+    }
+  }
+
   function toChatMessage(rawEntry) {
     const entry = rawEntry?.entry || {};
-    // CharacterMessage.message is the body only; name/loudness live on the object.
+    // CharacterMessage.message is the body only; name/loudness/color live on the object.
     const rawMessage = String(entry?.message || entry?.text || "").trim();
     const formatted = readFormattedLine(entry);
     const parsed = extractSenderFromMessage(formatted || rawMessage);
@@ -262,6 +304,11 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     const time = entry?.__time || entry?.time || null;
     const senderType = entry?.type;
     const loudness = entry?.loudness;
+    const color = entry?.color != null ? String(entry.color).toLowerCase() : null;
+    const skyBlueHex = getInterfaceColorHex(
+      window.gameClient?.interface?.COLORS?.SKYBLUE ?? window.Interface?.prototype?.COLORS?.SKYBLUE ?? 143
+    );
+    const isSkyBluePrivate = !!(color && skyBlueHex && color === skyBlueHex);
     const key = [
       rawEntry?.channelName || "",
       time instanceof Date ? time.toISOString() : time || "",
@@ -273,6 +320,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     return {
       key,
       channelName: rawEntry?.channelName || null,
+      channelKind: rawEntry?.channelKind || "other",
       sender,
       body,
       rawMessage,
@@ -280,6 +328,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       time,
       senderType,
       loudness,
+      color,
+      isSkyBluePrivate,
     };
   }
 
@@ -346,11 +396,9 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   }
 
   function isSelfMessage(message) {
-    if (getSelfNames().has(normalizeName(message?.sender))) {
-      return true;
-    }
-
-    return [message?.body, message?.rawMessage].some((text) => bot.isRecentSentChat?.(text, 20000));
+    // Only compare sender names. Do not use isRecentSentChat here — identical
+    // text from another player would be wrongly ignored.
+    return getSelfNames().has(normalizeName(message?.sender));
   }
 
   function isTrustedSender(message) {
@@ -367,57 +415,41 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     return npcType != null && message?.senderType === npcType;
   }
 
-  function isDefaultChannelMessage(message) {
-    return normalizeName(message?.channelName) === "default";
-  }
-
-  function isPrivateChannelMessage(message) {
-    const channel = normalizeName(message?.channelName);
-    return !!channel && !systemChannelNames.has(channel);
-  }
-
   function isWhisperMessage(message) {
     if (!message) {
       return false;
     }
 
-    // Client: loudness 0 = whisper (CharacterMessage).
+    // 1) Nearby whisper on Default (client loudness 0 = whisper).
     if (Number(message.loudness) === 0) {
       return true;
     }
 
-    // UI format path: "Name whispers: ..." (CharacterMessage.format).
+    // 2) Formatted UI line: "Name whispers: ..."
     if (/whispers:/i.test(String(message.formatted || ""))) {
       return true;
     }
 
-    // Private-message tabs (LocalChannel named after a player) — often what
-    // people mean by "someone whispered me".
-    if (config.whisperIncludePrivate !== false && isPrivateChannelMessage(message)) {
+    if (config.whisperIncludePrivate === false) {
+      return false;
+    }
+
+    // 3) Real private-message tabs (PrivateChannel named after a player).
+    if (message.channelKind === "private") {
+      return true;
+    }
+
+    // 4) Incoming PM with no private tab open lands on Default as skyblue
+    //    "says:" (loudness defaults to 1) — see handleReceivePrivateMessage.
+    if (message.channelKind === "default" && message.isSkyBluePrivate) {
       return true;
     }
 
     return false;
   }
 
-  function getDefaultMessages() {
-    return getChatMessages().filter(isDefaultChannelMessage);
-  }
-
   function getWhisperMessages() {
-    // Like talk.getDefaultMessages(), then keep only whisper-like lines.
-    // Also include private PM channels when enabled.
-    return getChatMessages().filter((message) => {
-      if (isDefaultChannelMessage(message)) {
-        return isWhisperMessage(message);
-      }
-
-      if (config.whisperIncludePrivate !== false && isPrivateChannelMessage(message)) {
-        return isWhisperMessage(message);
-      }
-
-      return false;
-    });
+    return getChatMessages().filter(isWhisperMessage);
   }
 
   function getNewestPendingWhisper() {
@@ -430,6 +462,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
         return false;
       }
 
+      // Skip own messages / NPCs / trusted. Mark seen so they never reappear.
       if (!message.sender || isSelfMessage(message) || isSystemMessage(message) || isTrustedSender(message)) {
         rememberSeenWhisper(message);
         return false;
@@ -484,8 +517,9 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       sender: latest.sender,
       body: latest.body,
       channelName: latest.channelName,
+      channelKind: latest.channelKind,
       loudness: latest.loudness,
-      privateChannel: isPrivateChannelMessage(latest),
+      isSkyBluePrivate: !!latest.isSkyBluePrivate,
       count: pending.pendingMessages.length,
     });
     // Alarm only — do not flee / stop modules.
@@ -938,7 +972,10 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
         sender: message.sender,
         body: message.body,
         channelName: message.channelName,
+        channelKind: message.channelKind,
         loudness: message.loudness,
+        isSkyBluePrivate: !!message.isSkyBluePrivate,
+        isSelf: isSelfMessage(message),
         formatted: message.formatted || null,
         time: message.time,
       })),
