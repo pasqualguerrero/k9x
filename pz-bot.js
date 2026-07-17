@@ -3096,19 +3096,33 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     const mode = normalizeTargetFilterMode(config.targetFilterMode);
-    const targetName = normalizeCreatureName(target.name || "Mob");
+    // Prefer the real creature name; only fall back to "Mob" when the game
+    // exposes no name at all (otherwise every unnamed type collapses to one bucket).
+    const targetName = normalizeCreatureName(target.name);
     const includedNames = new Set((config.includedCreatureNames || []).map(normalizeCreatureName));
     const excludedNames = new Set((config.excludedCreatureNames || []).map(normalizeCreatureName));
 
     if (mode === "include") {
+      // "Only include list" with an empty list means attack nothing — not everything.
       if (!includedNames.size) {
-        return true;
+        return false;
       }
 
-      return includedNames.has(targetName) && !excludedNames.has(targetName);
+      // Exact case-insensitive match. Also require a real name so blank names never slip through.
+      if (!targetName || !includedNames.has(targetName)) {
+        return false;
+      }
+
+      // Exclude list still wins when a name is on both lists.
+      return !excludedNames.has(targetName);
     }
 
     if (mode === "exclude") {
+      // No name → cannot match an exclude entry; still allow (same as "all" for unknowns).
+      if (!targetName) {
+        return true;
+      }
+
       return !excludedNames.has(targetName);
     }
 
@@ -3691,7 +3705,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     const engagedTarget = getEngagedTarget();
-    const preferredTarget = engagedTarget && !isTargetSkipped(engagedTarget, now)
+    const engagedIsValid = engagedTarget
+      && !isTargetSkipped(engagedTarget, now)
+      && shouldTargetCreature(engagedTarget);
+    const preferredTarget = engagedIsValid
       ? engagedTarget
       : (getMonsterCandidates(now)[0] || null);
     if (preferredTarget && setCurrentTarget(preferredTarget)) {
@@ -3706,6 +3723,20 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     if (config.meleeMode) {
+      return false;
+    }
+
+    // Hotbar targeting is the game's picker — it ignores our include/exclude lists.
+    // Only fall back to it when filters are off ("all"), so filtered modes cannot
+    // acquire a creature that failed shouldTargetCreature.
+    const filterMode = normalizeTargetFilterMode(config.targetFilterMode);
+    if (filterMode !== "all") {
+      bot.log("auto attack skipped hotkey fallback (target filter active)", {
+        filterMode,
+        preferredTarget: preferredTarget
+          ? { id: preferredTarget.id, name: preferredTarget.name || "Mob" }
+          : null,
+      });
       return false;
     }
 
