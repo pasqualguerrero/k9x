@@ -13,6 +13,11 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     // Same style of de-dupe as the talk module (keys + signatures).
     seenWhisperKeys: [],
     seenWhisperSignatures: [],
+    lastAntiBotAlarmAt: 0,
+    lastAntiBotKey: null,
+    seenAntiBotKeys: [],
+    seenAntiBotSignatures: [],
+    captchaModalWasOpen: false,
     pendingReturnOrigin: null,
     pendingReturnModules: null,
     returnNotBeforeAt: 0,
@@ -48,6 +53,9 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       whisperAlarmCooldownMs: 2000,
       // Private-message channels (LocalChannel named after a player) also count.
       whisperIncludePrivate: true,
+      // Alarm only when the server posts an anti-bot / captcha check message.
+      antiBotAlarmEnabled: true,
+      antiBotAlarmCooldownMs: 3000,
       trustedNames: [],
       gameMasterNames: [],
     },
@@ -295,12 +303,23 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   function toChatMessage(rawEntry) {
     const entry = rawEntry?.entry || {};
     // CharacterMessage.message is the body only; name/loudness/color live on the object.
+    // Plain Message (Console/Loot system lines) only has .message + .__time.
     const rawMessage = String(entry?.message || entry?.text || "").trim();
     const formatted = readFormattedLine(entry);
+    const isCharacterLine =
+      entry?.name != null ||
+      entry?.author != null ||
+      entry?.loudness != null ||
+      entry?.type != null;
     const parsed = extractSenderFromMessage(formatted || rawMessage);
-    const sender =
-      String(entry?.author || entry?.sender || entry?.name || parsed.sender || "").trim() || null;
-    const body = String(entry?.text || parsed.body || rawMessage).trim();
+    const sender = isCharacterLine
+      ? String(entry?.author || entry?.sender || entry?.name || parsed.sender || "").trim() || null
+      : null;
+    // Console Message.format is "HH:MM: <text>" — extractSender wrongly treats
+    // the hour as a speaker. Prefer the raw body for non-character lines.
+    const body = isCharacterLine
+      ? String(entry?.text || parsed.body || rawMessage).trim()
+      : rawMessage;
     const time = entry?.__time || entry?.time || null;
     const senderType = entry?.type;
     const loudness = entry?.loudness;
@@ -334,7 +353,31 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   }
 
   function getChatMessages() {
-    return getRawChatEntries().map(toChatMessage).filter((message) => message.body);
+    return getRawChatEntries()
+      .map(toChatMessage)
+      .filter((message) => message.body || message.rawMessage);
+  }
+
+  function getConsoleChannelMessages() {
+    const channelManager = window.gameClient?.interface?.channelManager;
+    const consoleChannel =
+      channelManager?.getChannel?.("Console") ||
+      (channelManager?.channels || []).find(
+        (channel) => normalizeName(channel?.name) === "console"
+      );
+
+    if (!consoleChannel) {
+      return [];
+    }
+
+    return (consoleChannel.__contents || []).map((entry, index) =>
+      toChatMessage({
+        channelName: consoleChannel.name || "Console",
+        channelKind: "blocked",
+        entry,
+        index,
+      })
+    ).filter((message) => message.body || message.rawMessage);
   }
 
   function getMessageTimestamp(message) {
@@ -523,6 +566,248 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       count: pending.pendingMessages.length,
     });
     // Alarm only — do not flee / stop modules.
+    return false;
+  }
+
+  // --- Anti-bot / captcha alerts (Console chat + captcha-modal) ---
+
+  function getMessageSearchText(message) {
+    return [
+      message?.body,
+      message?.rawMessage,
+      message?.formatted,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  function isAntiBotMessage(message) {
+    const text = getMessageSearchText(message);
+    if (!text) {
+      return false;
+    }
+
+    // Console examples: "Anti-bot check: please verify you are human."
+    // Modal chrome: "Anti-bot Verification"
+    return (
+      /anti[-\s]?bot/i.test(text) ||
+      /anti[-\s]?bot[-\s]?verif/i.test(text) ||
+      /verify\s+you\s+are\s+human/i.test(text) ||
+      /please\s+verify/i.test(text) ||
+      /\bcaptcha\b/i.test(text) ||
+      /odd one out/i.test(text) ||
+      /doesn'?t (belong|fit)/i.test(text)
+    );
+  }
+
+  function getAntiBotMessages() {
+    // Prefer Console (where the server posts the check), but still scan all
+    // channels in case the line is mirrored elsewhere.
+    const byKey = new Map();
+    [...getConsoleChannelMessages(), ...getChatMessages()].forEach((message) => {
+      if (!isAntiBotMessage(message)) {
+        return;
+      }
+
+      if (message.key) {
+        byKey.set(message.key, message);
+      }
+    });
+    return Array.from(byKey.values());
+  }
+
+  function hasSeenAntiBot(message) {
+    return (
+      state.seenAntiBotKeys.includes(message?.key) ||
+      state.seenAntiBotSignatures.includes(getMessageSignature(message))
+    );
+  }
+
+  function rememberSeenAntiBot(message) {
+    if (!message) {
+      return;
+    }
+
+    if (message.key && !state.seenAntiBotKeys.includes(message.key)) {
+      state.seenAntiBotKeys.push(message.key);
+    }
+
+    const signature = getMessageSignature(message);
+    if (signature && !state.seenAntiBotSignatures.includes(signature)) {
+      state.seenAntiBotSignatures.push(signature);
+    }
+
+    if (state.seenAntiBotKeys.length > 200) {
+      state.seenAntiBotKeys = state.seenAntiBotKeys.slice(-200);
+    }
+
+    if (state.seenAntiBotSignatures.length > 200) {
+      state.seenAntiBotSignatures = state.seenAntiBotSignatures.slice(-200);
+    }
+  }
+
+  function seedSeenAntiBotMessages() {
+    getAntiBotMessages().forEach((message) => rememberSeenAntiBot(message));
+    state.captchaModalWasOpen = isCaptchaModalOpen();
+  }
+
+  function getNewestPendingAntiBot() {
+    const pendingMessages = getAntiBotMessages().filter((message) => {
+      if (!message?.key) {
+        return false;
+      }
+
+      if (!getMessageSearchText(message)) {
+        return false;
+      }
+
+      if (hasSeenAntiBot(message)) {
+        return false;
+      }
+
+      const timestamp = getMessageTimestamp(message);
+      if (timestamp && Date.now() - timestamp > maxWhisperAgeMs) {
+        rememberSeenAntiBot(message);
+        return false;
+      }
+
+      return true;
+    });
+
+    if (!pendingMessages.length) {
+      return null;
+    }
+
+    return {
+      targetMessage: pendingMessages[pendingMessages.length - 1],
+      pendingMessages,
+    };
+  }
+
+  function getCaptchaConditionId() {
+    return window.ConditionManager?.prototype?.CAPTCHA_FREEZE ?? 20;
+  }
+
+  function hasCaptchaFreezeCondition() {
+    const player = window.gameClient?.player;
+    if (!player) {
+      return false;
+    }
+
+    const cid = getCaptchaConditionId();
+    if (typeof player.hasCondition === "function") {
+      return !!player.hasCondition(cid);
+    }
+
+    if (player.conditions?.has) {
+      return player.conditions.has(cid);
+    }
+
+    return false;
+  }
+
+  function isCaptchaModalOpen() {
+    const modalManager = window.gameClient?.interface?.modalManager;
+    if (!modalManager) {
+      return false;
+    }
+
+    const opened = modalManager.__openedModal || modalManager.openedModal || null;
+    if (!opened) {
+      // Some builds only expose isOpened() without the instance.
+      if (typeof modalManager.isOpened === "function" && modalManager.isOpened()) {
+        const el = document.querySelector("#captcha-modal, .captcha-grid, .captcha-instruction");
+        return !!el && el.offsetParent !== null;
+      }
+
+      return false;
+    }
+
+    if (opened.constructor?.name === "CaptchaModal") {
+      return true;
+    }
+
+    const id = String(opened.id || opened.element?.id || "").toLowerCase();
+    if (id.includes("captcha")) {
+      return true;
+    }
+
+    return !!(
+      opened.element?.querySelector?.(".captcha-grid") ||
+      opened.element?.querySelector?.(".captcha-instruction") ||
+      opened.__gridEl ||
+      opened.__instructionEl
+    );
+  }
+
+  function fireAntiBotAlarm(details = {}, now = Date.now()) {
+    const cooldownMs = normalizeDelayMs(config.antiBotAlarmCooldownMs, 3000);
+    if (now - state.lastAntiBotAlarmAt < cooldownMs) {
+      return false;
+    }
+
+    state.lastAntiBotAlarmAt = now;
+    state.lastAntiBotKey = details.key || details.reason || null;
+    bot.playAlarm?.();
+    bot.log("panic anti-bot captcha alarm", details);
+    return true;
+  }
+
+  function checkAntiBot(now = Date.now()) {
+    if (!config.antiBotAlarmEnabled) {
+      return false;
+    }
+
+    // 1) Captcha modal just opened (CAPTCHA_PROMPT packet → captcha-modal).
+    const modalOpen = isCaptchaModalOpen();
+    if (modalOpen && !state.captchaModalWasOpen) {
+      state.captchaModalWasOpen = true;
+      fireAntiBotAlarm(
+        {
+          reason: "captcha-modal-open",
+          captchaFreeze: hasCaptchaFreezeCondition(),
+        },
+        now
+      );
+      return false;
+    }
+
+    if (!modalOpen) {
+      state.captchaModalWasOpen = false;
+    }
+
+    // 2) CAPTCHA_FREEZE condition without already alarming this cycle.
+    if (hasCaptchaFreezeCondition() && now - state.lastAntiBotAlarmAt >= normalizeDelayMs(config.antiBotAlarmCooldownMs, 3000)) {
+      fireAntiBotAlarm(
+        {
+          reason: "captcha-freeze-condition",
+          captchaModalOpen: modalOpen,
+        },
+        now
+      );
+      return false;
+    }
+
+    // 3) New Console / chat anti-bot text lines.
+    const pending = getNewestPendingAntiBot();
+    if (!pending) {
+      return false;
+    }
+
+    pending.pendingMessages.forEach((message) => rememberSeenAntiBot(message));
+
+    const latest = pending.targetMessage;
+    fireAntiBotAlarm(
+      {
+        reason: "console-message",
+        sender: latest.sender,
+        body: latest.body || latest.rawMessage,
+        channelName: latest.channelName,
+        count: pending.pendingMessages.length,
+      },
+      now
+    );
+    // Alarm only — do not flee / stop modules (player must solve captcha).
     return false;
   }
 
@@ -804,7 +1089,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     if (!state.running) return;
 
     try {
-      // Whisper is alarm-only and must not block return-to-origin / flee logic.
+      // Alarms only — must not block return-to-origin / flee logic.
+      checkAntiBot();
       checkWhispers();
       const triggered = checkGameMasters() || checkUnknownPlayers() || checkHealthLoss();
       if (!triggered) {
@@ -820,7 +1106,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       getGameMasterNames().length ||
       config.unknownPlayerEnabled ||
       config.healthLossEnabled ||
-      config.whisperAlarmEnabled
+      config.whisperAlarmEnabled ||
+      config.antiBotAlarmEnabled
     );
   }
 
@@ -832,8 +1119,9 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     state.running = true;
     state.lastHealth = Number(bot.getPlayerState()?.health ?? 0);
     state.lastDamageEventKey = getLatestDamageEvent()?.key || null;
-    // Ignore whispers already in chat history so reloading doesn't spam alarms.
+    // Ignore chat history so reloading doesn't spam alarms.
     seedSeenWhispers();
+    seedSeenAntiBotMessages();
     bot.log("panic runner started", { ...config });
     tick();
     return true;
@@ -857,6 +1145,10 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     state.lastWhisperKey = null;
     state.seenWhisperKeys = [];
     state.seenWhisperSignatures = [];
+    state.lastAntiBotKey = null;
+    state.seenAntiBotKeys = [];
+    state.seenAntiBotSignatures = [];
+    state.captchaModalWasOpen = false;
     clearPendingReturn();
     bot.log("panic runner stopped");
     return true;
@@ -866,10 +1158,14 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     if (shouldRun()) {
       const wasRunning = state.running;
       start();
-      // If runner was already up (e.g. health panic) and whisper was just
-      // enabled, seed history so old chat lines do not all fire at once.
+      // If runner was already up and a chat alarm was just enabled, seed
+      // history so old lines do not all fire at once.
       if (wasRunning && config.whisperAlarmEnabled) {
         seedSeenWhispers();
+      }
+
+      if (wasRunning && config.antiBotAlarmEnabled) {
+        seedSeenAntiBotMessages();
       }
     } else {
       stop();
@@ -925,6 +1221,17 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       next.whisperIncludePrivate = next.whisperIncludePrivate !== false;
     }
 
+    if ("antiBotAlarmEnabled" in next) {
+      next.antiBotAlarmEnabled = !!next.antiBotAlarmEnabled;
+    }
+
+    if ("antiBotAlarmCooldownMs" in next) {
+      next.antiBotAlarmCooldownMs = normalizeDelayMs(
+        next.antiBotAlarmCooldownMs,
+        config.antiBotAlarmCooldownMs
+      );
+    }
+
     Object.assign(config, next);
     if (!config.returnToOriginEnabled) {
       clearPendingReturn();
@@ -967,6 +1274,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       lastTriggerAt: state.lastTriggerAt,
       lastWhisperAlarmAt: state.lastWhisperAlarmAt,
       lastWhisperKey: state.lastWhisperKey,
+      lastAntiBotAlarmAt: state.lastAntiBotAlarmAt,
+      lastAntiBotKey: state.lastAntiBotKey,
       recentWhispers: getWhisperMessages().slice(-5).map((message) => ({
         key: message.key,
         sender: message.sender,
@@ -979,6 +1288,16 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
         formatted: message.formatted || null,
         time: message.time,
       })),
+      recentAntiBotMessages: getAntiBotMessages().slice(-5).map((message) => ({
+        key: message.key,
+        sender: message.sender,
+        body: message.body || message.rawMessage,
+        channelName: message.channelName,
+        time: message.time,
+      })),
+      captchaModalOpen: isCaptchaModalOpen(),
+      captchaFreeze: hasCaptchaFreezeCondition(),
+      consoleChannelMessageCount: getConsoleChannelMessages().length,
       pendingReturn: state.pendingReturnOrigin
         ? {
             origin: { ...state.pendingReturnOrigin },

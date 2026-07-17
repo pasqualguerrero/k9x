@@ -92,6 +92,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const healthToggle = document.getElementById("k9x-panic-health");
     const returnToggle = document.getElementById("k9x-panic-return");
     const whisperToggle = document.getElementById("k9x-panic-whisper");
+    const antiBotToggle = document.getElementById("k9x-panic-antibot");
     const status = bot.panic?.status?.();
 
     if (unknownToggle) {
@@ -108,6 +109,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     if (whisperToggle) {
       whisperToggle.checked = !!status?.config?.whisperAlarmEnabled;
+    }
+
+    if (antiBotToggle) {
+      antiBotToggle.checked = status?.config?.antiBotAlarmEnabled !== false;
     }
   }
 
@@ -1152,7 +1157,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="k9x-panic-whisper" />
                 <span>Whisper Alarm</span>
               </label>
-              <div class="mb-small-note">Whisper alarm plays sound only (no flee) for incoming nearby whispers and private messages. Your own messages and trusted names are ignored.</div>
+              <label class="mb-toggle">
+                <input type="checkbox" id="k9x-panic-antibot" />
+                <span>Anti-Bot Captcha Alarm</span>
+              </label>
+              <div class="mb-small-note">Whisper alarm: sound only for incoming whispers/PMs (own/trusted ignored). Anti-bot alarm: sound when Console shows an anti-bot line or the captcha modal opens (no flee).</div>
               <div class="mb-inline">
                 <input type="text" id="k9x-panic-trusted-input" placeholder="Trusted name" />
                 <button type="button" class="mb-small-button" id="k9x-panic-trusted-add">Add</button>
@@ -1492,6 +1501,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const panicHealthInput = panel.querySelector("#k9x-panic-health");
     const panicReturnInput = panel.querySelector("#k9x-panic-return");
     const panicWhisperInput = panel.querySelector("#k9x-panic-whisper");
+    const panicAntiBotInput = panel.querySelector("#k9x-panic-antibot");
     const panicTrustedInput = panel.querySelector("#k9x-panic-trusted-input");
     const panicTrustedAddButton = panel.querySelector("#k9x-panic-trusted-add");
     const xrayOverlayButton = panel.querySelector("#k9x-xray-overlay-toggle");
@@ -2200,6 +2210,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       panicWhisperInput.checked = !!bot.panic?.status?.().config?.whisperAlarmEnabled;
       panicWhisperInput.addEventListener("change", () => {
         bot.panic.updateConfig({ whisperAlarmEnabled: panicWhisperInput.checked });
+        refreshPanicStatus();
+      });
+    }
+
+    if (panicAntiBotInput) {
+      panicAntiBotInput.checked = bot.panic?.status?.().config?.antiBotAlarmEnabled !== false;
+      panicAntiBotInput.addEventListener("change", () => {
+        bot.panic.updateConfig({ antiBotAlarmEnabled: panicAntiBotInput.checked });
         refreshPanicStatus();
       });
     }
