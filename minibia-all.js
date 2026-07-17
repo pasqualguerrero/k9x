@@ -1,6 +1,6 @@
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/audio/sound-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/audio/sound-manager.js ===== */
 
 const SoundManager = function(enabled) {
 
@@ -438,7 +438,7 @@ SoundManager.prototype.setVolume = function(id, volume) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/audio/soundbit.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/audio/soundbit.js ===== */
 
 const SoundBit = function(ids) {
 
@@ -474,7 +474,7 @@ SoundBit.prototype.play = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/audio/soundtrace.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/audio/soundtrace.js ===== */
 
 const SoundTrace = function(id) {
 
@@ -556,7 +556,7 @@ SoundTrace.prototype.setVolume = function(volume) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/database.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/core/database.js ===== */
 
 "use strict";
 
@@ -1687,7 +1687,7 @@ Database.prototype.__saveChunk = function (id) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/event-queue.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/core/event-queue.js ===== */
 
 const EventQueue = function() {
 
@@ -1827,7 +1827,7 @@ EventQueue.prototype.__addEvent = function(callback, frame) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/game-loop.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/core/game-loop.js ===== */
 
 const GameLoop = function (frameCallback) {
 
@@ -2025,7 +2025,7 @@ GameLoop.prototype.__loop = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/gameclient.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/core/gameclient.js ===== */
 
 const GameClient = function () {
 
@@ -2203,10 +2203,22 @@ GameClient.prototype.setServerData = function (packet) {
   // background tab) and our in-memory packet readers may not know the
   // new opcodes. Reloading triggers launcher.js's ?v=Date.now() bust so
   // we re-fetch fresh JS. No mismatch → fast path is unchanged.
-  if (this.__initialBuildVersion === undefined) {
-    this.__initialBuildVersion = serverData.version;
-  } else if (this.__initialBuildVersion !== serverData.version) {
-    console.warn("[VERSION] mismatch — initial=" + this.__initialBuildVersion + " current=" + serverData.version + " — reloading");
+  // PER-HOST tracking (owner 2026-07-09): each WORLD runs its own engine on
+  // its own box, and the boxes can legitimately be on different builds. The
+  // old single-variable compare treated a world switch as "the engine
+  // restarted with new code" — reload, then the reload-loop guard degraded
+  // to a permanently stuck 'client out of date' pill even back on the
+  // matched main world. A mismatch is only meaningful against the SAME
+  // engine host: that genuinely means it restarted with new code.
+  let buildHost = "";
+  try {
+    buildHost = (this.networkManager && this.networkManager.socket && this.networkManager.socket.url) || "";
+  } catch (e) { /* keyed under "" — still per-instance consistent */ }
+  if (!this.__initialBuildVersions) this.__initialBuildVersions = {};
+  if (this.__initialBuildVersions[buildHost] === undefined) {
+    this.__initialBuildVersions[buildHost] = serverData.version;
+  } else if (this.__initialBuildVersions[buildHost] !== serverData.version) {
+    console.warn("[VERSION] mismatch on " + buildHost + " — initial=" + this.__initialBuildVersions[buildHost] + " current=" + serverData.version + " — reloading");
     window.location.reload();
     return;
   }
@@ -2614,6 +2626,80 @@ GameClient.prototype.handleAcceptLogin = function (packet) {
   // (Container.__applyBodyHeightPolicy).
   this.__gameStartAt = Date.now();
 
+  // Stance sync FIRST + exception-proof (owner 2026-07-15): this used to
+  // run at the very END of this long handler, so any earlier exception on
+  // any login path silently skipped it — the client showed the saved
+  // "full attack" while the server sat on its default, and players hit at
+  // balanced power until they toggled modes ("toggle full atk/full def on
+  // login" reports). The server now also persists stance across sessions,
+  // so even a lost sync no longer degrades combat.
+  try {
+    this.interface.fightModeSelector.syncToServer();
+  } catch (e) {
+    console.error("stance sync failed", e);
+  }
+
+  // MOVED UP with the stance sync (2026-07-15, "rings not showing the time
+  // left anymore" player reports): these transient server opt-ins used to
+  // sit ~200 lines further down, BELOW plenty of login UI code — any
+  // exception on any login path silently skipped them, so /ringtimer
+  // (and heal-notif / attack-indicator / auto-skin) never re-armed for
+  // the session until the player re-toggled the setting. Same disease the
+  // stance sync had, same cure: run login-critical server syncs FIRST,
+  // each individually exception-proofed.
+  // The setting re-sends below are AUTOMATION (no user gesture — login
+  // handshake finishes >1s after the Enter-Game click), so they must not
+  // be classified as provenance intents: they were stamping up to 4
+  // UNTRUSTED marks on every player at every login, polluting /botcheck
+  // ratios (found in the 2026-07-04 automation audit). Cleared in the
+  // finally below the last re-send block.
+  if (this.networkManager) this.networkManager.__provenanceExempt = true;
+
+  // Re-arm the "Show ring/amulet timer" opt-in for this session. The server
+  // gates the EQUIPMENT_TIMERS packet on this command, so a pre-feature client
+  // (which never sends it) never receives the new opcode. Driven from the
+  // client every login rather than persisted server-side for that reason.
+  try {
+    if (this.interface && this.interface.settings
+        && this.interface.settings.isShowRingAmuletTimerEnabled
+        && this.interface.settings.isShowRingAmuletTimerEnabled()
+        && this.isConnected()) {
+      this.send(new ChannelMessagePacket(0x00, 0, "/ringtimer on"));
+    }
+  } catch (e) { /* best effort — never break login on this */ }
+
+  // Supply-use messages ("Using one of N ...") are gated entirely client-side
+  // (NetworkManager.__maybeSupplyMessage reads the "Show supply-use messages"
+  // checkbox live), so there is nothing to sync to the server on login. The old
+  // "/supplymsg off" re-send here was dead — the server flag it set was never
+  // read. Removed.
+
+  // Re-apply "Auto-turn Strike/Wave" for this session. Default ON, so only the
+  // OFF state needs sending (the transient server flag starts at auto-turn ON).
+  try {
+    if (this.interface && this.interface.settings
+        && this.interface.settings.isAutoTurnSpellsEnabled
+        && !this.interface.settings.isAutoTurnSpellsEnabled()
+        && this.isConnected()) {
+      this.send(new ChannelMessagePacket(0x00, 0, "/autoturn off"));
+    }
+  } catch (e) { /* best effort — never break login on this */ }
+
+  // Heal Notification + Attack Indicator. Server default OFF; the flag lives on
+  // player.storage and isn't reliably restored on a relog, so re-send ON each
+  // login when the setting is enabled (same client-driven model as the toggles
+  // above). Without this the setting silently stopped working after a relog until
+  // the player re-toggled it.
+  try {
+    let st = this.interface && this.interface.settings && this.interface.settings.__state;
+    if (st && this.isConnected()) {
+      if (st["heal-notification"] === true) this.send(new ChannelMessagePacket(0x00, 0, "/healnotif on"));
+      if (st["attack-indicator"] === true) this.send(new ChannelMessagePacket(0x00, 0, "/attackind on"));
+      if (st["auto-skin"] === true) this.send(new ChannelMessagePacket(0x00, 0, "/autoskin on"));
+    }
+  } catch (e) { /* best effort — never break login on this */ }
+  finally { if (this.networkManager) this.networkManager.__provenanceExempt = false; }
+
   // Re-apply the saved sidebar layout (window-manager localStorage): the
   // construction-time restore covers a refresh, but a same-page logout ->
   // login passes through the disconnect cleanup (closeAll) without ever
@@ -2743,57 +2829,6 @@ GameClient.prototype.handleAcceptLogin = function (packet) {
     if (pkBtnMobile) pkBtnMobile.style.display = pvpOn ? "" : "none";
   } catch (e) { /* cosmetic */ }
 
-  // The setting re-sends below are AUTOMATION (no user gesture — login
-  // handshake finishes >1s after the Enter-Game click), so they must not
-  // be classified as provenance intents: they were stamping up to 4
-  // UNTRUSTED marks on every player at every login, polluting /botcheck
-  // ratios (found in the 2026-07-04 automation audit). Cleared in the
-  // finally below the last re-send block.
-  if (this.networkManager) this.networkManager.__provenanceExempt = true;
-
-  // Re-arm the "Show ring/amulet timer" opt-in for this session. The server
-  // gates the EQUIPMENT_TIMERS packet on this command, so a pre-feature client
-  // (which never sends it) never receives the new opcode. Driven from the
-  // client every login rather than persisted server-side for that reason.
-  try {
-    if (this.interface && this.interface.settings
-        && this.interface.settings.isShowRingAmuletTimerEnabled
-        && this.interface.settings.isShowRingAmuletTimerEnabled()
-        && this.isConnected()) {
-      this.send(new ChannelMessagePacket(0x00, 0, "/ringtimer on"));
-    }
-  } catch (e) { /* best effort — never break login on this */ }
-
-  // Supply-use messages ("Using one of N ...") are gated entirely client-side
-  // (NetworkManager.__maybeSupplyMessage reads the "Show supply-use messages"
-  // checkbox live), so there is nothing to sync to the server on login. The old
-  // "/supplymsg off" re-send here was dead — the server flag it set was never
-  // read. Removed.
-
-  // Re-apply "Auto-turn Strike/Wave" for this session. Default ON, so only the
-  // OFF state needs sending (the transient server flag starts at auto-turn ON).
-  try {
-    if (this.interface && this.interface.settings
-        && this.interface.settings.isAutoTurnSpellsEnabled
-        && !this.interface.settings.isAutoTurnSpellsEnabled()
-        && this.isConnected()) {
-      this.send(new ChannelMessagePacket(0x00, 0, "/autoturn off"));
-    }
-  } catch (e) { /* best effort — never break login on this */ }
-
-  // Heal Notification + Attack Indicator. Server default OFF; the flag lives on
-  // player.storage and isn't reliably restored on a relog, so re-send ON each
-  // login when the setting is enabled (same client-driven model as the toggles
-  // above). Without this the setting silently stopped working after a relog until
-  // the player re-toggled it.
-  try {
-    let st = this.interface && this.interface.settings && this.interface.settings.__state;
-    if (st && this.isConnected()) {
-      if (st["heal-notification"] === true) this.send(new ChannelMessagePacket(0x00, 0, "/healnotif on"));
-      if (st["attack-indicator"] === true) this.send(new ChannelMessagePacket(0x00, 0, "/attackind on"));
-    }
-  } catch (e) { /* best effort — never break login on this */ }
-  finally { if (this.networkManager) this.networkManager.__provenanceExempt = false; }
 
   // Background-tab fallback ticker. rAF throttles to ~1 Hz when the
   // tab is hidden, freezing eventQueue and starving client-side
@@ -2882,9 +2917,6 @@ GameClient.prototype.handleAcceptLogin = function (packet) {
     lootlistBtn.disabled = !isPremium;
     lootlistBtn.style.opacity = isPremium ? "" : "0.4";
   }
-
-  // Sync saved fight/chase/PK lock modes to server
-  this.interface.fightModeSelector.syncToServer();
 
   // Restore extra hotbar visibility from saved setting
   if (this.touch && this.touch.isMobileMode && this.interface.settings.isExtraHotbarEnabled()) {
@@ -3144,14 +3176,14 @@ GameClient.prototype.__loop = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/index.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/core/index.js ===== */
 
 const CLIENT_VERSION = "0.0.1";
 const SERVER_VERSION = "760";
 
 // Bump this number whenever Tibia.dat or Tibia.spr files are updated on the server.
 // Clients with a cached version mismatch will automatically re-download.
-const ASSET_VERSION = 44;
+const ASSET_VERSION = 57;
 
 // Bump this number whenever client/data/<version>/minimap.bin.gz is
 // regenerated. Independent of ASSET_VERSION so a minimap-only update
@@ -3202,7 +3234,7 @@ document.addEventListener("DOMContentLoaded", function DOMContentLoaded() {
 });
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/core/world.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/core/world.js ===== */
 
 const World = function (width, height, depth) {
 
@@ -4527,7 +4559,200 @@ World.prototype.prefetchSecondRing = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/chunk.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/data/virtual-items.js ===== */
+
+"use strict";
+
+/*
+ * VirtualItems — client-side recolored ITEM variants (2026-07-16), the item
+ * twin of VirtualLooktypes. A virtual item CID renders another item's dat
+ * entry (patterns, animation, stacking — everything inherited) through an
+ * exact color map or a parametric transform. No dat/spr change, no
+ * ASSET_VERSION bump, no protocol change: the server's definitions.json
+ * entry simply points its "id" (client id) at a virtual CID; the client
+ * resolves it in ObjectBuffer.get by cloning the base item's DataObject
+ * with SYNTHETIC sprite ids, and the sprite buffer recolors each sprite
+ * ONCE at cache fill — render-loop cost zero.
+ *
+ * Adding a variant (the recolor tool's item mode exports {kind:"item",
+ * name, base, map}):
+ *   1. Paste the map here under a NEW id in the 30000-30999 range (real
+ *      dat CIDs stay far below; the wire writes item ids as u16 so the
+ *      range must stay under 65535).
+ *   2. Server: a definitions.json SID entry with "id": <that virtual CID>.
+ *   3. Ship = client build + SW bump only.
+ *
+ * Recipe fields (compiled to what SpriteBuffer.__applyColorMap consumes):
+ *   map          {"#rrggbb": "#rrggbb"} exact per-color remap
+ *   hueShift     degrees, satScale multiplier — parametric, no map needed
+ *   posterizeDark true — the Ancient dat-431 banding recipe
+ *
+ * Demo entry 30001 ("prismatic plate armor" test): magic plate armor
+ * (CID 3366) hue-rotated. Preview via the demo SID 21100: /i 21100.
+ */
+
+const VirtualItems = (function () {
+
+  const REGISTRY = {
+    // 30001: demo — magic plate armor turned prismatic violet (parametric,
+    // the /looktype-1001 equivalent for items; server demo SID 21100).
+    30001: { base: 3366, hueShift: 210, satScale: 1.25 },
+    // 30002: pink herb (owner 2026-07-17) — blood herb (3734) reds turned
+    // pink/magenta, authored in the recolor tool's item mode. SID 21101.
+    30002: { base: 3734, map: {"#010000":"#0d020b","#370202":"#3c0a31","#a92929":"#bf209d","#ab2f2f":"#c621a3","#770000":"#71135d","#350000":"#38092e","#be4243":"#62146d","#efacb2":"#c941db","#de8e92":"#b525c8","#cc3839":"#651570","#7a0504":"#771462","#5e0100":"#5b0f4b","#270000":"#2c0724","#d90202":"#c621a3","#fd6470":"#ac24bf","#fda9c7":"#cc4add","#fac1cd":"#d15ce0","#8e4545":"#c0209e","#551c1b":"#6b1258","#4c0403":"#4e0d41","#6d0000":"#681156","#320000":"#36092c","#380101":"#3c0a31","#070201":"#12030e","#080201":"#12030f","#3f0000":"#410b35","#7c0202":"#771462","#f15057":"#941fa4","#eba2ba":"#c635d9","#fedaea":"#d874e5","#faa0b1":"#c940db","#751111":"#7e1567","#4b0201":"#4c0d3e","#4e0403":"#500d42","#730000":"#6d125a","#2d0302":"#33082a","#9c100c":"#9b1a7f","#be1f1b":"#c521a2","#d53235":"#681673","#d82526":"#60146a","#e51617":"#5f1469","#d43a3a":"#de3cbc","#3e0605":"#440b38","#520200":"#510d43","#ad0d0e":"#2d0932","#e7a8ba":"#c637d9","#f6c0d5":"#cf58e0","#edbfcc":"#cd4fde","#ef8fa9":"#c229d7","#970f10":"#1e0621","#5e0404":"#5f104e","#770101":"#72135d","#451a19":"#5b0f4b","#420200":"#430b37","#080505":"#160412","#7f322e":"#9f1a83","#c94a47":"#df3ebd","#e76b6f":"#a121b2","#efb6c4":"#cb49dd","#fad6e2":"#d66ee4","#fec0cb":"#d15ee1","#fcb4ce":"#ce53df","#f06f79":"#ab23bd","#4b0702":"#4d0d3f","#8b0101":"#83166c","#ef5662":"#971fa7","#e5a8bb":"#c635d9","#eda5be":"#c739da","#eda6b8":"#c73ada","#fc9aba":"#c83ddb","#cb2a2f":"#5a1364","#6d0605":"#6c1259","#4d0301":"#4e0d40","#4e0c0a":"#560e47","#2f0300":"#33082a","#610100":"#5e104d","#050000":"#0f020c","#c1423c":"#dc2db7","#470101":"#480c3c","#9c221d":"#a91c8b","#e27f88":"#ac24bf","#fac0cb":"#d05be0","#fdebf0":"#db82e8","#fb99b9":"#c73bda","#ee5151":"#e566ca","#480200":"#480c3c","#291100":"#2e0826","#b50b0c":"#320a37","#f59db2":"#c739da","#f398b7":"#c534d9","#ff4952":"#9920aa","#fe91a4":"#c637d9","#f75866":"#9f21af","#f43d41":"#881c96","#961716":"#9e1a82","#5f0201":"#5d0f4d","#3b0301":"#3e0a33","#260300":"#2b0724","#670101":"#641152","#0f0000":"#180413","#040000":"#0e020c","#781d18":"#86166e","#630d09":"#671155","#500404":"#530e44","#670808":"#6a1257","#4a0201":"#4b0c3e","#af686c":"#741880","#e0363c":"#73187f","#f4aeb4":"#cb47dc","#f6585a":"#9e21af","#f56c7c":"#ac24bf","#8d2712":"#931879","#2b0100":"#300827","#290300":"#2e0826","#ca2122":"#52115b","#fdacc0":"#cc4dde","#fa627a":"#a823ba","#ff191b":"#751881","#ff5f67":"#aa23bc","#ff1e20":"#781985","#ff6869":"#b125c4","#e15150":"#e35ac6","#a31211":"#a51b88","#6d0202":"#6a1257","#650101":"#621051","#740101":"#6f125b","#6e0000":"#691156","#070000":"#11030e","#891310":"#8e1875","#500603":"#520e43","#5b0302":"#5a0f4a","#651d1d":"#7a1464","#420000":"#430b37","#9f5858":"#db28b5","#dda4af":"#c32bd7","#fba5b6":"#ca45dc","#f97983":"#b926cd","#f34e4f":"#941fa4","#d94844":"#e149c0","#300000":"#34092b","#120300":"#1a0415","#2a0100":"#2f0826","#c71e1f":"#4e1056","#fc8391":"#c229d7","#f91c21":"#72187f","#ca0404":"#bb1f9a","#d62f32":"#661571","#f96061":"#a622b8","#f77f7e":"#ed94da","#d69292":"#eb89d6","#c06766":"#e251c3","#b90a0a":"#b21e92","#9c0000":"#901877","#5d0000":"#5a0f4a","#3b0000":"#3d0a32","#0e0000":"#170413","#931d1a":"#9f1a83","#490302":"#4b0c3e","#511919":"#661154","#9e0404":"#96197b","#a81313":"#ab1c8d","#fc565c":"#a121b2","#fb778a":"#b926cd","#fb464f":"#941fa4","#eb2f22":"#de3bbc","#ce2f20":"#d724b1","#3f0302":"#420b37","#260400":"#2b0724","#981110":"#9b1a7f","#c61f1f":"#cf22aa","#b60202":"#a81c8b","#a91513":"#ac1d8d","#7e302f":"#9f1a83","#8f4746":"#c1209f","#883835":"#ad1d8e","#7e1312":"#86166e","#8b201f":"#9c1a81","#a01312":"#a31b86","#520b0a":"#5a0f4a","#4f0503":"#510d43","#be7979":"#e45fc8","#cf1a1a":"#d223ad","#fa3f3f":"#e561c9","#f9a5ab":"#ca44dc","#f57a93":"#b726ca","#f76177":"#a522b7","#db534c":"#e251c3","#931509":"#901877","#360c04":"#3c0a32","#230000":"#290721","#220500":"#280721","#660100":"#621051","#800400":"#781463","#960101":"#8c1773","#9b2524":"#ae1d90","#9b2e2d":"#b61e96","#8d1717":"#97197c","#a00000":"#94197a","#930000":"#891770","#6c0000":"#671155","#960000":"#8b1773","#740000":"#6e125b","#0a0400":"#130310","#0d0201":"#170413","#7a120d":"#7e1568","#ac2d28":"#c0209e","#f27d7b":"#ec8dd8","#f58d8c":"#ef9fde","#e74b4b":"#e45bc7","#de2224":"#62146d","#f23d49":"#861c95","#f3333f":"#7f1a8d","#bd1607":"#b31e93","#ad2e24":"#be209c","#5c1607":"#60104f","#180000":"#1f051a","#320200":"#36092c","#6b0200":"#661154","#850907":"#83166c","#741413":"#7e1568","#580403":"#590f49","#500100":"#4f0d41","#2b0000":"#300827","#1e0000":"#24061e","#280000":"#2d0725","#200000":"#26061f","#030000":"#0d020b","#190302":"#22061c","#770f0b":"#7a1464","#ae1612":"#af1d90","#cf1311":"#cb22a7","#c02b2b":"#d423af","#bd2627":"#4c1055","#c22625":"#d123ac","#cb3123":"#d724b1","#811301":"#7a1464","#550e01":"#540e45","#521704":"#540e45","#2c0100":"#300828","#240a00":"#2a0722","#280200":"#2d0725","#220400":"#280721","#1f0400":"#25061f","#190200":"#20051a","#180400":"#1f051a","#160000":"#1e0518","#110000":"#190415","#140000":"#1c0517","#060100":"#10030d","#270500":"#2c0724","#450901":"#470c3a","#61150b":"#671155","#540c00":"#530e44","#690800":"#651153","#550e00":"#540e45","#5f0e00":"#5c0f4c","#6f1000":"#6a1257","#4a1000":"#4a0c3d","#560d00":"#540e45","#220000":"#280721","#020000":"#0d020b","#280f00":"#2d0725","#2f1300":"#33082a","#301300":"#34092b","#2d1400":"#310829","#360c00":"#39092f","#700000":"#6b1258","#1b0000":"#22061c","#120000":"#1a0415","#0a0100":"#130310","#070200":"#11030e","#040100":"#0e020c","#1b0d00":"#22061c","#030101":"#0e020c","#0a0404":"#170413","#1c0000":"#23061d","#170909":"#26061f","#531c1d":"#0c020d","#f4757a":"#b225c5","#ef4e50":"#911ea0","#87292a":"#26082a","#100807":"#1e0519","#cb3539":"#62146d","#fa8fa2":"#c532d9","#fea2b6":"#ca45dc","#ffabc0":"#cd4ede","#fe8c9f":"#c533d9","#e5808f":"#af24c2","#7c282a":"#1c061f","#261212":"#3b0a30","#f45460":"#9920aa","#feb1cd":"#ce52df","#ffd3e5":"#d66fe4","#ffccdf":"#d569e3","#ff7883":"#bd27d1","#ff2c2e":"#831b91","#ff0506":"#651570","#d34650":"#751882","#83393e":"#2f0a34","#c73b43":"#64156f","#fd8ea6":"#c534d9","#fed0e2":"#d56ce3","#feaeba":"#cd4fde","#fe3739":"#8b1d9a","#641110":"#6e125b","#5f0101":"#5d0f4d","#5c0000":"#5a0f4a","#fa3e47":"#8d1d9c","#850202":"#7e1568","#050200":"#0f020c","#d0333b":"#65156f","#fa5061":"#9b20ab","#fcaebf":"#cd4ede","#ec282b":"#72187e","#5b0101":"#5a0f4a","#5c0201":"#5a0f4a","#550101":"#540e45","#5c0101":"#5a0f4a","#470000":"#480c3b","#760101":"#71135d","#6f0000":"#6a1257","#b41c1e":"#3e0d45","#c7262c":"#54115d","#df0f11":"#55125e","#4f0101":"#4f0d41","#570101":"#560e47","#490202":"#4b0c3e","#6d2726":"#891770","#590808":"#5e104d","#a40000":"#97197c","#740d0e":"#0c020d","#830e0f":"#0e030f","#af0000":"#a11b84","#4e0201":"#4e0d41","#5e0505":"#60104f","#890d0d":"#8b1773","#380707":"#410b35","#9e0000":"#921878","#6b0101":"#671155","#430505":"#480c3c","#6d0d0d":"#73135f","#640101":"#611050","#4d0202":"#4e0d41","#670404":"#661154","#a10303":"#97197c","#690606":"#6a1257","#8a0101":"#82166b","#600101":"#5e104d","#0e0101":"#180413","#460404":"#4a0c3d","#540101":"#540e45","#680000":"#641152","#550404":"#570e48","#5e0b0b":"#651153","#740f0f":"#7b1465","#4a0101":"#4b0c3e","#600202":"#5f104e","#210000":"#270620","#4f0000":"#4e0d41","#5a0101":"#590f49","#410000":"#420b37","#4d0101":"#4e0d40","#270101":"#2d0725","#100000":"#180414","#290000":"#2e0826","#1a0000":"#21051b","#1d0101":"#24061e","#270202":"#2e0826","#310303":"#37092d","#140601":"#1d0518"} },
+  };
+
+  // id -> compiled recipe { base, table: Map<uint32 LE RGBA, uint32> } or
+  // the parametric entry itself (hueShift/satScale/posterizeDark pass
+  // straight through to SpriteBuffer.__applyColorMap).
+  const compiled = new Map();
+
+  function compile(id) {
+    let entry = REGISTRY[id];
+    if (!entry.map) {
+      return entry;
+    }
+    let table = new Map();
+    Object.keys(entry.map).forEach(function (from) {
+      let to = entry.map[from];
+      let f = parseInt(from.slice(1), 16);
+      let t = parseInt(to.slice(1), 16);
+      // hex is #RRGGBB; pixel words are little-endian RGBA (A in the high byte)
+      let fWord = ((0xFF << 24) | (((f) & 0xFF) << 16) | (((f >> 8) & 0xFF) << 8) | ((f >> 16) & 0xFF)) >>> 0;
+      let tWord = ((0xFF << 24) | (((t) & 0xFF) << 16) | (((t >> 8) & 0xFF) << 8) | ((t >> 16) & 0xFF)) >>> 0;
+      table.set(fWord, tWord);
+    });
+    return { base: entry.base, table: table };
+  }
+
+  return {
+
+    get: function (id) {
+      if (!REGISTRY.hasOwnProperty(id)) {
+        return null;
+      }
+      if (!compiled.has(id)) {
+        compiled.set(id, compile(id));
+      }
+      return compiled.get(id);
+    },
+
+    has: function (id) {
+      return REGISTRY.hasOwnProperty(id);
+    }
+
+  };
+
+})();
+
+
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/data/virtual-looktypes.js ===== */
+
+"use strict";
+
+/*
+ * VirtualLooktypes — client-side recolored outfit variants (2026-07-14).
+ *
+ * A virtual looktype renders another looktype's sprites through an exact
+ * color map (produced with the sprite-recolor artifact tool: pick a
+ * creature, remap its color groups, "Copy Mapping"). No dat/spr change, no
+ * ASSET_VERSION bump and no protocol change — the server sends a plain
+ * looktype number; the client resolves it here at Outfit construction and
+ * recolors sprites ONCE at sprite-buffer cache fill (shared per outfit
+ * signature), so the render loop cost is zero.
+ *
+ * Adding a variant: paste the tool's exported map into REGISTRY under a
+ * NEW id in the 1000-9999 range (real dat looktypes stay below 1000),
+ * then point a monster definition's outfit at that id. Ship = client
+ * build + SW bump only.
+ *
+ * MASKED bases (tool tags them "mask"): the exported map is authored
+ * against pixels composed with specific detail colors — the export
+ * carries a "details" object and the custom monster's outfit MUST use
+ * exactly those details, or the map keys miss and the recolor is a
+ * silent no-op. Plain bases need no details.
+ *
+ * Demo entry 1001 ("frost dragon" test): dragon (34) greens rotated to
+ * icy blue — preview in game via /looktype 1001.
+ */
+
+const VirtualLooktypes = (function () {
+
+  const REGISTRY = {
+    1001: { base: 34, map: {"#060b02":"#02080b","#001100":"#000c11","#001d00":"#00141d","#001c00":"#00141c","#001300":"#000d13","#173f00":"#002c3f","#6ca41e":"#1e7ca4","#507812":"#125978","#5b9414":"#146e94","#3a6905":"#054b69","#143600":"#002636","#023900":"#002839","#467112":"#125471","#244600":"#003146","#234000":"#002d40","#0f2900":"#001d29","#183400":"#002434","#365607":"#073e56","#3d5d06":"#06435d","#2a4a00":"#00344a","#020a00":"#00070a","#0d1a00":"#00121a","#1b3b00":"#00293b","#152b00":"#001e2b","#112400":"#001924","#000400":"#000304","#2b4600":"#003146","#64941f":"#1f7194","#385c02":"#02415c","#143000":"#002230","#031700":"#001017","#477a00":"#00557a","#000300":"#000203","#001200":"#000d12","#285100":"#003951","#000e00":"#000a0e","#112000":"#001620","#020800":"#000608","#386c03":"#034c6c","#152900":"#001d29","#061300":"#000d13","#000500":"#000305","#467b04":"#04577b","#001b00":"#00131b","#3f7804":"#045578","#345c02":"#02415c","#162b00":"#001e2b","#000100":"#000101","#001700":"#001017","#3f7205":"#055172","#1d2e00":"#00202e","#5b9611":"#116e96","#275500":"#003b55","#233d00":"#002b3d","#0b1400":"#000e14","#050600":"#000406","#3c5f00":"#00425f","#284600":"#003146","#172300":"#001823","#061600":"#000f16","#508105":"#055c81","#3c6a0a":"#0a4d6a","#487a08":"#08587a","#356300":"#004563","#122500":"#001a25","#142500":"#001a25","#000f00":"#000a0f","#3c650f":"#0f4b65","#183b00":"#00293b","#1c2b00":"#001e2b","#355d05":"#05435d","#203900":"#002839","#3b5d02":"#02425d","#233200":"#002332","#010300":"#000203","#000200":"#000102","#3d610f":"#0f4861","#3a6c04":"#044d6c","#163400":"#002434","#131400":"#000e14","#081e00":"#00151e","#050f00":"#000a0f","#080d00":"#00090d","#355706":"#063f57","#2a5400":"#003b54","#232c00":"#001f2c","#000d00":"#00090d","#000900":"#000609","#264703":"#033347","#3f6707":"#074a67","#355e00":"#00425e","#243d00":"#002b3d","#020d00":"#00090d","#1a4200":"#002e42","#031500":"#000f15","#0a2400":"#001924","#263700":"#002637","#3c5707":"#073f57","#274600":"#003146","#102800":"#001c28","#3f6609":"#094a66","#001a00":"#00121a","#000600":"#000406","#010f00":"#000a0f","#274700":"#003247","#2d4d00":"#00364d","#2f4e01":"#01374e","#2e4b00":"#00344b","#2c3900":"#002839","#3b520f":"#0f3e52","#164900":"#003349","#022500":"#001a25","#2b4101":"#012e41","#314900":"#003349","#213c00":"#002a3c","#1a2b00":"#001e2b","#202900":"#001d29","#1a2008":"#081920","#3f5910":"#104359","#1f5100":"#003951","#000c00":"#00080c","#325201":"#013a52","#2e4700":"#003247","#345200":"#003952","#304203":"#032f42","#293700":"#002637","#242b00":"#001e2b","#030900":"#000609","#557324":"#245b73","#243c00":"#002a3c","#477001":"#014f70","#173700":"#002637","#1e3300":"#002433","#314a04":"#04354a","#2c4900":"#003349","#304608":"#083346","#212900":"#001d29","#030c00":"#00080c","#020400":"#000304","#222a06":"#061f2a","#0e1c00":"#00141c","#96bc55":"#559dbc","#132c00":"#001f2c","#55781c":"#1c5c78","#365508":"#083e55","#040a00":"#00070a","#0c2900":"#001d29","#334d06":"#06384d","#365707":"#073f57","#416d0a":"#0a4f6d","#3e7006":"#065070","#244800":"#003248","#253c00":"#002a3c","#253700":"#002637","#1e2e00":"#00202e","#132600":"#001b26","#0b0f09":"#090d0f","#000800":"#000608","#1c2000":"#001620","#050700":"#000507","#96b14c":"#4c93b1","#7cab2f":"#2f86ab","#122300":"#001823","#577e21":"#21627e","#3f5e15":"#15485e","#0b1f00":"#00161f","#031100":"#000c11","#061200":"#000d12","#0f2500":"#001a25","#486f11":"#11536f","#436710":"#104d67","#4e7c16":"#165d7c","#528815":"#156588","#3c6b0b":"#0b4e6b","#376301":"#014663","#234401":"#013044","#254801":"#013348","#192d00":"#001f2d","#0f1200":"#000d12","#000700":"#000507","#0c1800":"#001118","#283e00":"#002b3e","#aec65d":"#5da6c6","#8aaf3a":"#3a8caf","#628513":"#136385","#1a2a00":"#001d2a","#5b8324":"#246683","#050b05":"#05090b","#5a7a31":"#31647a","#162d00":"#001f2d","#2a5800":"#003e58","#020c00":"#00080c","#081000":"#000b10","#517516":"#165875","#4e7415":"#155774","#577d1a":"#1a5f7d","#699520":"#207295","#5e8e1d":"#1d6c8e","#538014":"#146080","#52800c":"#0c5d80","#375d02":"#02425d","#365e04":"#04435e","#366104":"#044561","#204300":"#002f43","#1f2700":"#001b27","#060f00":"#000a0f","#060900":"#000609","#030500":"#000305","#1b3800":"#002738","#3a5400":"#003b54","#98af3e":"#3e8daf","#acc94a":"#4aa3c9","#90b732":"#328fb7","#5b8518":"#186485","#5d7215":"#155672","#213b00":"#00293b","#6b982c":"#2c7898","#040804":"#040708","#507425":"#255c74","#0f1f00":"#00161f","#50800e":"#0e5e80","#072c00":"#001f2c","#040d04":"#040a0d","#030600":"#000406","#233805":"#052938","#729625":"#257496","#64851b":"#1b6585","#759823":"#237598","#749f25":"#257a9f","#639322":"#227193","#527d14":"#145d7d","#69951c":"#1c7195","#548015":"#156080","#4a7411":"#115674","#3b6406":"#064864","#214100":"#002d41","#3a5702":"#023d57","#202000":"#001620","#272800":"#001c28","#234200":"#002e42","#7c983a":"#3a7c98","#97b93c":"#3c93b9","#b0ce3f":"#3fa3ce","#a5c637":"#379bc6","#95b938":"#3892b9","#709c35":"#357d9c","#648f1d":"#1d6d8f","#536109":"#094761","#102100":"#001721","#649328":"#287393","#0d110a":"#0a0f11","#395c11":"#11455c","#1a2b03":"#031f2b","#355b00":"#00405b","#6e9f1d":"#1d789f","#1a4300":"#002f43","#1d2519":"#192125","#1d2d07":"#07222d","#041200":"#000d12","#020500":"#000305","#608419":"#196484","#779524":"#247395","#5e7d1b":"#1b607d","#779b27":"#27789b","#6e9d25":"#25799d","#5f8e21":"#216d8e","#538116":"#166181","#76a21f":"#1f7ba2","#5d8b13":"#13678b","#446d0f":"#0f516d","#386008":"#084660","#284900":"#003349","#3b5c04":"#04425c","#1e1e00":"#00151e","#212800":"#001c28","#1c3000":"#002230","#1c3400":"#002434","#111f00":"#00161f","#041400":"#000e14","#060e00":"#000a0e","#344d03":"#03374d","#395512":"#124155","#436a04":"#044b6a","#7ea33a":"#3a83a3","#aac941":"#41a0c9","#9fc42e":"#2e97c4","#87af2d":"#2d88af","#779e37":"#377f9e","#638e22":"#226e8e","#6f9820":"#207498","#303400":"#002434","#395a0c":"#0c435a","#386407":"#074864","#37482b":"#2b3f48","#051700":"#001017","#23320e":"#0e2732","#294400":"#003044","#50780b":"#0b5778","#89b43b":"#3b90b4","#678e2a":"#2a708e","#032300":"#001823","#051002":"#020c10","#102002":"#021720","#9eb75d":"#5d9cb7","#b0d062":"#62afd0","#41501d":"#1d4150","#060a00":"#00070a","#70941f":"#1f7194","#6a8a1f":"#1f6a8a","#61871c":"#1c6787","#6d9522":"#227295","#689a25":"#25779a","#547c16":"#165d7c","#55831a":"#1a6383","#6e9d1f":"#1f779d","#56840f":"#0f6184","#426f0b":"#0b516f","#345a05":"#05405a","#2c5203":"#033a52","#325500":"#003b55","#2b2c00":"#001f2c","#344303":"#033043","#224200":"#002e42","#344a1a":"#1a3c4a","#1a2c00":"#001f2c","#000b00":"#00080b","#2d4f01":"#01384f","#709634":"#347996","#4a6521":"#215165","#627d30":"#30667d","#6c9528":"#287495","#679117":"#176c91","#3d5415":"#154154","#51791c":"#1c5d79","#80a144":"#4485a1","#95b93b":"#3b93b9","#81a82b":"#2b82a8","#729735":"#357a97","#70982e":"#2e7898","#69901e":"#1e6e90","#576c10":"#10506c","#171d00":"#00141d","#72a13b":"#3b82a1","#618139":"#396b81","#091f00":"#00161f","#4a6d07":"#074e6d","#75952a":"#2a7595","#84a931":"#3185a9","#6e9d1e":"#1e779d","#385c0c":"#0c445c","#375115":"#153f51","#90aa45":"#458caa","#9dbd4d":"#4d9bbd","#9bbe43":"#4399be","#243904":"#042939","#010600":"#000406","#0b1103":"#030d11","#040500":"#000305","#070c00":"#00080c","#66881c":"#1c6888","#60841e":"#1e6584","#517618":"#185a76","#69901f":"#1f6e90","#6b9e25":"#257a9e","#4e7915":"#155b79","#53831a":"#1a6383","#64941a":"#1a6f94","#538010":"#105e80","#416b0c":"#0c4e6b","#284d04":"#04374d","#2f5605":"#053e56","#365405":"#053c54","#252d00":"#001f2d","#293b02":"#022a3b","#294304":"#043043","#3c5c0e":"#0e455c","#183100":"#002231","#1a3502":"#022635","#385801":"#013e58","#7a9e38":"#387f9e","#8ab83b":"#3b92b8","#7dae23":"#2384ae","#6c960e":"#0e6d96","#567220":"#205972","#344a03":"#03354a","#709536":"#367895","#95b847":"#4796b8","#94b848":"#4896b8","#7ba241":"#4185a2","#749337":"#377793","#68911b":"#1b6e91","#587b18":"#185d7b","#273d00":"#002b3d","#7bb03d":"#3d8db0","#6a9e33":"#337e9e","#121d00":"#00141d","#253800":"#002738","#5d7715":"#155a77","#7ca133":"#3380a1","#5e891c":"#1c6889","#426011":"#114860","#46611a":"#1a4c61","#587125":"#255a71","#839f3b":"#3b819f","#91b43e":"#3e91b4","#628f14":"#146a8f","#1d3c00":"#002a3c","#2a440b":"#0b3344","#2f4a10":"#10394a","#1b2d00":"#001f2d","#080e00":"#000a0e","#516d11":"#11516d","#5b811c":"#1c6381","#466811":"#114e68","#698a1c":"#1c698a","#63911d":"#1d6e91","#528117":"#176181","#4f761b":"#1b5b76","#5f8d17":"#176a8d","#47750b":"#0b5575","#3a600a":"#0a4660","#305304":"#043b53","#2c4500":"#003045","#294100":"#002d41","#0c1000":"#000b10","#223001":"#012230","#0e2300":"#001823","#020900":"#000609","#4b6d0f":"#0f516d","#3c5704":"#043e57","#719a35":"#357c9a","#78a43b":"#3b84a4","#658d18":"#186a8d","#5a791d":"#1d5d79","#364514":"#143645","#445e04":"#04435e","#799c3d":"#3d7f9c","#84a73d":"#3d87a7","#7ea046":"#4685a0","#6f8b34":"#34718b","#648d1c":"#1c6b8d","#5b7d14":"#145d7d","#2d3700":"#002637","#0c1500":"#000f15","#8aba4a":"#4a98ba","#0a1f00":"#00161f","#091b00":"#00131b","#748d49":"#49798d","#071400":"#000e14","#3d5202":"#023a52","#6f892a":"#2a6c89","#6b9127":"#277191","#4b6e14":"#14536e","#3f5b0f":"#0f445b","#2c400c":"#0c3040","#738738":"#386f87","#89ad39":"#398aad","#699525":"#257395","#2a4d00":"#00364d","#36560a":"#0a3f56","#132405":"#051b24","#182f00":"#00212f","#171b00":"#00131b","#070e00":"#000a0e","#394c0a":"#0a384c","#547717":"#175a77","#496a15":"#15506a","#67842c":"#2c6a84","#6b952d":"#2d7695","#5b8e1a":"#1a6b8e","#4d7418":"#185874","#518114":"#146081","#3e6908":"#084c69","#386108":"#084661","#274900":"#003349","#364f05":"#05394f","#2d4501":"#013145","#0b0c00":"#00080c","#141700":"#001017","#182202":"#021822","#101f00":"#00161f","#162100":"#001721","#79a22e":"#2e7fa2","#2c4400":"#003044","#5f8023":"#236480","#6d9731":"#317897","#5c8612":"#126386","#5a8116":"#166181","#3e4b23":"#233f4b","#364300":"#002f43","#658227":"#276782","#6e943e":"#3e7a94","#76933c":"#3c7993","#778f35":"#35748f","#68851e":"#1e6685","#4a6e09":"#09506e","#3b4b06":"#06364b","#131a00":"#00121a","#62872a":"#2a6b87","#456e1b":"#1b556e","#081008":"#080e10","#608830":"#306e88","#181c00":"#00141c","#2e3e00":"#002b3e","#4b5e0d":"#0d465e","#6f932b":"#2b7493","#557b19":"#195e7b","#385909":"#094159","#1e3003":"#032230","#3c4a1a":"#1a3c4a","#85aa2e":"#2e85aa","#789f32":"#327e9f","#456a0f":"#0f4f6a","#243e04":"#042d3e","#172906":"#061e29","#0a2100":"#001721","#4b6527":"#275265","#111308":"#081013","#304306":"#063143","#4f7115":"#155571","#456711":"#114d67","#4a6a18":"#18516a","#577d1c":"#1c607d","#61921f":"#1f6f92","#4b7615":"#155976","#446e0f":"#0f516e","#3a6108":"#084661","#325a05":"#05405a","#2d4705":"#053347","#293d00":"#002b3d","#0f1100":"#000c11","#101500":"#000f15","#475610":"#104156","#49611c":"#1c4c61","#2f3c08":"#082c3c","#4f6715":"#154e67","#52680f":"#0f4d68","#354b02":"#02354b","#6a922f":"#2f7492","#699221":"#217092","#638a1b":"#1b698a","#485e22":"#224c5e","#313600":"#002636","#5d6b1b":"#1b536b","#628030":"#306880","#618223":"#236582","#708f30":"#30728f","#5e7716":"#165a77","#485e09":"#09445e","#304300":"#002f43","#101d00":"#00141d","#54741f":"#1f5a74","#4f7721":"#215d77","#9bb970":"#70a3b9","#050801":"#010608","#354801":"#013348","#5d6d25":"#25576d","#557b1a":"#1a5e7b","#47730e":"#0e5573","#2a4600":"#003146","#0a0d00":"#00090d","#436011":"#114860","#719a2a":"#2a789a","#4e7015":"#155570","#1d3202":"#022432","#1d330b":"#0b2733","#233b01":"#012a3b","#2b4a00":"#00344a","#283b03":"#032a3b","#252c02":"#021f2c","#3f5e0c":"#0c455e","#476911":"#114f69","#446112":"#124961","#5c7e15":"#155e7e","#5d8515":"#156385","#46700e":"#0e5370","#365a09":"#09425a","#325607":"#073e56","#254803":"#033348","#2b3e09":"#092e3e","#1b1e00":"#00151e","#141e00":"#00151e","#3c5709":"#094057","#5a721f":"#1f5972","#394310":"#103443","#394f07":"#07394f","#7a9024":"#247090","#2f4101":"#012e41","#506d25":"#25576d","#5f8422":"#226784","#628722":"#226987","#3d501a":"#1a4050","#393c0a":"#0a2d3c","#5b621e":"#1e4e62","#5e7a28":"#28617a","#587d17":"#175e7d","#5e7a18":"#185d7a","#4e6e0a":"#0a506e","#343f01":"#012c3f","#162500":"#001a25","#152800":"#001c28","#719132":"#327491","#4e7420":"#205b74","#030601":"#010406","#294d00":"#00364d","#647d45":"#456c7d","#090e00":"#000a0e","#546d18":"#18536d","#3f660d":"#0d4b66","#345506":"#063d55","#142400":"#001924","#628923":"#236a89","#102b00":"#001e2b","#1a3004":"#042330","#283f0c":"#0c303f","#092000":"#001620","#4b6525":"#255265","#2d4406":"#063144","#3c3c2d":"#2d373c","#111500":"#000f15","#3b5605":"#053e56","#42630e":"#0e4963","#416111":"#114961","#43670e":"#0e4c67","#49790f":"#0f5979","#457109":"#095271","#305203":"#033a52","#294700":"#003247","#2d4706":"#063347","#1e3000":"#002230","#253801":"#012738","#385406":"#063d54","#4f6c16":"#16526c","#454e14":"#143d4e","#384704":"#043347","#819a32":"#327b9a","#3f4301":"#012f43","#455f14":"#14485f","#67862b":"#2b6b86","#617e22":"#22627e","#353b0b":"#0b2d3b","#5f601c":"#1c4c60","#50631a":"#1a4d63","#46600a":"#0a4660","#384905":"#053549","#2e3d00":"#002b3d","#272d00":"#001f2d","#426508":"#084965","#7d9e38":"#387f9e","#1c3e06":"#062d3e","#3a6e00":"#004d6e","#465532":"#324a55","#646a3a":"#3a5c6a","#40520a":"#0a3c52","#59782b":"#2b6178","#132800":"#001c28","#30560a":"#0a3f56","#547a21":"#215f7a","#011100":"#000c11","#3f6610":"#104c66","#091a00":"#00121a","#223901":"#012839","#0a1700":"#001017","#385112":"#123e51","#38570a":"#0a4057","#060b00":"#00080b","#0b1100":"#000c11","#2e4705":"#053347","#385606":"#063e56","#486b0e":"#0e4f6b","#5a7b11":"#115b7b","#4d7a0c":"#0c597a","#437206":"#065272","#315401":"#013b54","#3b5b07":"#07425b","#203000":"#002230","#142100":"#001721","#2e4801":"#013348","#273f01":"#012c3f","#222a00":"#001d2a","#2c3c01":"#012a3c","#505e16":"#16485e","#343c03":"#032b3c","#1f3200":"#002332","#546d20":"#20566d","#48620f":"#0f4962","#272700":"#001b27","#515d11":"#11465d","#475b09":"#09425b","#2c4100":"#002d41","#212d00":"#001f2d","#1f2b00":"#001e2b","#273900":"#002839","#527d11":"#115d7d","#87b743":"#4394b7","#6b8e2d":"#2d718e","#0c2301":"#011923","#416b00":"#004b6b","#44520d":"#0d3d52","#535f23":"#234d5f","#273d0e":"#0e2f3d","#234300":"#002f43","#133000":"#002230","#386305":"#054763","#3b511f":"#1f4251","#64852f":"#2f6b85","#000a00":"#00070a","#071200":"#000d12","#2b4307":"#073143","#35500e":"#0e3c50","#0d1900":"#001119","#0d1700":"#001017","#1b2b00":"#001e2b","#385005":"#053950","#395b07":"#07425b","#456209":"#094762","#42690a":"#0a4c69","#426f05":"#054f6f","#4a6f0c":"#0c516f","#283c02":"#022b3c","#010800":"#000608","#112700":"#001b27","#183800":"#002738","#2b4400":"#003044","#3d550c":"#0c3f55","#495b12":"#12455b","#425a13":"#13455a","#2b4506":"#063245","#233700":"#002637","#1c2e00":"#00202e","#1a2500":"#001a25","#252e00":"#00202e","#354600":"#003146","#2e3c00":"#002a3c","#2b4200":"#002e42","#516918":"#185169","#7a9e32":"#327e9e","#88b33e":"#3e90b3","#83b438":"#388fb4","#739c2f":"#2f7b9c","#587d28":"#28637d","#031a00":"#00121a","#041602":"#021016","#010700":"#000507","#041b00":"#00131b","#131b00":"#00131b","#586130":"#305261","#576922":"#225469","#214400":"#003044","#487708":"#085677","#133100":"#002231","#4c6629":"#295466","#1a3200":"#002332","#355410":"#104054","#294d02":"#02364d","#0c1b00":"#00131b","#2c410e":"#0e3241","#274200":"#002e42","#153000":"#002230","#284a00":"#00344a","#2a4900":"#003349","#436207":"#074762","#496d0a":"#0a4f6d","#3b6205":"#054662","#304a04":"#04354a","#172900":"#001d29","#2c4a00":"#00344a","#3e5803":"#033e58","#537812":"#125978","#669620":"#207396","#699223":"#237192","#7ca23c":"#3c83a2","#7aa03b":"#3b82a0","#749735":"#357a97","#648128":"#286681","#4a691a":"#1a5169","#4f741c":"#1c5a74","#729c34":"#347d9c","#7ea93c":"#3c88a9","#88b33f":"#3f90b3","#82ac39":"#3989ac","#749c36":"#367d9c","#597c28":"#28637c","#64862f":"#2f6c86","#26440e":"#0e3444","#011200":"#000d12","#3b432f":"#2f3d43","#0e1404":"#040f14","#8bb543":"#4393b5","#001000":"#000b10","#366d00":"#004c6d","#427704":"#045477","#182c01":"#011f2c","#395119":"#194051","#122c00":"#001f2c","#354d13":"#133c4d","#385d09":"#09445d","#092100":"#001721","#071300":"#000d13","#203500":"#002535","#2a4b00":"#00344b","#214500":"#003045","#213a00":"#00293a","#425c07":"#07425c","#50710a":"#0a5271","#487609":"#095576","#496b0b":"#0b4e6b","#627e1c":"#1c617e","#6a8d27":"#276e8d","#456310":"#104a63","#263503":"#032635","#0b1200":"#000d12","#121906":"#061319","#141907":"#071419","#080d02":"#020a0d","#1e310b":"#0b2631","#2c4810":"#103748","#557a26":"#26617a","#759b38":"#387d9b","#567c29":"#29637c","#123503":"#032635","#082800":"#001c28","#011300":"#000d13","#021100":"#000c11","#264101":"#012e41","#0e1c06":"#06151c","#0d1d00":"#00141d","#759a41":"#417f9a","#356f00":"#004e6f","#3c6f04":"#044f6f","#0f2300":"#001823","#102300":"#001823","#91bf45":"#459abf","#071800":"#001118","#325e00":"#00425e","#58980e":"#0e6f98","#1c3100":"#002231","#244b00":"#00344b","#274500":"#003045","#324e02":"#02374e","#345a02":"#02405a","#456107":"#074661","#6d8f2a":"#2a718f","#709234":"#347692","#2d3e0a":"#0a2e3e","#172100":"#001721","#091100":"#000c11","#122b10":"#10232b","#1a3019":"#192930","#669128":"#287191","#0b1e00":"#00151e","#24370f":"#0f2b37","#1f3e00":"#002b3e","#478506":"#065f85","#416906":"#064b69","#041100":"#000c11","#354d0e":"#0e3a4d","#36500e":"#0e3c50","#153600":"#002636","#22380b":"#0b2a38","#3b6f00":"#004e6f","#3e7604":"#045476","#040e00":"#000a0e","#284a01":"#01344a","#1b3500":"#002535","#54710a":"#0a5271","#425f07":"#07455f","#355503":"#033c55","#48700b":"#0b5270","#4f6f21":"#21586f","#131d00":"#00141d","#1e3400":"#002434","#2b4800":"#003248","#335609":"#093f56","#4a6e16":"#16546e","#011600":"#000f16","#477d06":"#06597d","#639a12":"#12719a","#364101":"#012e41","#1d2800":"#001c28","#1b3100":"#002231","#add33f":"#3fa7d3","#658327":"#276783","#437804":"#045578","#234b00":"#00344b","#142b00":"#001e2b","#163000":"#002230","#244100":"#002d41","#2e4701":"#013247","#2b4401":"#013044","#375604":"#043d56","#182800":"#001c28","#223800":"#002738","#325200":"#003952","#2b4900":"#003349","#152300":"#001823","#435206":"#063b52","#386005":"#054560","#305b02":"#02405b","#6cab0e":"#0e7cab","#565f0a":"#0a455f","#1d2b00":"#001e2b","#8cb05a":"#5a96b0","#b8d731":"#31a5d7","#a4c92a":"#2a99c9","#5d852f":"#2f6b85","#518708":"#086187","#081c00":"#00141c","#132b00":"#001e2b","#1e3d00":"#002b3d","#1e3900":"#002839","#243f00":"#002c3f","#2e5404":"#043c54","#345402":"#023b54","#345b01":"#01405b","#2c5200":"#003952","#112a00":"#001d2a","#445800":"#003e58","#74b314":"#1483b3","#456904":"#044b69","#263f0a":"#0a2f3f","#a8c94f":"#4fa4c9","#9bc050":"#509ec0","#234907":"#073549","#082100":"#001721","#1e3600":"#002636","#396907":"#074c69","#162a00":"#001d2a","#1f3d00":"#002b3d","#224600":"#003146","#203c00":"#002a3c","#2b4d01":"#01364d","#365b03":"#03415b","#3c6105":"#054561","#345700":"#003d57","#365603":"#033d56","#3a6000":"#004360","#002800":"#001c28","#759d4a":"#4a849d","#64873f":"#3f7187","#679535":"#357895","#1a3102":"#022331","#386500":"#004765","#274303":"#033043","#1d3a00":"#00293a","#2c5300":"#003a53","#2f5701":"#013d57","#2e5101":"#013951","#2f4500":"#003045","#293600":"#002636","#2b4100":"#002d41","#011000":"#000b10","#4b5601":"#013c56","#395110":"#103d51","#9dc251":"#51a0c2","#bad835":"#35a7d8","#9ec428":"#2895c4","#3f6222":"#224f62","#0b2400":"#001924","#396204":"#044662","#1f3c00":"#002a3c","#2c5700":"#003d57","#274e00":"#00374e","#366505":"#054865","#305e01":"#01425e","#48750a":"#0a5575","#415c05":"#05425c","#363700":"#002637","#020200":"#000102","#8d9412":"#126d94","#65740c":"#0c5574","#2a4c01":"#01354c","#b9d82f":"#2fa5d8","#9bbd38":"#3895bd","#1b3606":"#062836","#385d03":"#03425d","#284602":"#023246","#2b5700":"#003d57","#315f04":"#04445f","#426f06":"#064f6f","#49790b":"#0b5879","#507612":"#125876","#517112":"#125471","#49640b":"#0b4964","#414a00":"#00344a","#7a7c09":"#09597c","#5c7a07":"#07577a","#4e7b27":"#27627b","#163c00":"#002a3c","#58832d":"#2d6983","#253f00":"#002c3f","#325504":"#043d55","#213e00":"#002b3e","#2d5500":"#003b55","#244e00":"#00374e","#466f14":"#14546f","#5e891e":"#1e6989","#60851c":"#1c6585","#5e801d":"#1d6280","#5a7818":"#185b78","#3f540b":"#0b3e54","#2f3900":"#002839","#0f1300":"#000d13","#476b00":"#004b6b","#548109":"#095d81","#63800f":"#0f5e80","#314800":"#003248","#7da530":"#3082a5","#bbda38":"#38a9da","#a4c837":"#379cc8","#131c00":"#00141c","#3d5e09":"#09445e","#2a5501":"#013c55","#2f5800":"#003e58","#2f5a04":"#04405a","#3a690c":"#0c4d69","#5b881c":"#1c6888","#6f942a":"#2a7494","#6d8f25":"#256f8f","#628620":"#206786","#5b7a1c":"#1c5e7a","#48610f":"#0f4861","#3f7404":"#045274","#356100":"#004461","#1e3402":"#022534","#020302":"#020303","#335405":"#053c54","#accd4e":"#4ea7cd","#476f20":"#20576f","#1f4405":"#053144","#1a2502":"#021a25","#3d5809":"#094058","#325501":"#013c55","#284e00":"#00374e","#244e01":"#01374e","#346005":"#054560","#4d8515":"#156385","#58851e":"#1e6685","#6d9429":"#297494","#799a2e":"#2e7a9a","#6a8927":"#276c89","#5c801c":"#1c6280","#4e7411":"#115674","#3d6307":"#074763","#2c5100":"#003951","#284000":"#002d40","#58891b":"#1b6889","#57831c":"#1c6483","#1f3802":"#022838","#021f00":"#00161f","#060801":"#010608","#11130e":"#0e1113","#68923c":"#3c7892","#80a555":"#558da5","#6f9f38":"#38809f","#152500":"#001a25","#2a3802":"#022838","#3e630a":"#0a4863","#274d00":"#00364d","#326303":"#034663","#3d6e08":"#084f6e","#5d8820":"#206988","#698a27":"#276c8a","#708b29":"#296e8b","#6e8324":"#246683","#5f7d1b":"#1b607d","#42690c":"#0c4d69","#456e0a":"#0a506e","#3e5c05":"#05425c","#304100":"#002d41","#1b1d00":"#00141d","#2a5405":"#053c54","#5a7732":"#326277","#082700":"#001b27","#101402":"#020f14","#0f1502":"#020f15","#a7ca47":"#47a3ca","#c0dd41":"#41aedd","#97bd35":"#3594bd","#091d00":"#00141d","#416408":"#084864","#385e04":"#04435e","#295300":"#003a53","#2a5300":"#003a53","#3d6b09":"#094e6b","#508012":"#125f80","#628d21":"#216d8d","#6e8f29":"#29708f","#71912b":"#2b7291","#5c801a":"#1a6180","#3d6807":"#074b68","#365004":"#043950","#344600":"#003146","#1c3b00":"#00293b","#3f6408":"#084864","#174400":"#003044","#171e04":"#04161e","#293607":"#072836","#799c1a":"#1a759c","#b8d853":"#53b0d8","#466d1c":"#1c556d","#2e5014":"#143e50","#1b2700":"#001b27","#2d4400":"#003044","#416507":"#074965","#305801":"#013e58","#2f5702":"#023d57","#2c5502":"#023c55","#49760f":"#0f5776","#5a851c":"#1c6585","#5d851c":"#1c6585","#507d12":"#125d7d","#42670c":"#0c4c67","#2c4800":"#003248","#314d01":"#01364d","#2f3f00":"#002c3f","#365101":"#013951","#5da111":"#1176a1","#102402":"#021a24","#263206":"#062532","#76a148":"#4886a1","#91b457":"#5798b4","#89b641":"#4193b6","#293d13":"#13303d","#233400":"#002434","#476907":"#074c69","#3c6305":"#054763","#1a3700":"#002637","#223f00":"#002c3f","#447411":"#115674","#3f6b0c":"#0c4e6b","#3a6109":"#094761","#314d09":"#09394d","#1e3d01":"#012b3d","#2c4801":"#013348","#385003":"#033950","#3b5404":"#043c54","#599e09":"#09719e","#1e3504":"#042635","#030400":"#000304","#0e1202":"#020d12","#aacf41":"#41a4cf","#afd13c":"#3ca4d1","#77a21f":"#1f7ba2","#091e00":"#00151e","#141f00":"#00161f","#416203":"#034562","#436906":"#064b69","#3a6003":"#034460","#325a00":"#003f5a","#325801":"#013e58","#284f00":"#00374f","#476a0b":"#0b4d6a","#3a5605":"#053e56","#062000":"#001620","#010201":"#010202","#799e14":"#14759e","#92b629":"#298cb6","#446512":"#124c65","#2a4a0a":"#0a374a","#58742c":"#2c5e74","#385f04":"#04445f","#3a5e03":"#03435e","#396002":"#024460","#385d01":"#01415d","#3c6802":"#024968","#315303":"#033b53","#0b1e01":"#01151e","#446809":"#094b68","#2f4503":"#033145","#040600":"#000406","#799f3e":"#3e829f","#94ba49":"#4998ba","#709a1f":"#1f759a","#3d610a":"#0a4761","#172b04":"#041f2b","#2b3e07":"#072d3e","#294800":"#003248","#2f4e08":"#08394e","#010200":"#000102","#042f00":"#00212f","#4d780c":"#0c5878","#2d4e02":"#02374e","#254a09":"#09364a","#425c1b":"#1b485c","#5c7e30":"#30677e","#4b6c1e":"#1e556c","#678a22":"#226b8a","#3b5011":"#113d50","#233006":"#062330","#2d410b":"#0b3141","#528211":"#116082","#3b6307":"#074763","#2a520a":"#0a3c52","#415e12":"#12475e","#658827":"#276b88","#324d0c":"#0c394d","#314e0f":"#0f3b4e","#3c5b12":"#12455b","#0e2100":"#001721","#4d7d0f":"#0f5c7d","#426f0a":"#0a516f","#355500":"#003b55","#173003":"#032230","#122001":"#011720","#0a2000":"#001620","#042000":"#001620","#508509":"#096085","#375d05":"#05435d","#569109":"#096891","#417217":"#175772","#67a420":"#207ca4","#366901":"#014a69","#282800":"#001c28","#175300":"#003a53","#368109":"#095d81","#43690f":"#104d67","#2a4f02":"#02364d","#345505":"#063d55","#315705":"#053e56","#203e00":"#002b3e","#030e00":"#000a0e","#223603":"#052938","#1b2013":"#192125","#162304":"#021822","#234308":"#053144","#668c1e":"#1c6b8d","#72961d":"#1f7194","#7ca11e":"#1f7ba2","#84a928":"#2b82a8","#779a24":"#237598","#739428":"#2a7595","#648324":"#276783","#51721d":"#1c5a74","#41620c":"#0e4963","#1e3a00":"#002839","#4e7414":"#155774","#38550d":"#0a4057","#3d6708":"#074b68","#3d6b07":"#094e6b","#3e610a":"#0a4761","#254a01":"#00344b","#294d03":"#02364d","#122400":"#001924","#122a00":"#001d2a","#314509":"#083346","#324509":"#083346","#37460c":"#103443","#67841c":"#1e6685","#7b9d28":"#27789b","#688a23":"#226b8a","#6d8e2a":"#2a718f","#577c22":"#21627e","#4a6b16":"#15506a","#2c450b":"#0b3344","#567a16":"#165d7c","#386205":"#054763","#46740b":"#0b5575","#4b7211":"#115674","#4d6c15":"#16526c","#39580a":"#0a4057","#1b3600":"#002535","#061500":"#000f16","#181c0f":"#081920","#4f6218":"#1a4d63","#6e8d26":"#256f8f","#678424":"#276783","#608326":"#236582","#55771e":"#1c5c78","#355406":"#053c54","#1f3204":"#032230","#5b8118":"#166181","#385a09":"#094159","#4b770e":"#0f5776","#6b8f23":"#256f8f","#5d7e1d":"#1d6280","#567823":"#215f7a","#050602":"#000406","#202a0b":"#061f2a","#5d781e":"#1d5d79","#5f8223":"#236480","#5e7e24":"#236480","#466513":"#124c65","#263d04":"#042d3e","#577c16":"#175e7d","#2a311a":"#0f2b37","#486e11":"#11536f","#5c811a":"#1a6180","#779b28":"#27789b","#82a52f":"#3185a9","#5b8321":"#246683","#49671d":"#1a5169","#122d00":"#001f2c","#022300":"#001823","#1f2509":"#061f2a","#5c7c21":"#21627e","#5e7f22":"#236480","#4f7016":"#155571","#2b4206":"#073143","#567a17":"#185d7b","#252f15":"#0e2732","#4b7312":"#115674","#658a1f":"#226b8a","#799d2a":"#27789b","#8db434":"#328fb7","#5d8321":"#226784","#517223":"#255c74","#284303":"#033043","#030302":"#020303","#4b631c":"#1c4c61","#52701c":"#1c5a74","#54771a":"#1c5c78","#2b4409":"#0b3344","#577d17":"#175e7d","#19200e":"#081920","#4f800e":"#0e5e80","#658d1f":"#1d6d8f","#779b29":"#27789b","#88ae2f":"#2d88af","#698f24":"#237192","#486a1a":"#1a5169","#254202":"#012e41","#001400":"#000d13","#0a0c04":"#020a0d","#455f18":"#1a4c61","#4e6b1a":"#185169","#2a420a":"#0b3344","#598119":"#166181","#12150f":"#0e1113","#4d7412":"#115674","#60851b":"#1c6585","#789d29":"#27789b","#89b030":"#2d88af","#7ba332":"#3380a1","#54781f":"#215f7a","#345309":"#083e55","#0a2500":"#001924","#324612":"#143645","#3a570f":"#124155","#30490b":"#083346","#557a1b":"#1a5e7b","#325c05":"#05405a","#517712":"#125978","#709427":"#2a7494","#89b32e":"#2d88af","#709d29":"#2a789a","#567e1f":"#21627e","#375b09":"#09425a","#2c4e02":"#02374e","#001800":"#001017","#031400":"#000f15","#694e2f":"#305261","#64462c":"#305261","#805e40":"#3a5c6a","#0c1105":"#030d11","#1e3705":"#042635","#426213":"#124961","#4b671e":"#215165","#345809":"#093f56","#61831e":"#1e6584","#80a72a":"#2b82a8","#527c18":"#165d7c","#396108":"#084661","#3a5c06":"#07425b","#021500":"#000f15","#0c3200":"#002231","#040503":"#010406","#172903":"#041f2b","#55761b":"#1c5c78","#293614":"#13303d","#386405":"#054763","#466e0f":"#0f516e","#5a781a":"#185b78","#729924":"#257496","#5b801a":"#1a6180","#4b7511":"#115674","#43690a":"#0a4c69","#3a6008":"#084661","#295000":"#003951","#112b00":"#001e2b","#0a1e00":"#00161f","#6d9f1a":"#1d789f","#1b5100":"#003951","#050604":"#040708","#203808":"#0b2a38","#5a7d1f":"#21627e","#131a0d":"#071419","#3f620a":"#0a4863","#335408":"#093f56","#496812":"#114f69","#486612":"#114e68","#4f7314":"#155774","#4b6f13":"#14536e","#476b10":"#114f69","#426710":"#104d67","#294a02":"#01344a","#153400":"#002434","#3e6509":"#094a66","#65981c":"#1a6f94","#39540f":"#0f3e52","#435f18":"#1a4c61","#0e100c":"#0a0f11","#496811":"#114f69","#2c4704":"#053347","#425e10":"#114860","#1a2e00":"#001f2d","#0d2000":"#001721","#314c06":"#06384d","#3d5c0b":"#09445e","#355308":"#083e55","#0e1f00":"#00161f","#5c8d1a":"#1a6b8e","#346000":"#004461","#5e7921":"#1d5d79","#1f290e":"#07222d","#587d18":"#175e7d","#35550b":"#0a3f56","#31410d":"#0b3141","#213800":"#002738","#385308":"#063d54","#081b00":"#00131b","#0c2300":"#011923","#5b8f17":"#1a6b8e","#0f110a":"#0a0f11","#49552d":"#324a55","#3c5410":"#0f3e52","#496f0e":"#0c516f","#426c0a":"#0a4f6d","#3c5212":"#113d50","#102000":"#001620","#071500":"#000e14","#243800":"#002738","#294900":"#003349","#152c00":"#001e2b","#124200":"#003044","#1e2212":"#192125","#323c1e":"#143645","#507413":"#125876","#3b6002":"#034460","#1d2f03":"#032230","#1b3200":"#002332","#3a6a04":"#054b69","#002000":"#00161f","#1c3700":"#002738","#3c412c":"#2f3d43","#7ca32a":"#2e7fa2","#305400":"#013b54","#425f10":"#114860","#253606":"#052938","#031300":"#000d12","#102500":"#001a25","#1f3b00":"#002a3c","#4d563a":"#324a55","#79a72b":"#2e7fa2","#587c1b":"#1a5f7d","#41610b":"#0c455e","#263706":"#052938","#061700":"#000f16","#12130f":"#0e1113","#537a15":"#165d7c","#779f2a":"#27789b","#2d4407":"#063144","#0f1e00":"#00161f","#0d1c00":"#00141c","#709b20":"#1f759a","#6c9227":"#277191","#39570f":"#124155","#152202":"#001823","#071900":"#001118","#547c14":"#165d7c","#698e21":"#1f6e90","#456214":"#124961","#2a4303":"#043043","#111a01":"#00121a","#45640f":"#104a63","#6d922a":"#297494","#3d6109":"#0a4761","#213402":"#002535","#020f00":"#000a0f","#2d3f0b":"#0a2e3e","#54701d":"#205972","#425d0f":"#12475e","#061100":"#000d12","#151d02":"#00151e","#557214":"#125471","#44650c":"#0c4c67","#162b01":"#001e2b","#325709":"#093f56","#507417":"#165875","#43630c":"#0e4963","#020e00":"#00090d","#49680d":"#0e4f6b","#61911c":"#1d6e91","#476910":"#114f69","#183601":"#002637","#081600":"#000f16","#031600":"#001017","#5f951a":"#1a6f94","#558117":"#166181","#415f0c":"#0c455e","#163900":"#002637","#172e00":"#001f2d","#375813":"#124155","#487d0f":"#0f5979","#547a17":"#165d7c","#3d5b09":"#07425b","#4a6317":"#1a4c61","#050900":"#000609","#343d25":"#2d373c","#47780a":"#085677","#3c6b03":"#044d6c","#3d6506":"#064864","#55770e":"#125978","#284603":"#023246","#355001":"#013951","#4a750c":"#0a5575","#366802":"#014a69","#3b6404":"#054763","#365706":"#063f57","#1e3700":"#002636","#121f01":"#011720","#1c3c00":"#002a3c","#132d00":"#001f2c","#091700":"#001017","#060e03":"#040a0d","#040801":"#010608","#1c2315":"#192125","#101f03":"#021720","#56801d":"#1c607d","#385213":"#123e51","#2a430a":"#0b3344","#5d821e":"#1d6280","#729727":"#257496","#82a731":"#3185a9","#83aa31":"#3185a9","#8db035":"#3a8caf","#7faa2f":"#2f86ab","#5f921a":"#1d6c8e","#1c2d0a":"#07222d","#3d4b19":"#1a3c4a","#4c6c0d":"#0f516d","#0e1502":"#020f15","#5b8114":"#166181","#577b15":"#175e7d","#557d16":"#165d7c","#192a04":"#031f2b","#57801b":"#1a5f7d","#2b400d":"#0c3040","#3c5711":"#104359","#6a9024":"#237192","#7aa12c":"#2e7fa2","#85aa2f":"#2e85aa","#90b23c":"#3e91b4","#6c8e25":"#256f8f","#152704":"#061e29","#0f1a01":"#00121a","#101804":"#061319","#445716":"#13455a","#1e2706":"#061f2a","#202319":"#192125","#293c07":"#072d3e","#628318":"#196484","#5d8419":"#186485","#729c2a":"#2a789a","#668c22":"#226b8a","#112203":"#021720","#537c19":"#195e7b","#2f470f":"#10394a","#446215":"#124961","#658a21":"#226b8a","#83a82f":"#3185a9","#8fb43b":"#3e91b4","#476d14":"#14546f","#0d1204":"#040f14","#32352d":"#2d373c","#070f00":"#000a0f","#354807":"#053549","#0e1702":"#001017","#4c6b13":"#14536e","#577616":"#175a77","#8eb131":"#328fb7","#6c9325":"#277191","#60861f":"#1e6584","#091501":"#000e14","#517717":"#185a76","#3a5715":"#124155","#486716":"#15506a","#648921":"#236a89","#88ab30":"#2e85aa","#55771b":"#1c5c78","#0b1104":"#030d11","#2b3612":"#13303d","#10130b":"#081013","#36510c":"#0e3c50","#608019":"#1b607d","#4b7111":"#115674","#4f7216":"#155571","#5d7e1f":"#1d6280","#577c18":"#185d7b","#1f2a17":"#192125","#426313":"#124961","#4a6c1a":"#18516a","#496a17":"#18516a","#618520":"#206786","#6d9120":"#1f6e90","#0d1403":"#040f14","#363834":"#2d373c","#233308":"#062330","#7a9f27":"#27789b","#678c19":"#186a8d","#597b1a":"#185d7b","#8ab02e":"#2d88af","#81a42c":"#2b82a8","#4e7113":"#155571","#2d420b":"#0b3141","#597f1e":"#1c6381","#4a6617":"#18516a","#57791b":"#1c5c78","#263909":"#0b2a38","#567618":"#175a77","#80a62a":"#2b82a8","#68891b":"#1c698a","#64881e":"#1c6888","#a1c23b":"#379bc6","#8ab12f":"#2d88af","#5a7f1d":"#1c6381","#162208":"#081920","#6a8f2d":"#2d718e","#476217":"#1a4c61","#415f11":"#114860","#101c04":"#06151c","#10120c":"#0e1113","#4a6417":"#1a4c61","#6c911d":"#1e6e90","#63841a":"#1b6585","#577819":"#185b78","#809f2a":"#2e7fa2","#7ca025":"#27789b","#4e7d11":"#125d7d","#0f140a":"#081013","#5f8126":"#236480","#53701d":"#20566d","#243d09":"#0a2f3f","#1a1e15":"#192125","#3e5411":"#0f3e52","#66881b":"#1c6888","#537319":"#185a76","#779a22":"#237598","#799c23":"#27789b","#638d20":"#216d8d","#13160f":"#0e1113","#3d5217":"#154154","#587723":"#245b73","#132205":"#051b24","#1a1c15":"#192125","#263b07":"#042939","#587915":"#185d7b","#67871a":"#1c6888","#4b6916":"#15506a","#84a82c":"#2e85aa","#749722":"#237598","#5a8118":"#166181","#232d0e":"#0e2732","#627b2a":"#28617a","#0a1203":"#030d11","#152801":"#001c28","#304d07":"#08394e","#537414":"#165875","#426014":"#114860","#799c2c":"#2e7a9a","#83aa29":"#2b82a8","#5c8715":"#156385","#0a0e07":"#090d0f","#5c7427":"#255a71","#142005":"#04161e","#081200":"#000d12","#223b03":"#012a3b","#325007":"#06384d","#35510b":"#0e3c50","#5e821e":"#1d6280","#8bac43":"#458caa","#11140f":"#0e1113","#3d4b1e":"#1a3c4a","#203206":"#062330","#0f1e01":"#00161f","#243e03":"#042d3e","#2f4b06":"#04354a","#7ba02a":"#2e7fa2","#88a73a":"#3d87a7","#121509":"#081013","#414d24":"#233f4b","#132501":"#001a25","#1e3602":"#002636","#2e4608":"#083346","#799d2d":"#2e7a9a","#141610":"#0e1113","#242b16":"#192125","#15150e":"#0e1113","#152702":"#001c28","#1c3302":"#022432","#58771a":"#185b78","#78a02a":"#2e7fa2","#1d1f15":"#192125","#1b260d":"#081920","#213109":"#0b2631","#416210":"#114961","#0f0f09":"#0a0f11","#15190d":"#071419","#243307":"#062532","#78a729":"#2e7fa2","#0d1009":"#0a0f11","#537b18":"#195e7b","#1e211e":"#192125","#172602":"#001a25","#3e6b03":"#024968","#5e9315":"#146e94","#52860a":"#086187","#396007":"#084660","#609615":"#146e94","#44720b":"#095271","#58900f":"#096891","#65991a":"#1a6f94","#2e5d00":"#01425e","#052800":"#001c28","#1c3d00":"#002a3c","#4e840b":"#096085","#47790a":"#0b5879","#0b1600":"#000f15","#3e6a08":"#084c69","#072000":"#001620","#091600":"#001017","#4d830b":"#096085","#589015":"#146e94","#1d3902":"#002839","#041700":"#001017","#2d4f00":"#01384f","#5a9213":"#146e94","#4b7a0f":"#0f5979","#061b00":"#00131b","#2e3d1f":"#13303d","#142d00":"#001f2c","#4e7c15":"#165d7c","#3a6d01":"#004d6e","#4f8314":"#146081","#2a4a09":"#0a374a","#0f1f02":"#021720","#041300":"#000d12","#041600":"#001017","#3c6d0a":"#0b4e6b","#53760b":"#0b5778","#4e7813":"#125978","#041800":"#001017","#14200c":"#081920","#275005":"#04374d","#42680e":"#0e4c67","#001600":"#001017","#1c2416":"#192125","#66a722":"#207ca4","#346601":"#004563","#1a3e07":"#062d3e","#1a3d00":"#00293b","#011f00":"#00161f","#498204":"#065f85","#214c00":"#00344b","#294702":"#023246","#356006":"#054560","#355606":"#063f57","#061d00":"#00151e","#3c6b08":"#094e6b","#4e830e":"#0e5e80","#254f00":"#00374e","#496322":"#215165","#46780b":"#0b5575","#487b0b":"#0b5879","#1f3800":"#002839","#55930d":"#096891","#40770e":"#115674","#72903e":"#3c7993","#65911c":"#1d6e91","#3f6d0a":"#0a4f6d","#1f4100":"#002d41","#081800":"#001118","#0b2500":"#001924","#010900":"#000609","#081108":"#080e10","#496010":"#0f4861","#1a3400":"#002535","#274800":"#003247","#1d3700":"#002636","#0f2400":"#001a25","#4b6027":"#275265","#3c5b0b":"#0e455c","#192414":"#192125","#4e7b10":"#0f5c7d","#2f5104":"#033a52","#2e4b06":"#04354a","#203a00":"#002839","#254500":"#003146","#2c4f02":"#01384f","#2f5205":"#043b53","#163300":"#002434","#122700":"#001b27","#4f771b":"#1b5b76","#87be35":"#3b92b8","#689b24":"#25779a","#6a9c28":"#257a9e","#629621":"#227193","#6ca727":"#207ca4","#547822":"#215f7a","#1e3207":"#0b2631","#0f1803":"#020f15","#223d02":"#002b3d","#345d02":"#02415c","#152f00":"#002230","#021200":"#000d12","#58811d":"#1c6483","#6d972a":"#2c7898","#465d18":"#1a4c61","#31460b":"#083346","#243805":"#052938","#1d3000":"#002230","#1f3000":"#002230","#45551b":"#1d4150","#516725":"#25576d","#558021":"#21627e","#5f9321":"#1f6f92","#598724":"#246683","#0e1601":"#001017","#010400":"#000304","#0b2100":"#001721","#2c4a07":"#063347","#4e7416":"#155774","#6c9727":"#287495","#648b24":"#236a89","#52711c":"#1c5a74","#3b580f":"#0c435a","#213b01":"#00293b","#183200":"#002231","#253e01":"#002c3f","#3c5512":"#124155","#3b5000":"#023a52","#153200":"#002230","#3e4e15":"#113d50","#476818":"#18516a","#6fa22d":"#2f7b9c","#192a00":"#001d2a","#305603":"#023d57","#3a6106":"#054662","#62931a":"#1a6f94","#61901d":"#1d6e91","#658e22":"#226e8e","#51701a":"#18536d","#436113":"#124961","#284705":"#033347","#1d3900":"#002839","#143200":"#002231","#3d5b0e":"#0e455c","#3d6010":"#0f4861","#446206":"#074762","#526f18":"#18536d","#425e11":"#12475e","#394e13":"#123e51","#2f410e":"#0e3241","#1b2c00":"#001f2c","#3d5213":"#154154","#6c9c2f":"#337e9e","#4c6f1d":"#1e556c","#284405":"#043043","#274104":"#033043","#2c4706":"#063347","#1e3500":"#002434","#102400":"#001924","#3a5a0e":"#0c435a","#214200":"#002d41","#44630f":"#104a63","#4a6e13":"#14536e","#3f5f0b":"#0c455e","#3e5e06":"#06435d","#567425":"#245b73","#4e701b":"#1c5a74","#567822":"#215f7a","#4d6e21":"#21586f","#466517":"#1a4c61","#557521":"#1f5a74","#45621b":"#1a4c61","#152700":"#001c28","#1f3600":"#002636","#5e8a25":"#236a89","#5d8f21":"#216d8e","#0a1000":"#000c11","#244201":"#002e42","#456d0c":"#0a506e","#58871a":"#1b6889","#548111":"#105e80","#588218":"#166181","#467009":"#095271","#304f00":"#01374e","#61861b":"#1c6787","#5b8521":"#246683","#688925":"#276c8a","#587c18":"#185d7b","#46690e":"#0f4f6a","#476511":"#114d67","#597b24":"#28637c","#5a7f23":"#21627e","#547922":"#215f7a","#587c28":"#28637d","#58772a":"#2b6178","#5b7827":"#28617a","#5b7a22":"#1d5d79","#2f5004":"#033a52","#5d9623":"#227193","#426117":"#15485e","#49710e":"#0e5573","#648b1a":"#1b698a","#65851d":"#1b6585","#80a130":"#3380a1","#8aad36":"#398aad","#81a536":"#3a83a3","#42650b":"#0c4c67","#547710":"#125978","#547a15":"#165d7c","#6e931f":"#1f7194","#698f1f":"#1f6e90","#5c8218":"#1a6180","#46690c":"#0b4d6a","#405f10":"#114860","#678b2b":"#2a708e","#688a29":"#276c8a","#5e7e29":"#28617a","#5c7b2a":"#28617a","#567421":"#205972","#4b6a16":"#15506a","#365307":"#083e55","#1f4b03":"#00344b","#44830f":"#065f85","#375510":"#104054","#43680b":"#0a4c69","#315605":"#043d55","#2c4105":"#073143","#182900":"#001d29","#3a520a":"#07394f","#4e6918":"#185169","#416100":"#034562","#61851a":"#196484","#7ca220":"#1f7ba2","#749b21":"#237598","#68901e":"#1e6e90","#578015":"#156080","#3e6406":"#074763","#415d10":"#12475e","#7fa72e":"#3082a5","#81a924":"#2384ae","#6a9027":"#277191","#628527":"#2a6b87","#5c7b29":"#28617a","#52701f":"#20566d","#496d14":"#14536e","#344d07":"#06384d","#203902":"#022838","#499610":"#0e6f98","#283d0c":"#0c303f","#051300":"#000d13","#447109":"#095271","#274604":"#033347","#1a3600":"#002637","#173000":"#002230","#1c3104":"#042330","#47680c":"#0b4d6a","#708f18":"#1f7194","#7ea221":"#1f7ba2","#729820":"#207498","#678e1f":"#1f6e90","#658818":"#1c6888","#2d5a03":"#04405a","#628126":"#286681","#8eb429":"#298cb6","#7da428":"#2b82a8","#719628":"#257496","#6d912b":"#2a718f","#54761f":"#1f5a74","#4b6d1a":"#18516a","#456914":"#114e68","#233c04":"#042d3e","#4e7f14":"#125f80","#1b2c06":"#07222d","#466d0e":"#0f516d","#325904":"#05405a","#3a6206":"#054662","#274502":"#023246","#1c3800":"#002738","#213900":"#002839","#5d7b15":"#145d7d","#4f6a14":"#16526c","#516b16":"#16526c","#60821c":"#1e6584","#557a09":"#0b5778","#92b72e":"#328fb7","#86ab29":"#2e85aa","#81a628":"#2b82a8","#7d9f2a":"#2e7fa2","#6a8d25":"#276e8d","#537518":"#185a76","#4b6e18":"#16546e","#3d5f0b":"#09445e","#244200":"#002e42","#4c7016":"#155570","#131c06":"#061319","#40650d":"#0d4b66","#204100":"#002d41","#3a6107":"#084661","#304f07":"#08394e","#1e3c00":"#002a3c","#122900":"#001c28","#122800":"#001c28","#091300":"#000d13","#283a03":"#032a3b","#080b00":"#00080c","#1c2013":"#192125","#1f280f":"#07222d","#32490c":"#0c394d","#466111":"#124961","#1a4002":"#002e42","#84aa2b":"#2e85aa","#8bb32c":"#2d88af","#82a524":"#2b82a8","#7da225":"#1f7ba2","#7a9d29":"#27789b","#678822":"#226b8a","#54751a":"#175a77","#365b01":"#00405b","#304709":"#083346","#588518":"#186485","#1c2e08":"#07222d","#1a2312":"#192125","#212b15":"#192125","#081f00":"#00151e","#1e3f00":"#002b3e","#072600":"#001b27","#002a00":"#001c28","#394b01":"#02354b","#94a961":"#5a96b0","#4f6300":"#094761","#568200":"#055c81","#0a1b00":"#00131b","#78a724":"#1f7ba2","#466d00":"#004b6b","#16270a":"#061e29","#072b00":"#001f2c","#65773d":"#456c7d","#657a41":"#456c7d","#466218":"#1a4c61","#1a2b09":"#07222d","#4d6702":"#004b6b","#1d4700":"#003045","#5f7a2d":"#28617a","#445d1f":"#1b485c","#1b3400":"#002434","#1f3202":"#022432","#2a3e00":"#002b3d","#455538":"#324a55","#353a31":"#2d373c","#678e24":"#276e8d","#5c880e":"#126386","#739837":"#357a97","#587925":"#26617a","#6a8837":"#34718b","#475c0f":"#12455b","#6b9f24":"#257a9e","#306400":"#034663","#38432d":"#2f3d43","#4d5e2c":"#295466","#425803":"#003e58","#3a5700":"#023d57","#344908":"#06384d","#709134":"#347692","#63842d":"#2f6b85","#487610":"#0f5776","#386802":"#014a69","#274b00":"#00344a","#809643":"#3a7c98","#4a6a04":"#074e6d","#1d3200":"#002433","#042400":"#001823","#1a3702":"#022635","#658720":"#206786","#3e5d12":"#12455b","#1d3b00":"#002a3c","#162c00":"#001e2b","#6c8d36":"#34718b","#62842b":"#2a6b87","#111d06":"#06151c","#0e1d05":"#06151c","#2a3c12":"#13303d","#3d5d09":"#09445e","#5f782d":"#28617a","#56771d":"#1c5c78","#142e00":"#002230","#638330":"#2f6b85","#497112":"#11536f","#315110":"#0f3b4e","#0e1a00":"#00121a","#476011":"#0f4861","#657e34":"#30667d","#4d7013":"#155570","#1a3a00":"#00293b","#254800":"#003248","#3f5a20":"#1b485c","#375305":"#053c54","#243f04":"#042d3e","#6a8a22":"#1f6a8a","#001f00":"#00141d","#5b8815":"#156385","#244109":"#0a2f3f","#214300":"#002f43","#889288":"#70a3b9","#203012":"#0e2732","#5d8911":"#13678b","#386707":"#074c69","#0c2100":"#001721","#3a5d11":"#11455c","#001500":"#000f16","#1a2d16":"#192930","#69910f":"#0e6d96","#123300":"#002231","#0d1b00":"#00121a","#4f6f00":"#014f70","#638a21":"#236a89","#254d00":"#00374e","#234500":"#003146","#123100":"#002231","#162503":"#001a25","#1b3601":"#002535","#759620":"#237598","#87a24f":"#558da5","#3e6a0b":"#0c4e6b","#284d00":"#00364d","#0e2800":"#001d29","#64831e":"#1b6585","#435f0b":"#0a4660","#729336":"#377793","#41680f":"#104d67","#274a00":"#003349","#1f4400":"#002f43","#183d00":"#00293b","#021300":"#000d13","#103503":"#032635","#567d18":"#1a5f7d","#456508":"#084965","#597621":"#1f5972","#48650e":"#0f4962","#436a11":"#0f4f6a","#2d4f02":"#01384f","#233f00":"#002d40","#516722":"#225469","#161e11":"#081920","#263d03":"#042d3e","#54731d":"#1f5a74","#689224":"#237192","#5d8024":"#236480","#4f6b1b":"#185169","#425e00":"#04435e","#1e2a14":"#192125","#436310":"#104a63","#62831f":"#1e6584","#81a530":"#3082a5","#527814":"#125978","#5f7b18":"#185d7a","#050a00":"#00070a","#12190d":"#0e1113","#243f03":"#042d3e","#4e6b16":"#16526c","#698a20":"#1f6a8a","#6a9622":"#207295","#57791d":"#1c5c78","#1f2d08":"#07222d","#16220c":"#081920","#426c0b":"#0a4f6d","#315008":"#08394e","#5a741c":"#1f5972","#6e9422":"#227295","#345504":"#033c55","#010100":"#000101","#1a2c08":"#07222d","#517613":"#125876","#638e1b":"#1c6b8d","#84af3f":"#3f90b3","#83aa41":"#3d87a7","#3c5e02":"#02425d","#171d14":"#192125","#0b1405":"#040f14","#2c4d03":"#02374e","#567818":"#175a77","#688920":"#1f6a8a","#416009":"#07455f","#172b05":"#041f2b","#508017":"#176181","#7aab32":"#2f86ab","#668630":"#2f6c86","#3d5416":"#154154","#2d410e":"#0e3241","#3f5f15":"#15485e","#56851d":"#1e6685","#87c539":"#3b92b8","#7eb42f":"#2f86ab","#72a425":"#257a9f","#4d7211":"#115674","#1d3f01":"#012b3d","#011a00":"#00121a","#3a5e0c":"#0c445c","#243b01":"#012a3b","#4e6c11":"#11516d","#3e6e11":"#0c4e6b","#588d1c":"#1a6b8e","#425e14":"#12475e","#233701":"#002637","#212f01":"#012230","#0e2200":"#001823","#1b2e00":"#001f2d","#273f00":"#012c3f","#4e671c":"#1a4d63","#425b18":"#1b485c","#567b1d":"#1c607d","#5d881e":"#1e6989","#6fa128":"#25799d","#80b431":"#388fb4","#7faf2e":"#2f86ab","#507619":"#185a76","#5b8a16":"#13678b","#619718":"#1a6f94","#376006":"#054560","#223b00":"#00293b","#476010":"#0f4861","#0d1503":"#040f14","#437911":"#115674","#5f8c2a":"#2a6b87","#293f05":"#072d3e","#1e2d03":"#032230","#253c03":"#042d3e","#274103":"#033043","#254401":"#013044","#254700":"#003146","#234800":"#003248","#243c03":"#042d3e","#254100":"#002d41","#2e4704":"#053347","#253e00":"#002c3f","#2b4301":"#013044","#28440a":"#0b3344","#2c420a":"#0b3141","#142900":"#001d29","#203d00":"#002b3d","#325207":"#053c54","#223b02":"#012a3b","#658528":"#276783","#2b4d02":"#01364d","#050800":"#000507","#4d8d16":"#156588","#406211":"#114961","#203600":"#002535","#293a09":"#092e3e","#2a4805":"#053347","#345408":"#083e55","#345407":"#063d55","#395b0b":"#0c435a","#395e0a":"#09445d","#3f630e":"#0f4861","#3e5a14":"#12455b","#253a0a":"#0b2a38","#3b6106":"#054662","#43640a":"#084965","#4b6f11":"#0f516d","#47681c":"#1a5169","#39540c":"#0a4057","#435a11":"#13455a","#4e711a":"#185874","#325608":"#073e56","#2e5206":"#043c54","#294602":"#023246","#284301":"#003044","#527217":"#165875","#325404":"#043d55","#436f15":"#14546f","#669229":"#287191","#173f02":"#002c3f","#2d3d0b":"#0a2e3e","#345608":"#093f56","#436a10":"#0f4f6a","#476e13":"#14546f","#476d15":"#14546f","#446c0e":"#0f516d","#3c5612":"#124155","#394b1e":"#1a3c4a","#3c6002":"#00425f","#517810":"#125978","#5e8418":"#196484","#6f9323":"#227295","#79a423":"#1f7ba2","#495f17":"#1a4c61","#5d7a30":"#31647a","#7cab3c":"#3c88a9","#718b20":"#1f6a8a","#4e6517":"#154e67","#568917":"#1b6889","#1f3900":"#002839","#41640f":"#0e4963","#416311":"#114961","#365a08":"#09425a","#1d231c":"#192125","#1d3105":"#032230","#71a629":"#257a9f","#284d05":"#04374d","#2c4107":"#073143","#36590b":"#09425a","#466d11":"#11536f","#517b17":"#165d7c","#568417":"#1a6383","#507913":"#125978","#49740b":"#0a5575","#3e5a12":"#12455b","#314118":"#143645","#4d6f02":"#014f70","#4c720e":"#115674","#638c1d":"#1c6b8d","#779e29":"#27789b","#779c29":"#27789b","#6e8729":"#2a6c89","#3b540f":"#0f3e52","#4a7004":"#014f70","#223708":"#0b2a38","#0d1207":"#0a0f11","#163100":"#002230","#487212":"#125471","#4a7113":"#14536e","#010401":"#000304","#7fb334":"#388fb4","#678d29":"#2a708e","#1a3a02":"#00293b","#395c0b":"#0c445c","#568117":"#156080","#5c8314":"#156385","#5d8816":"#156385","#4f7909":"#0b5778","#4f790e":"#0c597a","#384619":"#143645","#445e13":"#14485f","#4b7008":"#09506e","#678c1d":"#1c698a","#769c2f":"#2f7b9c","#709228":"#2a7494","#77982f":"#2e7a9a","#617b2c":"#30667d","#284604":"#023246","#3f5e0b":"#0c455e","#315804":"#05405a","#568016":"#156080","#577e18":"#175e7d","#2a470d":"#0b3344","#7dae31":"#2f86ab","#283e08":"#0a2f3f","#344f0b":"#0c394d","#4c7716":"#155976","#5b831c":"#1c6381","#658b20":"#226b8a","#65921b":"#1a6f94","#719824":"#257496","#6b971e":"#207295","#4c6d15":"#14536e","#3a4a1e":"#1a3c4a","#5b7c18":"#185d7b","#648b1b":"#1b698a","#7b9e34":"#327e9e","#5d7925":"#28617a","#384917":"#1a3c4a","#25320b":"#0e2732","#253809":"#0b2a38","#0c1d00":"#00141d","#335606":"#073e56","#45680d":"#0e4c67","#789929":"#27789b","#466911":"#114e68","#557a1a":"#1a5e7b","#659227":"#287393","#182f02":"#032230","#476815":"#15506a","#5d841e":"#1c6585","#769b29":"#27789b","#769f2a":"#27789b","#7ba02f":"#2e7fa2","#89ad37":"#398aad","#719d24":"#25799d","#435a18":"#1b485c","#3e4f21":"#1f4251","#6e961d":"#1f7194","#5e7b1e":"#1b607d","#252e10":"#0e2732","#191d10":"#081920","#0e1704":"#040f14","#171d0b":"#081920","#507510":"#125876","#4c7311":"#115674","#6b9020":"#1f6e90","#476d10":"#11536f","#274a02":"#01344a","#315105":"#043b53","#305605":"#053e56","#14220d":"#081920","#232918":"#192125","#212619":"#192125","#2f430c":"#0b3141","#567e1a":"#1a5f7d","#95bc33":"#3594bd","#90b42d":"#298cb6","#8bad2b":"#2d88af","#80a42b":"#2b82a8","#6a8c23":"#226b8a","#56771b":"#1c5c78","#4c6c16":"#16546e","#355803":"#033d56","#2c4905":"#053347","#538018":"#176181","#031001":"#000c11","#426d09":"#0a4f6d","#3c5f0a":"#09445e","#224501":"#013044","#284c03":"#04374d","#263315":"#0f2b37","#384c18":"#1a3c4a","#80a328":"#2b82a8","#83a822":"#2384ae","#8bb129":"#2d88af","#87ab2c":"#2e85aa","#7a9b2a":"#27789b","#668624":"#276b88","#54741e":"#1f5a74","#45670d":"#0e4c67","#254002":"#012e41","#4f8016":"#146081","#22400a":"#0a2f3f","#3b6705":"#054b69","#4c6b15":"#15506a","#365309":"#083e55","#1c2212":"#192125","#2c3f08":"#092e3e","#38480d":"#0a384c","#718e23":"#256f8f","#7c9e2b":"#2e7fa2","#72932b":"#2b7291","#5c8024":"#246683","#4c6e17":"#16546e","#2b4702":"#013348","#39600d":"#0a4660","#3e6713":"#104c66","#12170e":"#0e1113","#3a5d09":"#09445d","#557723":"#215f7a","#254200":"#002d41","#10130a":"#081013","#384026":"#2d373c","#1c220b":"#081920","#53691a":"#185169","#79982d":"#2e7a9a","#668a29":"#276b88","#567a20":"#215f7a","#395908":"#094159","#253f06":"#042d3e","#4c7a17":"#165d7c","#17220b":"#081920","#4a7012":"#11536f","#031901":"#00121a","#191f08":"#081920","#3f4f15":"#154154","#6a8a2a":"#276c89","#618426":"#236582","#486813":"#114f69","#253904":"#042939","#4e7c18":"#165d7c","#263810":"#0f2b37","#1c1d1c":"#192125","#4d7513":"#155774","#223803":"#052938","#011201":"#000d12","#0f1205":"#040f14","#435718":"#13455a","#688929":"#276c8a","#55761c":"#1c5c78","#2e4407":"#063144","#507d19":"#165d7c","#2e4613":"#103748","#51830f":"#116082","#233b03":"#012a3b","#0f2100":"#001721","#091809":"#06151c","#1a220a":"#081920","#587721":"#1d5d79","#5a7e1d":"#1c6280","#31490a":"#083346","#53821a":"#1a6383","#2c4311":"#0e3241","#507713":"#125978","#5e831a":"#196484","#3b580c":"#0c435a","#233e03":"#042d3e","#1e2c1a":"#192930","#354713":"#143645","#59791f":"#1d5d79","#314a0b":"#0c394d","#55851b":"#1a6383","#25380f":"#0f2b37","#366106":"#044561","#688d22":"#226b8a","#86b02d":"#2d88af","#40640c":"#0d4b66","#335206":"#053c54","#343e34":"#2f3d43","#1b250a":"#081920","#4d6a19":"#18516a","#314b0c":"#0c394d","#55831c":"#1a6383","#1d2b0d":"#07222d","#5a7c1a":"#185d7b","#719823":"#257496","#60871e":"#1c6787","#56801a":"#1a5f7d","#3e660a":"#094a66","#406009":"#07455f","#283917":"#13303d","#040a04":"#05090b","#101607":"#081013","#314b0d":"#0c394d","#38590f":"#0c435a","#53801d":"#1a6383","#11170a":"#081013","#353534":"#2d373c","#3e6c06":"#084f6e","#476f10":"#11536f","#486215":"#14485f","#5f851b":"#1c6585","#60861d":"#1c6585","#4d7712":"#125978","#466c0b":"#0b4d6a","#44670c":"#0c4c67","#1f3902":"#022838","#030a03":"#040708","#192708":"#061e29","#4a7417":"#155976","#476c18":"#18516a","#0b0d09":"#090d0f","#41650b":"#0c4c67","#151f05":"#04161e","#2d430b":"#0b3141","#4f7413":"#155774","#426410":"#0e4963","#466b10":"#0f4f6a","#4c6f14":"#14536e","#243f05":"#042d3e","#1a180f":"#071419","#57492e":"#324a55","#131d0a":"#071419","#57871d":"#1e6685","#22330c":"#0e2732","#314d04":"#02374e","#354a0d":"#0e3a4d","#0b1501":"#000e14","#1f3305":"#042635","#2e4c08":"#08394e","#36570a":"#0a3f56","#466a0d":"#0f4f6a","#324d08":"#09394d","#0b1006":"#090d0f","#433b24":"#2d373c","#213111":"#0e2732","#4f7f18":"#165d7c","#040501":"#000305","#1e1e1d":"#192125","#394b0f":"#0e3a4d","#0b1900":"#001118","#030700":"#000406","#1d3305":"#042635","#203a04":"#022838","#395d07":"#07425b","#3b590b":"#0c435a","#0e1d02":"#00141c","#61472a":"#305261","#62442b":"#305261","#826041":"#3a5c6a","#334919":"#1a3c4a","#365c10":"#11455c","#0a0c08":"#090d0f","#4a710e":"#0c516f","#3b5012":"#113d50","#132400":"#001924","#080c05":"#05090b","#122003":"#011720","#203506":"#042635","#355009":"#05394f","#1f3603":"#042635","#030803":"#040708","#0a2a01":"#001d29","#3b581a":"#154154","#1d2e0c":"#0b2631","#3c570f":"#104359","#1f3104":"#032230","#0a1402":"#000e14","#263a0b":"#0e2f3d","#375409":"#083e55","#284205":"#043043","#040c01":"#00080c","#234104":"#042d3e","#215200":"#003951","#5f6359":"#3a5c6a","#2b4612":"#103748","#060705":"#040708","#3b560e":"#0c3f55","#293a07":"#072836","#031200":"#000c11","#122002":"#011720","#40620b":"#0a4863","#3c5b09":"#07425b","#193203":"#022331","#1c3802":"#002738","#5d7f18":"#1a6180","#3f4539":"#2f3d43","#090d07":"#080e10","#7aa92c":"#2f86ab","#3b590a":"#094057","#283907":"#072836","#0d100c":"#0a0f11","#264005":"#042d3e","#476b0d":"#0e4f6b","#234005":"#042d3e","#152e01":"#001f2d","#203a03":"#022838","#3a3f34":"#2f3d43","#577e17":"#175e7d","#4b6e11":"#0f516d","#2b4207":"#073143","#112200":"#001823","#030a00":"#00070a","#0f1a02":"#00121a","#43670c":"#0c4c67","#3d5f0a":"#09445e","#102601":"#001a25","#53564f":"#324a55","#739e22":"#257a9f","#6a9026":"#277191","#36530e":"#104054","#1c2c03":"#031f2b","#020301":"#020303","#2f4e07":"#08394e","#4a6d0e":"#0f516d","#0e1f01":"#00161f","#567d15":"#165d7c","#6f9424":"#227295","#4b6917":"#18516a","#2b4404":"#043043","#030303":"#020303","#152603":"#001a25","#375809":"#094159","#5b7b16":"#145d7d","#6f942b":"#2b7493","#375908":"#094159","#233703":"#052938","#031000":"#000c11","#0d1d01":"#00141d","#112302":"#021a24","#152902":"#001d29","#020700":"#000608","#405511":"#104359","#5a8b19":"#1a6b8e","#3b540d":"#0c3f55","#0c1c01":"#00131b","#060f01":"#000a0f","#030800":"#000608","#111702":"#000f15","#5c7916":"#155a77","#40600b":"#0c455e","#142801":"#001c28","#0b1a01":"#00131b","#020600":"#000406","#385f0a":"#084660","#283a08":"#072836","#4f6f0e":"#11516d","#041d00":"#00131b","#3f6217":"#15485e","#4a8010":"#0f5c7d","#1e3a07":"#062d3e","#76a62e":"#2e7fa2","#1e2f02":"#032230","#36540c":"#0a3f56","#497015":"#16546e","#699022":"#217092","#6d9425":"#227295","#709a26":"#25799d","#80a52f":"#3082a5","#5f8c1c":"#1d6c8e","#32490f":"#10394a","#40541f":"#1d4150","#78a221":"#1f7ba2","#729227":"#2b7291","#323d18":"#143645","#3c4230":"#2f3d43","#222f07":"#062330","#598013":"#166181","#4f7211":"#115674","#43650f":"#104d67","#568220":"#1e6685","#162a02":"#001d2a","#435f14":"#14485f","#7ea32e":"#3082a5","#7ca52e":"#3082a5","#85a933":"#3185a9","#89b335":"#3b90b4","#75a628":"#257a9f","#45611a":"#1a4c61","#50621c":"#1a4d63","#608212":"#136385","#252d0e":"#0e2732","#162107":"#081920","#33510a":"#0e3c50","#567713":"#125978","#5a8117":"#166181","#698f23":"#237192","#4b7215":"#155774","#395713":"#124155","#4c6b17":"#18516a","#789d2b":"#2e7a9a","#85aa32":"#3185a9","#8cb037":"#3a8caf","#87ab31":"#3185a9","#3e6108":"#0a4761","#2b4502":"#013044","#152105":"#051b24","#283809":"#072836","#263606":"#032635","#0a0f03":"#030d11","#2e4b0a":"#09394d","#2b4a06":"#063347","#46630e":"#104a63","#658b21":"#226b8a","#4d7617":"#185874","#283e0d":"#0c303f","#3d5712":"#104359","#59791d":"#1d5d79","#7fa52e":"#3082a5","#8ab034":"#398aad","#7b9e30":"#327e9e","#3b4b15":"#1a3c4a","#364128":"#2b3f48","#273909":"#072836","#213507":"#052938","#315009":"#09394d","#4b6b0f":"#0f516d","#486e0f":"#11536f","#5d821a":"#1a6180","#476f15":"#14546f","#21350a":"#0b2a38","#496317":"#1a4c61","#618320":"#1e6584","#8aae32":"#2d88af","#88ae38":"#398aad","#314513":"#143645","#1b2607":"#061e29","#395a0d":"#0c435a","#537913":"#125978","#638717":"#136385","#5b7d1b":"#1b607d","#8bb12e":"#2d88af","#557915":"#175a77","#426814":"#124c65","#22370b":"#0b2a38","#4c6819":"#1a5169","#678b24":"#226b8a","#8daf32":"#2d88af","#3b5015":"#113d50","#222b15":"#192125","#3d5e0c":"#0c455e","#6f971b":"#207498","#6a8f21":"#1f6e90","#a3c43c":"#379bc6","#628721":"#226987","#0f1d08":"#06151c","#3e6213":"#114961","#24380c":"#0b2a38","#4b6619":"#1a5169","#6a8a26":"#276c89","#6f8f23":"#256f8f","#161d0d":"#081920","#71991c":"#1f759a","#5f801d":"#1d6280","#81a02a":"#2b82a8","#558513":"#0f6184","#171f0f":"#081920","#385810":"#124155","#324f11":"#0f3b4e","#465f16":"#14485f","#5f7e24":"#236480","#323e13":"#143645","#0c0e0a":"#090d0f","#344b0d":"#0e3a4d","#6b931a":"#1c7195","#67891b":"#1c6888","#5c7d1d":"#1b607d","#6a9423":"#237192","#181c15":"#192125","#2d490e":"#103748","#426617":"#124c65","#395011":"#103d51","#526e1d":"#20566d","#1b2210":"#081920","#263508":"#072836","#5b7b18":"#185d7b","#68881a":"#1c6888","#52711a":"#1c5a74","#5f861a":"#196484","#22350d":"#0e2732","#446a18":"#1b556e","#2d430e":"#0e3241","#4f681c":"#185169","#415213":"#154154","#64861a":"#1b6585","#4d6b1b":"#1a5169","#5e8916":"#13678b","#11190a":"#061319","#3f6316":"#15485e","#385812":"#124155","#3b5114":"#113d50","#202417":"#192125","#3e4333":"#2f3d43","#556f1a":"#18536d","#486016":"#14485f","#0c0f0a":"#090d0f","#334f12":"#133c4d","#507a1a":"#1c5d79","#1f2c0b":"#07222d","#1e2412":"#192125","#30391b":"#13303d","#4f6d15":"#16526c","#353a2f":"#2d373c","#1b2a0a":"#07222d","#4e791b":"#1c5d79","#24360f":"#0f2b37","#1e2b07":"#07222d","#354b0c":"#0e3a4d","#090d05":"#020a0d","#436717":"#124c65","#406617":"#124c65","#1c2114":"#192125","#172703":"#001c28","#5a791b":"#1c5e7a","#7aa12b":"#2e7fa2","#141f08":"#04161e","#4a721b":"#185874","#38452b":"#2b3f48","#162008":"#081920","#3f5f0f":"#0f4861","#7da42d":"#3082a5","#040602":"#010406","#2f441a":"#1a3c4a","#182304":"#021822","#7ba92a":"#2f86ab","#050704":"#040708","#0a0c07":"#090d0f","#517918":"#185a76","#111e01":"#00161f","#427003":"#054f6f","#5b9014":"#146e94","#46710a":"#095271","#3b6709":"#074b68","#578f0f":"#096891","#002900":"#001c28","#6c9f1d":"#1d789f","#447809":"#085677","#4d800b":"#0e5e80","#0f1c00":"#00141c","#4c7a0b":"#0c597a","#133500":"#002636","#487d0a":"#08587a","#5e9617":"#146e94","#284a02":"#01344a","#264400":"#003045","#4d7d10":"#0f5c7d","#223015":"#0e2732","#152e00":"#001f2d","#477413":"#125471","#518514":"#156588","#30520b":"#0a3f56","#081401":"#000e14","#1c2f0b":"#0b2631","#396909":"#074c69","#263816":"#13303d","#131f0c":"#071419","#264e05":"#04374d","#112900":"#001d2a","#001e00":"#00141d","#75b32a":"#2f86ab","#28550b":"#0a3c52","#1e1e1e":"#192125","#4a7f05":"#06597d","#346900":"#014a69","#2e5007":"#08394e","#47790c":"#0b5879","#325d01":"#00425e","#1b2e02":"#001f2d","#315403":"#033b53","#070707":"#040708","#2f4f06":"#08394e","#3a5a0f":"#11455c","#233b02":"#012a3b","#1c2c07":"#07222d","#315306":"#043b53","#34530a":"#093f56","#1c3102":"#022432","#2b4a03":"#00344a","#345508":"#093f56","#2b4805":"#053347","#0f1802":"#001119","#142203":"#051b24","#315206":"#043b53","#38580d":"#0c435a","#264003":"#012e41","#1b2311":"#192125","#708f3c":"#3e7a94","#64911c":"#1d6e91","#0f1b01":"#00141c","#39590f":"#0c435a","#2b4806":"#063347","#192902":"#001d2a","#101a09":"#061319","#48650f":"#0f4962","#294403":"#043043","#223d03":"#042d3e","#25350f":"#0f2b37","#172109":"#081920","#0e110c":"#0a0f11","#121907":"#061319","#4d7b0f":"#0f5c7d","#234100":"#002d40","#182b01":"#011f2c","#070d01":"#00090d","#1e2e0a":"#0b2631","#080d03":"#020a0d","#171d0a":"#081920","#435c19":"#1b485c","#244103":"#012e41","#2d5002":"#01384f","#3a4f24":"#1f4251","#263f09":"#0a2f3f","#213806":"#052938","#1d2c0a":"#07222d","#030602":"#010406","#0b1304":"#030d11","#101b05":"#06151c","#1a2709":"#061e29","#445e1a":"#1b485c","#6b9527":"#287495","#57811d":"#1c6483","#58861e":"#1e6685","#60911f":"#1f6f92","#70a929":"#257a9f","#6c9e2a":"#257a9e","#3a5814":"#124155","#34560a":"#093f56","#30431e":"#1a3c4a","#0e1c08":"#06151c","#141e0a":"#071419","#101707":"#061319","#060903":"#02080b","#192309":"#081920","#3b5516":"#154154","#5f8221":"#226784","#445e15":"#14485f","#243906":"#052938","#213500":"#002535","#172600":"#001a25","#323e0b":"#0b2d3b","#44531d":"#1d4150","#4b6b20":"#1e556c","#5b8c1f":"#1d6c8e","#669c27":"#25779a","#2c410d":"#0e3241","#4e6f27":"#25576d","#476e0e":"#0e5370","#537e18":"#165d7c","#577e1b":"#1a5f7d","#4c6a19":"#18516a","#56781b":"#1c5c78","#52781a":"#1c5d79","#3a5b0f":"#11455c","#294308":"#073143","#1a3500":"#002535","#0f2b00":"#001e2b","#213d02":"#002a3c","#345108":"#05394f","#3b580e":"#0c435a","#455d09":"#09425b","#264100":"#012e41","#153100":"#002230","#30410b":"#0b3141","#3f5715":"#154154","#6a9c2b":"#2c7898","#284206":"#043043","#243c02":"#012a3b","#304c07":"#09394d","#314e09":"#09394d","#233a07":"#052938","#304c08":"#09394d","#214102":"#002d41","#1c3a00":"#00293a","#2c4b07":"#0a374a","#274706":"#033347","#314f06":"#06384d","#4a6c17":"#18516a","#4c6f12":"#14536e","#516f14":"#125471","#4f6d19":"#16526c","#415914":"#13455a","#354913":"#133c4d","#1f3003":"#032230","#2c3d09":"#092e3e","#628b29":"#2a6b87","#5b8424":"#246683","#2d4e04":"#02374e","#4a7311":"#115674","#507e15":"#145d7d","#49720e":"#0e5573","#3a5f09":"#0a4660","#234400":"#013044","#2b4701":"#003146","#436410":"#104a63","#4c7115":"#155570","#5b7f1e":"#1c6280","#557818":"#175a77","#416309":"#084864","#496615":"#15506a","#5a7a26":"#28637c","#597c23":"#21627e","#537524":"#245b73","#49691c":"#1a5169","#52721e":"#1f5a74","#527121":"#21586f","#233708":"#052938","#152802":"#001c28","#52791e":"#1c5d79","#5a8a21":"#206988","#35530b":"#0a3f56","#5a8416":"#186485","#6c941d":"#1c7195","#88ae32":"#2d88af","#82a930":"#3185a9","#547619":"#175a77","#4a6c0d":"#0f516d","#5f861b":"#1c6585","#628821":"#226987","#6a8d22":"#1f6a8a","#577c17":"#175e7d","#44650b":"#0c4c67","#618528":"#2a6b87","#5b8224":"#246683","#597e26":"#28637d","#597a2a":"#2b6178","#5a7729":"#2b6178","#5e7c26":"#28617a","#35500c":"#0e3c50","#274402":"#033043","#5e9621":"#1f6f92","#416714":"#124c65","#375811":"#124155","#1d2a03":"#031f2b","#334509":"#083346","#465d15":"#14485f","#5c7a1d":"#1c5e7a","#4c6e0b":"#0a506e","#52750c":"#0b5778","#6a901c":"#1e6e90","#759c21":"#237598","#6a901f":"#1f6e90","#557c13":"#165d7c","#3d5f08":"#09445e","#52721d":"#1f5a74","#799e2e":"#2e7fa2","#749829":"#2a7595","#628329":"#286681","#5d7c2b":"#28617a","#597726":"#26617a","#4f6e19":"#16526c","#3a5509":"#094057","#274f05":"#04374d","#468413":"#156385","#2c4e07":"#08394e","#322f36":"#2d373c","#244300":"#002f43","#345015":"#153f51","#3a571c":"#1f4251","#1c3900":"#002738","#1c3001":"#002230","#1f3201":"#002332","#416108":"#074762","#6c901a":"#1b6e91","#7fa320":"#1f7ba2","#759d21":"#257a9f","#658e1d":"#1d6d8f","#51790f":"#125978","#395a06":"#07425b","#628422":"#236582","#89b12b":"#2d88af","#759c25":"#27789b","#638827":"#276b88","#557323":"#245b73","#4c6e16":"#16546e","#355107":"#05394f","#244102":"#002d41","#4a8e11":"#156385","#193200":"#002332","#3c403f":"#2f3d43","#264502":"#033347","#254307":"#033043","#264311":"#0e3444","#1b2c0f":"#0b2631","#040409":"#040708","#53730e":"#0a5271","#77981d":"#1a759c","#73971d":"#1f7194","#678d1d":"#1c6b8d","#6c901f":"#1f6e90","#477209":"#095271","#426614":"#124c65","#81a32c":"#2b82a8","#89b028":"#2d88af","#749a28":"#27789b","#6e922b":"#2b7493","#5c7d24":"#236480","#4c6e1c":"#1e556c","#486a15":"#15506a","#284202":"#033043","#264d03":"#04374d","#508217":"#176181","#132a01":"#001e2b","#373e38":"#2f3d43","#1d3301":"#002433","#344b07":"#06384d","#25300b":"#0e2732","#445a19":"#1b485c","#537318":"#165875","#5b7d10":"#115b7b","#3e600b":"#0a4761","#6d8f24":"#256f8f","#91b72d":"#298cb6","#84a929":"#2b82a8","#7fa22b":"#3082a5","#6f9227":"#297494","#56791b":"#1c5c78","#4c7019":"#16546e","#3d600c":"#0a4761","#3e690c":"#0c4e6b","#35560b":"#0a3f56","#2f3427":"#2d373c","#222d18":"#192930","#253018":"#0e2732","#092e00":"#001f2c","#002e00":"#00212f","#0e1d00":"#00141c","#81af29":"#2d88af","#17290b":"#061e29","#607b2e":"#30667d","#465f20":"#224c5e","#2b4411":"#103748","#303b25":"#2d373c","#769b39":"#387d9b","#071a00":"#00121a","#2e5f00":"#01425e","#293f13":"#13303d","#3e5c00":"#00425f","#4a7811":"#0f5979","#3d7002":"#044f6f","#224300":"#002e42","#1f3500":"#002535","#193502":"#022635","#648620":"#206786","#3f5e12":"#12475e","#142107":"#051b24","#112306":"#051b24","#2f4214":"#0e3241","#375508":"#083e55","#5d752c":"#2b6178","#496212":"#0f4962","#647d33":"#30667d","#314d08":"#09394d","#7a982c":"#2e7a9a","#70981d":"#1f759a","#427409":"#065272","#3c6210":"#0f4861","#020b00":"#00070a","#87aa1e":"#2384ae","#153a00":"#002a3c","#4e7001":"#014f70","#578218":"#1a6383","#2c5602":"#023c55","#142303":"#051b24","#0f2e00":"#001e2b","#274802":"#033347","#6d8f1d":"#1e6e90","#719438":"#367895","#41700b":"#0b516f","#294e00":"#00364d","#0f2c00":"#001e2b","#6a8821":"#1f6a8a","#43630b":"#094762","#5f8824":"#236a89","#426b0e":"#0c4e6b","#021400":"#000f15","#133c03":"#002a3c","#668c20":"#226b8a","#54771b":"#1c5c78","#48690d":"#0e4f6b","#082400":"#001924","#62782c":"#28617a","#161f11":"#081920","#324e04":"#02374e","#56771e":"#1c5c78","#679123":"#237192","#222f17":"#192930","#3f5e0e":"#0c455e","#80a42f":"#3082a5","#517813":"#125978","#5e7b17":"#185d7a","#141c0e":"#071419","#0f1f01":"#00161f","#435f12":"#114860","#669320":"#1f7194","#517917":"#185a76","#183502":"#022635","#304f08":"#08394e","#678f1e":"#1e6e90","#122205":"#051b24","#181e15":"#192125","#0c100a":"#0a0f11","#1d3504":"#042635","#264600":"#003146","#5f841a":"#196484","#43670a":"#094b68","#2e3a21":"#13303d","#577f17":"#175e7d","#78a436":"#3b84a4","#719933":"#357c9a","#2f4e02":"#01374e","#040900":"#000609","#050901":"#010608","#1e261a":"#192125","#2d372d":"#2d373c","#4c6f0f":"#0f516d","#2e4e06":"#08394e","#424e30":"#324a55","#273f09":"#0a2f3f","#5b891f":"#206988","#64852a":"#2a6b87","#3f5716":"#154154","#2f4510":"#103748","#56861e":"#1e6685","#86c236":"#3b92b8","#81b630":"#388fb4","#689422":"#207295","#426111":"#114860","#182e01":"#00212f","#182d04":"#041f2b","#273a0b":"#0e2f3d","#3c5412":"#124155","#314a0c":"#0c394d","#537c16":"#165d7c","#6c9c2b":"#2c7898","#47630f":"#0f4962","#233e01":"#002b3d","#111d01":"#00141d","#3a650b":"#0c4d69","#587e1d":"#1c607d","#3d5811":"#104359","#2e3c0a":"#082c3c","#1c2d02":"#001f2d","#0e2201":"#001823","#192b00":"#001e2b","#3d5214":"#154154","#334b0f":"#0e3a4d","#466514":"#124c65","#466812":"#114e68","#4b7012":"#14536e","#517614":"#165875","#426515":"#124c65","#334c0c":"#0c394d","#264303":"#033043","#48671e":"#215165","#345607":"#063d55","#638426":"#276783","#112300":"#001924","#699b27":"#25779a","#486a14":"#15506a","#253507":"#062532","#1e3100":"#002230","#233a01":"#012a3b","#254701":"#013348","#233a04":"#042939","#1d3500":"#002434","#2a4800":"#003349","#324e05":"#06384d","#223902":"#012839","#324f0d":"#0c394d","#2a4201":"#012e41","#344a09":"#09394d","#43680f":"#104d67","#3c6407":"#064864","#496f16":"#16546e","#385c06":"#07425b","#2f4e03":"#01374e","#4f7114":"#155571","#5e8c20":"#216d8e","#48671d":"#1a5169","#1f2e02":"#00202e","#213802":"#012839","#2f4c05":"#04354a","#2f4f05":"#08394e","#365809":"#09425a","#375d09":"#09445d","#3e5815":"#154154","#284008":"#0a2f3f","#436c08":"#0a4f6d","#4e710f":"#115674","#5b8019":"#1a6180","#5b8119":"#1a6180","#4c671d":"#1a5169","#506f20":"#21586f","#5a851b":"#1c6585","#557912":"#125978","#496b0e":"#0e4f6b","#567f1e":"#1c607d","#41660d":"#0c4c67","#416510":"#104c66","#051400":"#000e14","#7ab92e":"#2f86ab","#2d4e08":"#08394e","#1b2900":"#001d2a","#2f4909":"#083346","#40650f":"#104c66","#426712":"#104d67","#42690e":"#0c4d69","#3c5613":"#154154","#3a4d1c":"#1a3c4a","#426803":"#044b6a","#598115":"#166181","#7a9e27":"#27789b","#435913":"#13455a","#517910":"#125978","#254004":"#042d3e","#294802":"#003248","#131e02":"#00151e","#274703":"#033347","#477110":"#125471","#6da427":"#257a9e","#577d21":"#21627e","#133200":"#002231","#2f460b":"#083346","#4d7716":"#155b79","#517e17":"#176181","#4e7614":"#155774","#47710b":"#0b5270","#3d5912":"#12455b","#324217":"#143645","#527502":"#0a5271","#5a8115":"#166181","#709925":"#257496","#7a9f2b":"#2e7fa2","#7b9e2e":"#327e9e","#6a812c":"#2c6a84","#071801":"#001118","#496d0c":"#0a4f6d","#386105":"#054560","#547e15":"#156080","#2d3927":"#2d373c","#3b5c0c":"#0e455c","#77aa2e":"#2f86ab","#173800":"#002637","#3a610c":"#0a4660","#517a14":"#125978","#588115":"#166181","#598514":"#126386","#4c7609":"#0c5878","#4f780e":"#0c5878","#384819":"#1a3c4a","#435d12":"#12475e","#587e0c":"#095d81","#729624":"#257496","#75992e":"#2f7b9c","#638223":"#236582","#5a761d":"#1d5d79","#48631d":"#1c4c61","#426a09":"#0a4c69","#476a0e":"#0e4f6b","#769728":"#2a7595","#456811":"#114e68","#000701":"#000507","#87be38":"#3b92b8","#557620":"#1f5a74","#143300":"#002434","#345a08":"#09425a","#4f7715":"#155b79","#5e871a":"#1c6889","#618b15":"#176a8d","#67901c":"#1b6e91","#5f8b16":"#176a8d","#293712":"#0f2b37","#5d7e17":"#155e7e","#749b23":"#237598","#749431":"#327491","#45591e":"#1b485c","#354419":"#143645","#2e3b19":"#13303d","#0f1d00":"#00141d","#1f2411":"#192125","#5a8213":"#166181","#43690e":"#0e4c67","#62871c":"#1c6787","#213406":"#042635","#3b5316":"#154154","#375012":"#123e51","#23320b":"#0e2732","#131d01":"#00141d","#355a03":"#02405a","#416d11":"#0f516d","#416f0c":"#0b516f","#416f09":"#0a516f","#406e0b":"#0a4f6d","#457113":"#125471","#4f7823":"#215d77","#52782b":"#29637c","#3a630d":"#0f4b65","#3b6606":"#064864","#365f02":"#02425d","#182f09":"#042330","#2f500b":"#08394e","#28470a":"#0a374a","#234807":"#073549","#182606":"#061e29","#405b19":"#1b485c","#324711":"#10394a","#161f08":"#081920","#345a01":"#02405a","#48641f":"#215165","#3d640a":"#0a4863","#447508":"#065272","#558216":"#166181","#5a851d":"#1c6585","#508117":"#176181","#4d8315":"#156385","#3d690e":"#0c4e6b","#466c1c":"#1c556d","#3d6118":"#15485e","#345b04":"#05405a","#3b6203":"#054662","#2f4f08":"#08394e","#070806":"#040708","#030901":"#000609","#455d1e":"#1b485c","#4e6c20":"#21586f","#192206":"#081920","#3d5d0e":"#0e455c","#414f1d":"#1d4150","#406005":"#07455f","#4e7310":"#115674","#699025":"#237192","#658f26":"#287191","#628b24":"#236a89","#548218":"#166181","#426a15":"#114d67","#496d24":"#20576f","#27410c":"#0c303f","#355c03":"#02415c","#274501":"#003045","#61842e":"#2f6b85","#1e2b0a":"#07222d","#243b00":"#002a3c","#32421b":"#1a3c4a","#2b3c00":"#012a3c","#3d4902":"#00344a","#506f11":"#11516d","#5e7f1d":"#1d6280","#6e9126":"#256f8f","#769a2d":"#2e7a9a","#6d8c29":"#2a718f","#648f23":"#226e8e","#416e0c":"#0b516f","#395a15":"#12455b","#1b2c0a":"#07222d","#223a02":"#012839","#2e4012":"#0e3241","#091900":"#00121a","#161d03":"#04161e","#303b02":"#002a3c","#4d660a":"#0b4964","#5c7c1b":"#1b607d","#688c24":"#226b8a","#75922c":"#2a7595","#718a28":"#296e8b","#698e26":"#276e8d","#497612":"#115674","#294708":"#063245","#131a0c":"#071419","#080f04":"#020a0d","#0c1204":"#030d11","#13180a":"#071419","#212e02":"#001f2d","#364503":"#033043","#506b15":"#16526c","#628621":"#206786","#668221":"#1e6685","#708927":"#296e8b","#3e6410":"#104c66","#152505":"#051b24","#0b1005":"#030d11","#1c2704":"#021a25","#2d3c01":"#012a3c","#43590b":"#09425b","#32520a":"#093f56","#121510":"#0e1113","#1c2117":"#192125","#0f1405":"#040f14","#283b02":"#022a3b","#385403":"#043d56","#416308":"#084864","#324b03":"#04354a","#253d03":"#042d3e","#020300":"#000203","#364d02":"#03374d","#374b02":"#02354b","#334b01":"#02354b","#2a4901":"#003349","#0d100b":"#0a0f11","#15190f":"#0e1113","#0f1605":"#040f14","#0b0f03":"#030d11","#070b03":"#02080b","#253101":"#002332","#314300":"#002f43","#354c02":"#02354b","#3f6207":"#074763","#3b5a07":"#07425b","#2b4306":"#073143","#172204":"#021822","#294604":"#023246","#233706":"#052938","#162105":"#04161e","#141904":"#061319","#84653b":"#3a5c6a","#20150e":"#081920","#394e01":"#033950","#385402":"#003b54","#3b5603":"#023d57","#406007":"#07455f","#416509":"#084965","#466d0c":"#0a506e","#466c0e":"#0e4f6b","#43660c":"#0c4c67","#3c5b07":"#07425b","#2b4903":"#013348","#375b07":"#07425b","#588314":"#166181","#4d7213":"#155774","#3a5013":"#113d50","#5f482c":"#305261","#1d2c02":"#001e2b","#2e4203":"#032f42","#344903":"#03354a","#364d04":"#03374d","#374f03":"#033950","#425910":"#104359","#485e19":"#1a4c61","#3d5a06":"#07425b","#3a5905":"#043e57","#386302":"#014663","#223a04":"#042939","#305105":"#043b53","#4c7510":"#115674","#415f13":"#12475e","#354b11":"#133c4d","#483925":"#2d373c","#181e01":"#00141d","#273002":"#00202e","#2c3602":"#002637","#2e3904":"#002839","#313c07":"#082c3c","#2a3702":"#022838","#283802":"#022838","#274106":"#043043","#101c03":"#00141d","#1e3204":"#032230","#243c05":"#042d3e","#233507":"#052938","#120f08":"#081013","#090f01":"#000a0e","#091001":"#000b10","#161c0a":"#071419","#242816":"#192125","#0b0e00":"#00090d","#13180b":"#071419","#1f2317":"#192125","#0e1602":"#020f15","#040b01":"#00070a","#2e4301":"#003044","#2a4400":"#003044","#375d01":"#02425d","#214700":"#003146","#365905":"#05405a","#4c691a":"#1a5169","#314f03":"#02374e","#304508":"#083346","#386501":"#004765","#325507":"#073e56","#34510c":"#0e3c50","#38510c":"#0e3c50","#284503":"#023246","#1f3303":"#022534","#253b00":"#002a3c","#293d0a":"#092e3e","#162802":"#001c28","#142701":"#001b26","#1a2904":"#031f2b","#224602":"#003146","#2b4305":"#073143","#29380b":"#072836","#132900":"#001c28","#132001":"#011720","#263809":"#072836","#1d3600":"#002636","#234600":"#003146","#2e5505":"#053e56","#2d4f03":"#02374e","#2e4502":"#013145","#1f2808":"#061f2a","#213001":"#012230","#314b02":"#04354a","#607f30":"#306880","#233900":"#012839","#2f4f01":"#01374e","#325302":"#013a52","#305200":"#003952","#38530b":"#0a3f56","#273c01":"#002b3d","#171f06":"#04161e","#182600":"#001c28","#3c580a":"#094057","#304806":"#053347","#172500":"#001a25","#364f0f":"#0e3c50","#668237":"#396b81","#1d3300":"#002433","#243300":"#002332","#233500":"#002434","#293b00":"#022a3b","#2e3d11":"#0e3241","#0f1600":"#000f15","#232c03":"#021f2c","#476111":"#0f4861","#55701a":"#18536d","#2d3706":"#072836","#212e04":"#062330","#58781f":"#1d5d79","#52682e":"#295466","#091101":"#000c11","#182901":"#001d29","#233800":"#002637","#2b4501":"#013044","#243603":"#032635","#161f04":"#04161e","#435614":"#13455a","#53661e":"#1a4d63","#3f490f":"#113d50","#364406":"#033043","#273306":"#062532","#6e8c2f":"#30728f","#415424":"#1d4150","#0b1204":"#030d11","#112001":"#001620","#243f01":"#002c3f","#182608":"#061e29","#344511":"#143645","#2f3d08":"#082c3c","#516514":"#154e67","#525d14":"#16485e","#293909":"#072836","#709534":"#347996","#2b3a14":"#13303d","#0e1606":"#040f14","#1a3100":"#002332","#1a3000":"#002231","#0a1304":"#030d11","#36470c":"#0a384c","#587014":"#155672","#748625":"#246683","#2f3803":"#002839","#709433":"#347996","#0f160b":"#081013","#172a01":"#001d29","#040800":"#000609","#566e14":"#10506c","#5f7215":"#155672","#394201":"#012e41","#2a3f09":"#092e3e","#1d2f00":"#00202e","#66872c":"#2b6b86","#202e0e":"#0b2631","#0f1b03":"#00141c","#152903":"#001d29","#314b0b":"#0c394d","#4e6f13":"#155570","#3e5204":"#023a52","#344b0e":"#0e3a4d","#53721f":"#1f5a74","#536d1c":"#18536d","#1a2900":"#001d2a","#597623":"#245b73","#22320c":"#0e2732","#17260a":"#061e29","#415f05":"#07455f","#435e10":"#114860","#4f6e1b":"#16526c","#5c7e28":"#28637c","#69892a":"#276c89","#334305":"#033043","#1c2601":"#001b27","#466619":"#1a4c61","#3c521b":"#1a4050","#405b18":"#1b485c","#668927":"#276b88","#5e8224":"#236480","#6f9732":"#317897","#6e982b":"#2c7898","#628720":"#206786","#495915":"#12455b","#2f3e04":"#002b3e","#4f771f":"#215d77","#334d16":"#133c4d","#47621f":"#1c4c61","#7ba23b":"#3c83a2","#77a43a":"#3b84a4","#648f1c":"#1d6d8f","#658d1d":"#1c6b8d","#49601b":"#1c4c61","#2e2e02":"#001f2c","#3a500b":"#0a384c","#5f8c2c":"#306e88","#021900":"#00121a","#567325":"#245b73","#679021":"#1f6e90","#6a951d":"#1c7195","#5a8314":"#166181","#4c651e":"#215165","#36360e":"#0b2d3b","#2f3c06":"#082c3c","#364b0e":"#0e3a4d","#608b2d":"#306e88","#010b00":"#00080b","#63891f":"#206786","#5e840f":"#126386","#5a7a20":"#1d5d79","#3f511c":"#1d4150","#383e0c":"#0a2d3c","#545517":"#16485e","#4b5a13":"#12455b","#3e5714":"#154154","#567c26":"#26617a","#05150a":"#080e10","#385605":"#063e56","#4f681d":"#185169","#364313":"#143645","#373e06":"#032b3c","#555f17":"#16485e","#5c7123":"#255a71","#3a510b":"#0f3e52","#263507":"#072836","#617e25":"#22627e","#3e6216":"#15485e","#1b2d1f":"#192930","#051500":"#000f16","#405914":"#13455a","#394e0c":"#0a384c","#334801":"#013348","#425808":"#07425c","#5e7321":"#1f5972","#64822b":"#286681","#4f6f14":"#155570","#334709":"#083346","#324212":"#143645","#769c34":"#367d9c","#1b3a01":"#00293b","#2e4f00":"#01384f","#43690d":"#0c4d69","#537521":"#1f5a74","#638327":"#276783","#6d9033":"#347692","#668a33":"#2f6c86","#618420":"#1e6584","#48610d":"#0f4861","#253306":"#062532","#4e691d":"#1e556c","#7ea93a":"#3c88a9","#031900":"#00121a","#4e681e":"#1e556c","#6d912e":"#2f7492","#6e9336":"#367895","#87ab44":"#3d87a7","#8baf41":"#3f90b3","#799c41":"#3d7f9c","#6f9035":"#347692","#62841b":"#1b6585","#3e5108":"#0a3c52","#203101":"#002230","#679124":"#237192","#739c33":"#347d9c","#142705":"#051b24","#54701a":"#18536d","#a4c63d":"#379bc6","#99bb3f":"#3c93b9","#99bd47":"#4399be","#89ad48":"#458caa","#7c973f":"#3a7c98","#718d2d":"#30728f","#526b0e":"#0f4d68","#1f2901":"#001d29","#4a6f15":"#16546e","#7aa731":"#3082a5","#90af2d":"#298cb6","#abcd35":"#379cc8","#8cb32b":"#2d88af","#84ac40":"#3d87a7","#789641":"#417f9a","#748f2f":"#30728f","#5c7614":"#155a77","#2f3a03":"#002839","#7aa73a":"#3b84a4","#517523":"#255c74","#101f0c":"#06151c","#77892d":"#296e8b","#a9c83a":"#379bc6","#779d31":"#327e9f","#77973d":"#3c7993","#6b9029":"#277191","#5a7f13":"#145d7d","#445c06":"#07425c","#5a7c1b":"#1c5e7a","#577821":"#215f7a","#0b0d06":"#090d0f","#263b01":"#002a3c","#a7c347":"#47a3ca","#9bbe3a":"#3895bd","#7da337":"#3a83a3","#729932":"#357c9a","#6e9424":"#227295","#648c19":"#186a8d","#486409":"#0b4964","#192800":"#001c28","#3e5516":"#154154","#62862b":"#2a6b87","#050d00":"#000a0e","#131708":"#071419","#b2cb5f":"#62afd0","#729e36":"#347d9c","#648f24":"#226e8e","#6c9522":"#227295","#618a1b":"#1b698a","#425508":"#063b52","#1a2200":"#001620","#30450f":"#103748","#729831":"#2e7898","#050504":"#040708","#030401":"#000304","#020c01":"#00080c","#324616":"#143645","#a3c250":"#51a0c2","#84a934":"#3185a9","#5a8417":"#186485","#66921f":"#1f7194","#719c21":"#1f759a","#5d7412":"#155672","#323906":"#082c3c","#090f02":"#000a0e","#455f1c":"#1a4c61","#5d8624":"#226784","#112b01":"#001e2b","#041c01":"#00131b","#0c1d01":"#00141d","#061101":"#000d12","#2a4108":"#073143","#597925":"#28637c","#85ab47":"#3d87a7","#659020":"#1d6d8f","#5b7b0f":"#115b7b","#5c7014":"#155672","#536209":"#094761","#333c02":"#032b3c","#1a2101":"#001620","#273807":"#072836","#719a3b":"#387d9b","#527d1f":"#215f7a","#0b1c05":"#06151c","#0d2501":"#001a25","#274d04":"#04374d","#3c5f0c":"#0a4660","#294501":"#003044","#173001":"#002230","#182a02":"#011f2c","#142501":"#001a25","#405f12":"#12475e","#6a9833":"#317897","#548520":"#1e6685","#0d1a0d":"#06151c","#060b07":"#05090b","#0e1c0c":"#06151c","#335304":"#053c54","#436314":"#124961","#496e1a":"#1c556d","#4f761e":"#1c5a74","#588521":"#1e6685","#406c14":"#0f516d","#193900":"#002738","#3a482e":"#2b3f48","#040e05":"#040a0d","#0c1305":"#040f14","#010500":"#000305","#1d2a0a":"#07222d","#121d06":"#061319","#303e18":"#13303d","#253111":"#0e2732","#1b2b13":"#192930","#131705":"#061319","#0e1604":"#040f14","#0d2002":"#001721","#769a42":"#417f9a","#1c3404":"#042635","#3e6507":"#084864","#417504":"#045477","#1b3001":"#002230","#263613":"#0f2b37","#395019":"#194051","#3d5711":"#104359","#0a1c0a":"#06151c","#0f1d01":"#00141d","#729936":"#357c9a","#334d0d":"#0c394d","#102c00":"#001e2b","#51722e":"#2c5e74","#2c4110":"#0e3241","#2f4511":"#103748","#071700":"#001118","#8aa924":"#2d88af","#a0bf44":"#4399be","#071803":"#001118","#182607":"#061e29","#2d4909":"#0a374a","#315c00":"#00425e","#21360a":"#0b2a38","#557320":"#205972","#a7ca2d":"#2a99c9","#b3d33c":"#3ca4d1","#4c6a2d":"#295466","#9cc04f":"#509ec0","#1b2e03":"#042330","#213007":"#062330","#131f06":"#04161e","#42710b":"#0b516f","#386800":"#014a69","#55761f":"#1f5a74","#4a6529":"#275265","#b5d23a":"#3ca4d1","#648826":"#276b88","#325305":"#053c54","#304704":"#053347","#151e04":"#04161e","#101905":"#061319","#1e3903":"#022838","#335b03":"#02415c","#0b2203":"#011923","#547a2a":"#29637c","#a4c82e":"#2a99c9","#4b6915":"#15506a","#8cad2e":"#2d88af","#b4d340":"#3fa3ce","#567d2b":"#29637c","#789c30":"#2e7a9a","#324907":"#04354a","#263902":"#012738","#111704":"#061319","#1a3003":"#042330","#508408":"#096085","#193002":"#022331","#2d4b13":"#10394a","#486c21":"#20576f","#9bbe35":"#3895bd","#90b23a":"#3e91b4","#597c2c":"#28637c","#b0ce37":"#3ca4d1","#b9d949":"#53b0d8","#7ea746":"#4485a1","#acd040":"#41a4cf","#314a07":"#04354a","#2d4504":"#053347","#243705":"#052938","#0f1604":"#040f14","#121d05":"#061319","#213708":"#0b2a38","#446619":"#1a4c61","#183600":"#002637","#314e13":"#143e50","#122801":"#001c28","#2a4f0b":"#0a3c52","#558127":"#28637d","#a7ca36":"#379cc8","#5a7f21":"#21627e","#325506":"#073e56","#325604":"#043d55","#385906":"#07425b","#293f03":"#012c3f","#142104":"#051b24","#142302":"#001924","#2a4903":"#003349","#345503":"#033c55","#1a2602":"#021a25","#2c4b03":"#01364d","#355203":"#023b54","#304b04":"#04354a","#1b2f03":"#042330","#233c02":"#012a3b","#315304":"#043b53","#436005":"#04435e","#3f5c06":"#05425c","#355204":"#043950","#223f02":"#002c3f","#060a01":"#00070a","#152108":"#051b24","#3a5306":"#063d54","#3a5505":"#053e56","#4d6a09":"#0a506e","#4d6908":"#074e6d","#446107":"#074661","#335403":"#023b54","#2e5400":"#003b55","#162f03":"#032230","#101d05":"#06151c","#0a1003":"#030d11","#101e06":"#06151c","#262600":"#001b27","#446108":"#074661","#36520d":"#0e3c50","#516c1d":"#20566d","#445e0f":"#114860","#365104":"#043950","#304c03":"#04354a","#224500":"#003045","#2d5800":"#003d57","#2e5600":"#003b55","#244d01":"#01374e","#264c00":"#00364d","#162b02":"#001e2b","#365c0c":"#0c445c","#345b0d":"#0c445c","#274b08":"#09364a","#455e1e":"#1b485c","#29380e":"#0f2b37","#2f5002":"#013951","#264d00":"#00364d","#2d5802":"#023d57","#3a620e":"#0f4861","#406a10":"#104c66","#3f6a0f":"#0c4e6b","#3f6910":"#104c66","#345e05":"#05435d","#345f05":"#054560","#112a02":"#001d2a","#355a0d":"#0c445c","#38600e":"#0c445c","#305b07":"#05405a","#1a250c":"#081920","#35481c":"#1a3c4a","#4a6525":"#255265","#496423":"#215165","#4f652b":"#295466","#2d4315":"#103748","#1f310c":"#0b2631","#151f09":"#081920","#040703":"#040708","#10130f":"#0e1113","#233610":"#0f2b37","#344f17":"#153f51","#2a3c11":"#13303d","#22340e":"#0e2732","#2b3e12":"#13303d","#45592a":"#324a55","#5f8132":"#306880","#5c7d2b":"#28637c","#5b7e29":"#28637c","#3d581e":"#1b485c","#111f09":"#06151c","#1c231a":"#192125","#071601":"#000f16","#2c4b08":"#0a374a","#273a09":"#072836","#253609":"#0b2a38","#1c2908":"#07222d","#141e06":"#04161e","#2f4316":"#143645","#4e6c21":"#21586f","#65892e":"#2f6c86","#3d561f":"#1f4251","#0c1a07":"#06151c","#010a00":"#00070a","#3a660c":"#0c4d69","#557c10":"#115d7d","#45660b":"#094b68","#293d0b":"#0c303f","#1f2e0a":"#0b2631","#293a11":"#13303d","#63862e":"#2f6c86","#3c561e":"#1f4251","#0c1709":"#0a0f11","#447413":"#115674","#7fa632":"#3082a5","#67841f":"#1e6685","#516b0d":"#0f4d68","#3e560d":"#0c3f55","#2d420c":"#0b3141","#1e2c09":"#07222d","#182107":"#081920","#516d2b":"#25576d","#2d4c0a":"#08394e","#0a1300":"#000e14","#719f28":"#257a9f","#7fa430":"#3082a5","#71922f":"#327491","#6a822d":"#2c6a84","#5a7121":"#1f5972","#3c5210":"#0f3e52","#23330a":"#0e2732","#192507":"#061e29","#4b6228":"#275265","#35530a":"#083e55","#0f2f00":"#001e2b","#5d8d17":"#176a8d","#5a7f20":"#21627e","#65872f":"#2f6c86","#648828":"#276b88","#668528":"#276783","#496117":"#1a4c61","#3b4f12":"#113d50","#24320c":"#0e2732","#2a3a13":"#13303d","#1a2610":"#10232b","#2f4b0b":"#09394d","#5d7632":"#326277","#5a7f1f":"#21627e","#567b1b":"#1a5e7b","#577d1b":"#1a5f7d","#678530":"#2f6b85","#536d1f":"#20566d","#324311":"#143645","#121a05":"#061319","#2c4211":"#0e3241","#587131":"#2c5e74","#456316":"#14485f","#4e6c1f":"#1e556c","#4f701a":"#1c5a74","#547b19":"#195e7b","#5b7c24":"#28637c","#445a1b":"#1b485c","#29370e":"#0f2b37","#202b0a":"#061f2a","#474747":"#324a55","#242d14":"#0e2732","#93ad53":"#5798b4","#7f973b":"#3a7c98","#557026":"#255a71","#3b5512":"#124155","#3b5217":"#194051","#445f16":"#14485f","#384e16":"#153f51","#3f521e":"#1d4150","#54702a":"#2c5e74","#577227":"#255a71","#425a17":"#13455a","#676767":"#456c7d","#4b4b4b":"#324a55","#24330b":"#0e2732","#b5d861":"#62afd0","#9bba4a":"#4d9bbd","#83a336":"#3a83a3","#4c6d14":"#14536e","#426114":"#124961","#395112":"#123e51","#2b3c0f":"#0e2f3d","#0d1304":"#040f14","#020201":"#000102","#1b2509":"#081920","#050506":"#040708","#3d4c19":"#1a3c4a","#96ba3e":"#3c93b9","#659019":"#176c91","#649017":"#176c91","#649016":"#146a8f","#436112":"#124961","#425f17":"#15485e","#3f5916":"#13455a","#172a04":"#041f2b","#263b0e":"#0e2f3d","#1d2d04":"#07222d","#578113":"#156080","#53731f":"#1f5a74","#4a6916":"#15506a","#5c7f22":"#236480","#5e8222":"#226784","#52731d":"#1f5a74","#4b691b":"#1a5169","#4a681b":"#1a5169","#233b0a":"#0b2a38","#152c03":"#041f2b","#486618":"#1a5169","#4a611e":"#1c4c61","#3f5914":"#13455a","#4d6d1b":"#1e556c","#4f6e1f":"#21586f","#51682a":"#295466","#486024":"#224c5e","#3c5614":"#154154","#547617":"#175a77","#4a6615":"#15506a","#283909":"#072836","#172208":"#081920","#2d371e":"#13303d","#162505":"#051b24","#1f3405":"#042635","#3b5614":"#124155","#3a5312":"#124155","#56761f":"#1f5a74","#4e6d15":"#16526c","#30430b":"#0b3141","#0f1904":"#061319","#172806":"#061e29","#3f6e05":"#065070","#0d1502":"#020f15","#0d1402":"#040f14","#1e3302":"#022534","#113002":"#002230","#375c07":"#07425b","#52721c":"#1c5a74","#34490c":"#0c394d","#29370f":"#0f2b37","#0e1a05":"#06151c","#0e1906":"#06151c","#222b0a":"#061f2a","#2b3f0d":"#0c3040","#253f05":"#042d3e","#2e4306":"#063144","#161f05":"#04161e","#162203":"#021822","#304017":"#143645","#070900":"#000609","#1e2c05":"#07222d","#3e5315":"#154154","#263704":"#032635","#131e04":"#011720","#060800":"#000609","#2b4103":"#012e41","#34490f":"#0e3a4d","#304805":"#053347","#273905":"#032a3b","#121c03":"#00141d","#233302":"#002332","#2f4702":"#013247","#34490d":"#0e3a4d","#314706":"#083346","#1e2219":"#192125","#15180e":"#0e1113","#1b1d1a":"#192125","#1a2507":"#021a25","#283b05":"#032a3b","#304707":"#083346","#314904":"#04354a","#172b06":"#061e29","#2f4f0d":"#0f3b4e","#537e17":"#165d7c","#4b7315":"#155976","#1b2a07":"#07222d","#030501":"#000305","#10110d":"#0e1113","#2c361a":"#13303d","#1b2606":"#021a25","#161e05":"#04161e","#121904":"#061319","#232c15":"#0e2732","#374d12":"#133c4d","#39500c":"#0e3c50","#0e1309":"#0a0f11","#324c0e":"#0c394d","#629519":"#1a6f94","#5b8e11":"#13678b","#050701":"#000507","#415a10":"#104359","#587618":"#185b78","#5a7819":"#185b78","#4b6812":"#15506a","#527115":"#155571","#4f6a16":"#16526c","#28330d":"#0e2732","#2d3a12":"#13303d","#273106":"#062532","#0b0f02":"#030d11","#0d1501":"#000f15","#233505":"#052938","#25390a":"#0b2a38","#64971c":"#1a6f94","#345908":"#09425a","#020502":"#010406","#111903":"#061319","#60801b":"#1d6280","#66851d":"#1e6685","#527116":"#155571","#739124":"#257496","#597f1c":"#1c6381","#4e6e16":"#155570","#466412":"#124c65","#3d5a0e":"#0e455c","#31470a":"#083346","#3b560c":"#0c3f55","#253804":"#042939","#1c3702":"#002738","#090e01":"#000a0e","#2b4809":"#0a374a","#040f00":"#000a0f","#354f0b":"#0e3c50","#446210":"#104a63","#456a10":"#0f4f6a","#4d7215":"#155774","#3e5b0f":"#0f445b","#3e5e0a":"#09445e","#3f5909":"#094058","#2f5003":"#033a52","#37550e":"#104054","#141e02":"#00151e","#233506":"#052938","#324d06":"#06384d","#3a5c07":"#07425b","#365404":"#053c54","#021401":"#000f15","#4d7515":"#155774","#44700c":"#0b516f","#1d2d01":"#00202e","#34352d":"#2d373c","#0e1300":"#000d13","#233902":"#012839","#5a7a11":"#115b7b","#486509":"#0b4964","#466507":"#094762","#294806":"#063245","#3b680a":"#0a4d6a","#233d05":"#042d3e","#2a3f03":"#012e41","#4b7115":"#14536e","#2a4b02":"#01354c","#162701":"#001c28","#354c00":"#02354b","#426e05":"#054f6f","#537523":"#245b73","#2f5405":"#043c54","#1a3300":"#002332","#050f01":"#000a0f","#171f01":"#00141d","#0a0f04":"#030d11","#2a3b00":"#022a3b","#151a06":"#071419","#21290b":"#061f2a","#415317":"#154154","#708e29":"#29708f","#6d8f2b":"#2a718f","#567b22":"#215f7a","#446312":"#124961","#1b2e01":"#001f2d","#365210":"#104054","#598222":"#246683","#1d201a":"#192125","#284b03":"#04374d","#0d1800":"#001118","#0f1306":"#040f14","#1b210b":"#081920","#627b25":"#22627e","#638728":"#2a6b87","#52741d":"#1f5a74","#2b4407":"#073143","#273a0a":"#0e2f3d","#5f8c22":"#216d8e","#162900":"#001d29","#1f211c":"#192125","#0d1301":"#020d12","#0b0d05":"#020a0d","#4b631e":"#1c4c61","#5e7d22":"#22627e","#425e12":"#12475e","#1d2a06":"#07222d","#608c21":"#216d8e","#212719":"#192125","#294704":"#023246","#091201":"#000c11","#20270c":"#061f2a","#131a09":"#071419","#425718":"#13455a","#182505":"#021a25","#5d8a20":"#206988","#252f17":"#0e2732","#32510c":"#0e3c50","#1d3503":"#042635","#1d290e":"#07222d","#1d250c":"#081920","#1f290c":"#07222d","#496518":"#1a5169","#172105":"#04161e","#5b851f":"#1e6685","#293619":"#13303d","#507122":"#21586f","#274404":"#033043","#1f3803":"#022838","#171e0f":"#081920","#070d00":"#00090d","#19210a":"#081920","#354712":"#143645","#101b03":"#00141d","#567d1d":"#1c607d","#293519":"#13303d","#264402":"#033043","#274605":"#033347","#1c3503":"#022635","#0a1301":"#000e14","#13190b":"#071419","#172902":"#001d29","#1a3c01":"#00293b","#1d270c":"#07222d","#1e2d09":"#07222d","#53781d":"#1c5c78","#1d2810":"#192125","#294b04":"#04374d","#172c02":"#011f2c","#192d02":"#011f2c","#274702":"#033347","#355d18":"#11455c","#121c07":"#061319","#4a701c":"#1e556c","#1c2112":"#192125","#294a06":"#04374d","#254204":"#033043","#1f3207":"#0b2631","#3b5a0d":"#0c435a","#596448":"#3a5c6a","#0f1901":"#001119","#4f6e21":"#21586f","#223f03":"#042d3e","#305306":"#043b53","#122301":"#001823","#2e3f1c":"#13303d","#5a7a16":"#185b78","#1e3107":"#0b2631","#080d01":"#00090d","#57712a":"#2c5e74","#487010":"#11536f","#749b25":"#27789b","#678d20":"#226b8a","#4c7512":"#115674","#41650f":"#0e4963","#3a5912":"#12455b","#2d4b08":"#08394e","#355908":"#09425a","#1e3604":"#042635","#081500":"#000e14","#6b8043":"#456c7d","#040d01":"#000a0e","#4c5a33":"#324a55","#395c09":"#09445d","#4b6a14":"#15506a","#4a6e15":"#16546e","#3b5b11":"#12455b","#2c460b":"#0b3344","#101f02":"#021720","#304b12":"#10394a","#395c0f":"#11455c","#324c07":"#06384d","#213700":"#002738","#060d02":"#02080b","#191f13":"#192125","#324f06":"#06384d","#456412":"#124c65","#34520d":"#0e3c50","#33500f":"#0e3c50","#284009":"#0a2f3f","#192a05":"#031f2b","#182706":"#061e29","#21370b":"#0b2a38","#355a09":"#09425a","#32530c":"#0a3f56","#223f06":"#042d3e","#192c00":"#001f2d","#151d0c":"#071419","#3b5d0d":"#0e455c","#3b5110":"#0f3e52","#192f03":"#042330","#060a02":"#02080b","#0f130a":"#0a0f11","#0d1407":"#040f14","#2e5008":"#08394e","#375e08":"#09445d","#233b00":"#012a3b","#0d2700":"#001d29","#141c0f":"#071419","#47700e":"#0e5370","#395010":"#103d51","#172a00":"#001d29","#0b1901":"#001118","#11140e":"#0e1113","#182907":"#061e29","#385b0a":"#0c445c","#5d7d28":"#28617a","#3b521b":"#1a4050","#2c3f12":"#13303d","#0f1a0e":"#0e1113","#192d05":"#031f2b","#081900":"#00121a","#0c1a00":"#00121a","#42660b":"#0c4c67","#3a590b":"#0c435a","#314809":"#083346","#080c06":"#05090b","#597e19":"#1a5f7d","#527614":"#165875","#3d5a0a":"#094058","#060b04":"#05090b","#759c29":"#27789b","#527417":"#165875","#2d4708":"#063347","#060d01":"#000a0e","#0b1007":"#090d0f","#131e06":"#04161e","#648a1e":"#1b698a","#6b9126":"#277191","#466515":"#124c65","#233802":"#012839","#070d02":"#020a0d","#47650d":"#0b4964","#688c26":"#276e8d","#476a0f":"#0e4f6b","#1e2e03":"#032230","#080a05":"#05090b","#151c0e":"#071419","#4b6a13":"#15506a","#59821a":"#1c6381","#547c15":"#165d7c","#0a1c01":"#00131b","#1d1f1d":"#192125","#668a1e":"#1c6888","#395707":"#063e56","#030802":"#000608","#050d01":"#000a0e","#446a10":"#0f4f6a","#517417":"#165875","#43620c":"#0e4963","#1c3004":"#042330","#0a0f08":"#090d0f","#345006":"#05394f","#5d8b1a":"#1c6889","#4d7012":"#155570","#1d4102":"#002e42","#040704":"#040708","#0e120e":"#0e1113","#294509":"#0b3344","#5b8d19":"#1a6b8e","#4b6b10":"#0f516d","#264306":"#033043","#050505":"#040708","#142405":"#051b24","#437211":"#115674","#4c7012":"#14536e","#435f0e":"#114860","#273608":"#072836","#2e5407":"#053e56","#1f3804":"#022838","#2b4b07":"#0a374a","#487912":"#0f5979","#49730c":"#0e5573","#51710e":"#125471","#264301":"#002e42","#182c00":"#011f2c","#161c11":"#081920","#5b820f":"#126386","#4c7613":"#155976","#497c0a":"#08587a","#3a6c01":"#004d6e","#416b05":"#064b69","#3f6008":"#09445e","#325905":"#05405a","#436b0e":"#0f516d","#476f0c":"#0b5270","#2d5a02":"#04405a","#244401":"#013044","#193501":"#022635","#051800":"#001017","#040c00":"#00080c","#091103":"#030d11","#517118":"#155571","#1d2b0a":"#07222d","#34500b":"#0e3c50","#587c1a":"#1a5f7d","#7ca22b":"#2e7fa2","#8fb439":"#3e91b4","#7ea730":"#3082a5","#37480f":"#103443","#2e371f":"#13303d","#3b4927":"#233f4b","#1c3200":"#002231","#354808":"#053549","#37411a":"#143645","#2e3e09":"#0a2e3e","#5d8514":"#156385","#567e16":"#175e7d","#497011":"#11536f","#0b1203":"#030d11","#496915":"#15506a","#192508":"#061e29","#3f5d0f":"#0f445b","#5c801b":"#1c6280","#78a02c":"#2e7fa2","#344a13":"#133c4d","#1b1e14":"#192125","#2d3924":"#2d373c","#101702":"#020f15","#0f1705":"#040f14","#496817":"#18516a","#456311":"#104a63","#5b7f1c":"#1c6280","#84a82a":"#2b82a8","#283a0c":"#0e2f3d","#1e2514":"#192125","#0c1202":"#030d11","#4d6b10":"#0f516d","#0f1706":"#061319","#466315":"#124961","#436211":"#124961","#597c1b":"#1a5f7d","#53681c":"#185169","#31352b":"#2d373c","#070b00":"#00080c","#0e1307":"#081013","#425d16":"#15485e","#21320b":"#0b2631","#3d5a0f":"#0f445b","#30371f":"#13303d","#3c530e":"#0f3e52","#0f120c":"#0a0f11","#3c5313":"#154154","#2f460e":"#103748","#2b4408":"#073143","#4e6d16":"#16526c","#202614":"#192125","#0b1002":"#030d11","#577416":"#175a77","#28390c":"#0e2f3d","#466415":"#124c65","#3d5a10":"#104359","#040701":"#000507","#43610f":"#114860","#5f8018":"#1a6180","#131d04":"#00141d","#263c09":"#0a2f3f","#5c8514":"#156385","#638519":"#1b6585","#070902":"#010608","#48631a":"#1a4c61","#162605":"#061e29","#162405":"#051b24","#1e2d04":"#07222d","#5c8214":"#166181","#648418":"#1b6585","#060805":"#040708","#293a0f":"#0e2f3d","#24380a":"#0b2a38","#12160c":"#0e1113","#172402":"#001823","#587a15":"#185d7b","#608218":"#196484","#101606":"#040f14","#40531b":"#1d4150","#181f0f":"#081920","#0a1001":"#000c11","#60841a":"#196484","#507012":"#125471","#3e501b":"#1a4050","#2c351f":"#13303d","#0f1505":"#040f14","#658b1e":"#1c6b8d","#567417":"#175a77","#4a6314":"#0f4962","#151d08":"#071419","#171e0e":"#081920","#507315":"#155774","#698c20":"#1f6a8a","#1b2902":"#001d2a","#7a9e2d":"#2e7fa2","#719b20":"#1f759a","#242e10":"#0e2732","#151a0e":"#071419","#2b3e0c":"#0c3040","#62861d":"#1c6787","#31450a":"#083346","#172803":"#061e29","#57771a":"#1c5c78","#7ba22c":"#2e7fa2","#0b1202":"#030d11","#0a0e04":"#020a0d","#446611":"#114d67","#3c5a14":"#12455b","#21310c":"#0e2732","#29410b":"#0c303f","#779a2a":"#27789b","#4e7410":"#115674","#152504":"#051b24","#2c4a0a":"#0a374a","#293a15":"#13303d","#253613":"#0f2b37","#587a1e":"#1d5d79","#7fa13c":"#3a83a3","#1c2017":"#192125","#3a521f":"#1f4251","#20320e":"#0e2732","#365111":"#123e51","#6a8d28":"#276e8d","#192a08":"#061e29","#324f0f":"#0f3b4e","#223313":"#0e2732","#1e2f0c":"#0b2631","#4b6816":"#15506a","#080b07":"#05090b","#1f3408":"#0b2733","#354c1f":"#1a3c4a","#222e17":"#192930","#2c3b16":"#13303d","#1b1f16":"#192125","#080f02":"#020a0d","#29450a":"#0b3344","#17220d":"#081920","#0a1006":"#080e10","#0f1708":"#061319","#050804":"#040708","#0e110d":"#0a0f11","#090c08":"#090d0f","#050702":"#010608","#030801":"#000608","#141b0c":"#071419","#070a05":"#05090b","#274004":"#012c3f","#568b10":"#156588","#336100":"#004461","#283f0d":"#0c303f","#081005":"#080e10","#1b2d02":"#001f2d","#5f9515":"#146e94","#1d4100":"#002e42","#2c5207":"#053c54","#508a09":"#086187","#497d09":"#08587a","#092300":"#001924","#070805":"#040708","#2f5c04":"#04405a","#092600":"#001b27","#3e7406":"#045274","#69a916":"#0e7cab","#2f4c0a":"#09394d","#1a1d16":"#192125","#355b04":"#03415b","#0d1d02":"#00141d","#3a6505":"#064864","#64a317":"#1176a1","#396a06":"#074c69","#363c31":"#2d373c","#021d00":"#00141d","#0a1a00":"#00121a","#3b620b":"#0a4660","#468008":"#06597d","#0d1f02":"#01151e","#051701":"#001017","#183300":"#002434","#18270b":"#061e29","#080e04":"#020a0d","#0e130b":"#0a0f11","#1c2217":"#192125","#40591a":"#1b485c","#070904":"#02080b","#47651c":"#1c4c61","#0d1404":"#040f14","#020401":"#000304","#55821e":"#1c6483","#1a3101":"#022331","#101809":"#061319","#48641d":"#1c4c61","#405b1c":"#1b485c","#3b5418":"#154154","#121a04":"#061319","#0b1d00":"#00151e","#060a05":"#05090b","#0b0e06":"#090d0f","#1e280f":"#07222d","#304213":"#0e3241","#1d3800":"#002839","#2c4c07":"#08394e","#1a2905":"#031f2b","#142008":"#051b24","#393c32":"#2d373c","#465a26":"#224c5e","#3b4c20":"#233f4b","#35441d":"#1a3c4a","#243211":"#0e2732","#18250d":"#081920","#1d2a15":"#192125","#070b07":"#05090b","#203906":"#052938","#648e25":"#226e8e","#8dbf39":"#3b92b8","#608c20":"#216d8e","#527b1c":"#1c5d79","#466b13":"#114f69","#527320":"#1f5a74","#5a7b26":"#28637c","#547c22":"#215f7a","#507f19":"#176181","#44661d":"#1a4c61","#090b06":"#05090b","#3d4f22":"#1f4251","#3a4b24":"#233f4b","#263319":"#0f2b37","#0f1a0b":"#06151c","#071804":"#001118","#5d871f":"#206988","#6d962a":"#297494","#233604":"#052938","#213200":"#002332","#142300":"#001924","#1f2c07":"#07222d","#313c09":"#082c3c","#1e3309":"#0b2733","#243f07":"#042d3e","#374814":"#143645","#446418":"#1a4c61","#628e27":"#226e8e","#152a02":"#001e2b","#395710":"#124155","#608723":"#226987","#608623":"#226784","#37540d":"#104054","#1c3600":"#002535","#2d4804":"#053347","#36530a":"#083e55","#405c0c":"#0c455e","#425a09":"#07425c","#294406":"#043043","#293b0b":"#092e3e","#29370d":"#0f2b37","#162401":"#001a25","#66912c":"#2a708e","#4d701e":"#21586f","#3d630f":"#0f4861","#476e15":"#14546f","#5e871e":"#1e6989","#5c7f1d":"#1c6280","#507019":"#155571","#1a3902":"#002738","#3c5c0b":"#0e455c","#51741c":"#1c5a74","#4d6e10":"#0f516d","#4c6c1d":"#1e556c","#425d15":"#15485e","#4d6a1b":"#1a5169","#415c19":"#1b485c","#152600":"#001a25","#4e741d":"#1c5a74","#5f9224":"#227193","#43670d":"#0e4c67","#446710":"#104d67","#324e09":"#09394d","#224301":"#013044","#41610e":"#0e4963","#537717":"#175a77","#496911":"#114f69","#3b5a06":"#07425b","#4f6b1d":"#1e556c","#5d8026":"#236480","#5b7f25":"#246683","#4f7322":"#205b74","#507422":"#205b74","#587828":"#2b6178","#597627":"#2b6178","#5b7923":"#28617a","#2d4508":"#063144","#274100":"#002e42","#467517":"#155976","#47701a":"#1b556e","#1e300c":"#0b2631","#395c0c":"#0c445c","#40660b":"#094a66","#40650e":"#0d4b66","#2f5106":"#043b53","#254400":"#003146","#335007":"#06384d","#5b7e18":"#1a6180","#5d8720":"#206988","#698b26":"#276c8a","#63871e":"#206786","#507513":"#125876","#3e5e0b":"#0c455e","#64882a":"#2a6b87","#6d9229":"#297494","#658929":"#276b88","#5c7d2a":"#28637c","#5c7b2b":"#28617a","#5a7825":"#28637c","#506f1a":"#18536d","#3f5b0c":"#0f445b","#1e3f01":"#002b3e","#2f6407":"#034663","#497b15":"#165d7c","#1b2c0b":"#07222d","#63911b":"#1d6e91","#61881a":"#1c6787","#617d24":"#22627e","#5c7526":"#255a71","#3b5511":"#124155","#4b6d0c":"#0c516f","#527612":"#125876","#698f1c":"#1e6e90","#719821":"#207498","#678e1e":"#1e6e90","#527912":"#125978","#486416":"#1a4c61","#769a2a":"#27789b","#81a929":"#2b82a8","#6c9126":"#277191","#5e7d29":"#28617a","#567324":"#245b73","#4f7219":"#185874","#405d0d":"#0c455e","#203001":"#002230","#326907":"#054865","#4b7a17":"#165d7c","#1c2b0c":"#07222d","#3c5a0c":"#0e455c","#32440b":"#083346","#405310":"#0d3d52","#33480d":"#0c394d","#2f410b":"#0b3141","#3d5111":"#113d50","#3c5606":"#073f57","#4e700d":"#0a506e","#749a1e":"#1f759a","#7ca321":"#1f7ba2","#749a21":"#237598","#668f1e":"#1d6d8f","#567d11":"#115d7d","#385d05":"#05435d","#50721c":"#1c5a74","#83ab27":"#2b82a8","#729728":"#257496","#5e8125":"#236480","#4e701c":"#1c5a74","#4b7019":"#16546e","#3b610d":"#0f4861","#18210c":"#081920","#193100":"#002231","#173100":"#002231","#0b1c00":"#00131b","#081400":"#000e14","#284106":"#043043","#5b7b10":"#115b7b","#6c891a":"#1c698a","#587316":"#155672","#486213":"#0f4962","#537c0d":"#0c5d80","#42640e":"#0e4963","#6f8f26":"#256f8f","#92b82c":"#298cb6","#82a728":"#2b82a8","#80a32b":"#2b82a8","#749629":"#2a7595","#5f821f":"#1e6584","#507219":"#185874","#496c15":"#15506a","#2c4804":"#053347","#304b10":"#10394a","#3b5d11":"#11455c","#2f5204":"#043b53","#152d00":"#001f2d","#0f2700":"#001c28","#1c2714":"#192125","#081207":"#080e10","#263906":"#042939","#2c3b0b":"#0a2e3e","#27330b":"#0e2732","#2f3c14":"#13303d","#1d290a":"#07222d","#2b3a08":"#092e3e","#3e610b":"#0a4761","#496f15":"#16546e","#98be34":"#3594bd","#90b52d":"#298cb6","#8cae2b":"#2d88af","#83a62b":"#2b82a8","#759628":"#2a7595","#60811f":"#1d6280","#53731b":"#1f5a74","#44660f":"#104d67","#203401":"#002535","#34520c":"#0e3c50","#4d7a16":"#155b79","#264a01":"#003349","#395f07":"#084660","#314a17":"#1a3c4a","#253e13":"#13303d","#112006":"#021720","#191c17":"#192125","#030704":"#040708","#395b0f":"#11455c","#8db02f":"#2d88af","#85a726":"#2b82a8","#88ae25":"#2d88af","#89ad2d":"#2d88af","#80a22b":"#2b82a8","#729229":"#2b7291","#618024":"#236480","#4d701a":"#185874","#334f08":"#06384d","#182801":"#001c28","#476f14":"#14546f","#41581f":"#1b485c","#326900":"#014a69","#39432f":"#2f3d43","#1a2d00":"#001f2d","#536d15":"#18536d","#4f7010":"#125471","#82a031":"#327b9a","#040700":"#000507","#8fb32f":"#328fb7","#437509":"#065272","#16290b":"#061e29","#071d00":"#00151e","#92b424":"#298cb6","#132700":"#001b26","#4e6e00":"#014f70","#0e2600":"#001a25","#0e2500":"#001a25","#2e4708":"#083346","#264802":"#033347","#6e901d":"#1f7194","#1c3402":"#002434","#0c1805":"#040f14","#0f190a":"#061319","#102d00":"#001e2b","#6f8d24":"#256f8f","#2c4112":"#0e3241","#19220c":"#081920","#11170c":"#0e1113","#123a03":"#032635","#688e21":"#1f6e90","#5a7721":"#1d5d79","#324a11":"#10394a","#283513":"#0f2b37","#092500":"#001924","#657c2e":"#30667d","#57771f":"#1c5c78","#446002":"#04435e","#516b28":"#25576d","#212d16":"#192930","#446410":"#104a63","#071001":"#000b10","#0a1900":"#00121a","#1d2615":"#192125","#689421":"#207295","#57791e":"#1c5c78","#4d6514":"#154e67","#343d26":"#2d373c","#1e2e04":"#032230","#476c10":"#0e4f6b","#719b26":"#25799d","#709825":"#257496","#83ab40":"#3d87a7","#79a137":"#387f9e","#345702":"#003d57","#203d05":"#042d3e","#5b791b":"#1c5e7a","#60831d":"#1e6584","#385807":"#073f57","#516e26":"#25576d","#598616":"#186485","#6a9426":"#257395","#608227":"#236582","#465b1e":"#1b485c","#23350a":"#0b2a38","#1d3005":"#032230","#375a10":"#11455c","#629424":"#227193","#8cc93a":"#459abf","#7aad2b":"#2f86ab","#628f1c":"#1d6d8f","#35520b":"#0e3c50","#203318":"#192930","#58791a":"#185d7b","#567619":"#175a77","#476610":"#114e68","#476320":"#215165","#253313":"#0e2732","#52761f":"#1f5a74","#79a734":"#3082a5","#3e5c11":"#0f445b","#223304":"#062330","#172700":"#001c28","#0f2800":"#001d29","#324a07":"#04354a","#50691f":"#20566d","#5a831c":"#1c6585","#528017":"#176181","#467113":"#125471","#3e5e0f":"#0e455c","#203404":"#042635","#0e1b00":"#00141c","#263b0c":"#0e2f3d","#32530d":"#0e3c50","#436111":"#114860","#51721a":"#1c5a74","#3c571f":"#1f4251","#25380c":"#0b2a38","#608d1f":"#216d8e","#537819":"#175a77","#2f440d":"#0b3141","#1c2c01":"#001e2b","#2b4a04":"#053347","#2c4e03":"#02374e","#2c5102":"#033a52","#284e02":"#02364d","#254302":"#033043","#213602":"#002535","#1e3401":"#002434","#2a4603":"#023246","#2f4806":"#053347","#2d4905":"#053347","#42630d":"#0e4963","#527818":"#185a76","#4f741b":"#1c5a74","#4a7610":"#0f5776","#4a740f":"#115674","#39560d":"#0a4057","#2c4909":"#0a374a","#5a821b":"#1c6381","#2c4d02":"#01364d","#182805":"#061e29","#6a9228":"#277191","#548421":"#1e6685","#193201":"#002332","#243504":"#032635","#34520a":"#083e55","#3a600c":"#0a4660","#3e610e":"#0f4861","#3d610d":"#0f4861","#3e640d":"#0d4b66","#40640d":"#0d4b66","#426115":"#124961","#324912":"#10394a","#2d4a07":"#063347","#3f6307":"#084864","#45660c":"#0e4c67","#3a590c":"#0c435a","#355210":"#104054","#34510b":"#0e3c50","#293e01":"#002b3e","#334c0d":"#0c394d","#2b470a":"#0a374a","#163101":"#002230","#193402":"#022635","#2b4908":"#0a374a","#294608":"#063245","#527913":"#125978","#2d4c03":"#02374e","#111c07":"#06151c","#5e8d21":"#216d8e","#37570b":"#0a4057","#466f11":"#11536f","#4f7a16":"#155b79","#4f7818":"#185a76","#456d0e":"#0f516d","#3d5a11":"#12455b","#394c19":"#1a3c4a","#3b570e":"#0c3f55","#486f06":"#074e6d","#577e13":"#156080","#64881d":"#1c6888","#749d22":"#257a9f","#5a7b1a":"#1c5e7a","#4a6322":"#215165","#668d31":"#2d718e","#6e9027":"#29708f","#557218":"#18536d","#416a0e":"#0c4e6b","#36540d":"#104054","#33510b":"#0e3c50","#274506":"#043043","#4d7212":"#115674","#2b4704":"#053347","#273f0a":"#0a2f3f","#7ca932":"#2f86ab","#345811":"#104054","#193600":"#002637","#487211":"#125471","#557e15":"#156080","#5a8517":"#186485","#527e11":"#115d7d","#4f7c0b":"#0c597a","#4d6b18":"#16526c","#3c4d22":"#233f4b","#456008":"#074661","#557b09":"#095d81","#5f8819":"#1c6889","#739b26":"#27789b","#789f29":"#27789b","#7a9a2b":"#2e7a9a","#536c1b":"#18536d","#46670e":"#0e4c67","#1c3103":"#022432","#162700":"#001c28","#1c2901":"#001c28","#385314":"#153f51","#587918":"#185d7b","#1f3a04":"#022838","#4b7010":"#0f516d","#3e6409":"#0a4863","#030301":"#020303","#577c21":"#21627e","#4e6e1a":"#16526c","#243f02":"#002c3f","#4a7312":"#115674","#5b831b":"#1c6381","#5f8a17":"#176a8d","#668e1a":"#186a8d","#5f8814":"#13678b","#57810e":"#0f6184","#586a2e":"#305261","#526625":"#225469","#55780d":"#0b5778","#608516":"#196484","#72982a":"#2a789a","#73962a":"#2a7595","#7a9c2e":"#2e7a9a","#759235":"#377793","#3c5812":"#12455b","#030e01":"#000a0e","#2c3528":"#2d373c","#213b04":"#042939","#597e18":"#175e7d","#304f0a":"#09394d","#517715":"#165875","#3d6309":"#0a4863","#6a9227":"#277191","#315308":"#073e56","#4b7113":"#14536e","#698f22":"#1f6e90","#6f9726":"#257496","#6f9825":"#257496","#73992a":"#2a789a","#628e1e":"#1d6d8f","#5a7c1e":"#1c5e7a","#435125":"#233f4b","#587520":"#205972","#779b2f":"#2e7a9a","#739430":"#327491","#607d27":"#28617a","#476114":"#14485f","#425d14":"#12475e","#45650d":"#0e4c67","#41690a":"#0a4c69","#588017":"#166181","#567f17":"#175e7d","#0e120b":"#0a0f11","#36510f":"#0e3c50","#213a04":"#052938","#7da22e":"#3082a5","#7da62e":"#3082a5","#84a932":"#3185a9","#8bb137":"#3a8caf","#6ca027":"#257a9e","#47611e":"#1c4c61","#4d5c2b":"#275265","#6c9022":"#256f8f","#6d8f21":"#256f8f","#4d601f":"#1c4c61","#313a1f":"#13303d","#252b17":"#192125","#456e09":"#0a506e","#4c7010":"#0f516d","#739526":"#257496","#40670a":"#094a66","#0c1206":"#030d11","#4f6f18":"#155570","#2c3f0f":"#0e3241","#507216":"#155571","#698e23":"#237192","#82a72d":"#2b82a8","#8eb23a":"#3a8caf","#97b93e":"#3c93b9","#3b570c":"#0c3f55","#3f600e":"#0f4861","#6a853a":"#3f7187","#5a692c":"#25576d","#6a8719":"#1c698a","#313e12":"#0e3241","#0a1200":"#000d12","#35401d":"#143645","#638d15":"#146a8f","#486f0f":"#11536f","#688c1f":"#1f6a8a","#243c04":"#042d3e","#2d3e0d":"#0c3040","#496419":"#1c4c61","#151d03":"#04161e","#162102":"#001721","#051d00":"#00131b","#31440d":"#0b3141","#5b811d":"#1c6381","#213309":"#0b2631","#0f1701":"#001017","#2b4507":"#063245","#213d00":"#002a3c","#4f6f19":"#155570","#4e7316":"#155774","#070c01":"#00080c","#212912":"#192125","#345303":"#023b54","#1d3107":"#07222d","#152104":"#04161e","#070b01":"#02080b","#0f1603":"#020f15","#192a01":"#001d2a","#233601":"#002637","#353b02":"#032b3c","#5a831b":"#1c6585","#2a3e09":"#092e3e","#446218":"#1a4c61","#1f2415":"#192125","#0d1804":"#001118","#171c02":"#00141d","#344304":"#033043","#3f550b":"#0b3e54","#607f1c":"#1c617e","#3f5710":"#104359","#1a2606":"#021a25","#0b0c08":"#090d0f","#141b03":"#00131b","#263705":"#032635","#3c530c":"#0c3f55","#4d7411":"#115674","#406a09":"#084c69","#687f21":"#1e6685","#647c20":"#22627e","#33480e":"#10394a","#212f0a":"#0b2631","#0d1104":"#030d11","#1e1d1c":"#192125","#203105":"#032230","#304e06":"#08394e","#3e670a":"#094a66","#506812":"#154e67","#546c16":"#18536d","#59711b":"#1f5972","#637720":"#22627e","#415615":"#154154","#152205":"#051b24","#131809":"#071419","#030b00":"#00080c","#294106":"#043043","#445d0f":"#114860","#4f6716":"#154e67","#394e0e":"#0e3c50","#5d7920":"#1d5d79","#628321":"#236582","#30470d":"#10394a","#101903":"#061319","#0d1206":"#040f14","#203203":"#032230","#213504":"#042635","#314a0a":"#09394d","#4c6f16":"#16546e","#50681a":"#185169","#4a5d15":"#12455b","#28370b":"#072836","#141f04":"#04161e","#1b240d":"#081920","#030300":"#000304","#48691d":"#1a5169","#0e1607":"#040f14","#060902":"#010608","#172504":"#021a25","#223705":"#052938","#273e06":"#042d3e","#577022":"#205972","#5a7123":"#255a71","#485f18":"#1a4c61","#394e0f":"#103d51","#263c0a":"#0a2f3f","#031e01":"#00161f","#698d2d":"#2d718e","#0b0e08":"#090d0f","#0c0f09":"#090d0f","#182903":"#041f2b","#253411":"#0f2b37","#2c3b15":"#13303d","#324515":"#143645","#2b3e0a":"#092e3e","#192e01":"#001f2d","#051200":"#000d12","#658a2a":"#276b88","#1c3108":"#0b2631","#0e110a":"#0a0f11","#0e1900":"#001119","#193006":"#042330","#567d21":"#21627e","#193107":"#042330","#648f2d":"#2a708e","#7ba63b":"#3b84a4","#87b13e":"#3e90b3","#082403":"#001924","#86ae38":"#398aad","#173509":"#062836","#87b13c":"#3e90b3","#0d2600":"#001a25","#7ba638":"#3a83a3","#0a1701":"#001017","#6f9c2e":"#2e7898","#0f1c01":"#00141c","#3b5c0e":"#0e455c","#061104":"#020c10","#556333":"#305261","#648029":"#286681","#091202":"#000c11","#101a04":"#061319","#2a3f00":"#002b3e","#324e00":"#01364d","#1d2e01":"#00202e","#2f4d04":"#02374e","#395f03":"#034460","#537e14":"#145d7d","#3b6208":"#084661","#396008":"#084660","#385c07":"#07425b","#1c2118":"#192125","#476418":"#1a4c61","#254109":"#0a2f3f","#304708":"#083346","#305103":"#033a52","#2f4103":"#032f42","#243900":"#002738","#3a5e05":"#03435e","#406408":"#084864","#3a6208":"#084661","#385e07":"#084660","#325206":"#053c54","#305006":"#08394e","#243b03":"#042939","#203602":"#002535","#3c4811":"#103443","#486719":"#1a5169","#0f1e02":"#00161f","#1b3005":"#042330","#34510a":"#0e3c50","#2a4601":"#003146","#152200":"#001823","#273400":"#002636","#2a2700":"#001c28","#1e2b01":"#001e2b","#283f04":"#012c3f","#2d4503":"#013145","#3b6105":"#054662","#385f07":"#084660","#375e06":"#05435d","#305706":"#053e56","#2d5404":"#043c54","#325406":"#053c54","#2e4b08":"#08394e","#2d4a05":"#053347","#253e04":"#042d3e","#203305":"#042635","#5b7328":"#255a71","#416414":"#124c65","#0b1e02":"#01151e","#111f03":"#021720","#31560a":"#0a3f56","#436613":"#124c65","#182000":"#001721","#222c0c":"#061f2a","#1a2601":"#001a25","#2b4a02":"#00344a","#2d4e01":"#01384f","#305805":"#053e56","#355e07":"#05435d","#2c4506":"#063245","#1f3403":"#022534","#243707":"#052938","#3e5412":"#154154","#2c3f0d":"#0c3040","#1f2e0b":"#0b2631","#435515":"#13455a","#628d27":"#226e8e","#0e2503":"#021a24","#060607":"#040708","#0e1805":"#040f14","#30500a":"#08394e","#3a640c":"#0f4b65","#264803":"#033347","#252f11":"#0e2732","#151f01":"#00161f","#263a03":"#032a3b","#324f02":"#02374e","#3a5b04":"#04425c","#335600":"#003b55","#2f4804":"#053347","#273b04":"#032a3b","#26350a":"#072836","#203104":"#032230","#1e2f05":"#032230","#486115":"#14485f","#496316":"#1a4c61","#1a2809":"#061e29","#3b5713":"#124155","#263515":"#0f2b37","#6b8b2d":"#2d718e","#46720f":"#0e5573","#040304":"#020303","#101a06":"#061319","#34580d":"#0a3f56","#588e14":"#13678b","#244503":"#013044","#0b0f01":"#000b10","#070606":"#040708","#0e1501":"#020f15","#213202":"#012230","#335004":"#02374e","#395804":"#023d57","#314903":"#04354a","#202d01":"#001f2d","#152001":"#001721","#273d04":"#032a3b","#25350a":"#0b2a38","#162202":"#021822","#3d5210":"#0f3e52","#526e18":"#18536d","#2a3607":"#072836","#5c821d":"#1c6381","#0f2506":"#051b24","#548312":"#116082","#476c0e":"#0e4f6b","#5c8e18":"#1a6b8e","#376309":"#074864","#386805":"#054b69","#070f01":"#000a0f","#101901":"#001119","#2c4603":"#013145","#395904":"#023d57","#395a04":"#04425c","#253802":"#012738","#172201":"#001823","#192501":"#001a25","#192602":"#021a25","#1b2309":"#081920","#39480b":"#0a384c","#526c1a":"#18536d","#4a5617":"#12455b","#1e2701":"#001b27","#31400c":"#0b3141","#799d35":"#377f9e","#060e01":"#000a0e","#335a09":"#09425a","#162604":"#051b24","#0c1600":"#000f15","#171b10":"#071419","#0a0d05":"#020a0d","#121c01":"#00141d","#314d03":"#02374e","#385704":"#043d56","#2c4403":"#013044","#213301":"#002332","#1c2b04":"#031f2b","#243010":"#0e2732","#445b19":"#1b485c","#425017":"#143d4e","#323f03":"#012c3f","#3d480f":"#103443","#3e5210":"#0f3e52","#7ea53c":"#3a83a3","#030403":"#020303","#070903":"#02080b","#080c00":"#00090d","#182301":"#001823","#243702":"#012738","#365503":"#033c55","#355209":"#083e55","#283e03":"#022b3c","#253a03":"#042939","#263408":"#062532","#2b3d03":"#012a3c","#718b2a":"#296e8b","#4f5912":"#11465d","#273a00":"#002839","#749a36":"#367d9c","#121b00":"#00131b","#151e00":"#00151e","#1e2e01":"#00202e","#202d07":"#07222d","#2c3c09":"#092e3e","#6c8520":"#1e6685","#646f14":"#155672","#2b3501":"#002636","#628228":"#286681","#23310e":"#0e2732","#5d791d":"#1c5e7a","#485b09":"#09425b","#394b06":"#06364b","#4a6218":"#1c4c61","#2f430b":"#0b3141","#233e06":"#042d3e","#425f0c":"#0c455e","#2f4400":"#003045","#3a4f09":"#07394f","#547027":"#245b73","#618124":"#236582","#354b09":"#06384d","#233306":"#062330","#1f3f00":"#002b3e","#405b06":"#05425c","#597920":"#1d5d79","#618729":"#2a6b87","#608424":"#226784","#5d761f":"#1d5d79","#212300":"#001620","#293805":"#072836","#6c932e":"#2d7695","#6e912f":"#30728f","#678e2c":"#2a708e","#6d9632":"#317897","#6b9424":"#257395","#39400d":"#103443","#3a4e05":"#07394f","#445e1e":"#1b485c","#87b23c":"#3e90b3","#7ca840":"#3c88a9","#608b19":"#176a8d","#67901b":"#1b6e91","#445d1d":"#1b485c","#4e550f":"#104156","#314001":"#002d41","#374819":"#1a3c4a","#7fad2c":"#2f86ab","#6f9b20":"#1f759a","#608a13":"#13678b","#527124":"#245b73","#363e0d":"#0b2d3b","#575318":"#16485e","#50610e":"#11465d","#253900":"#002738","#324d0f":"#0f3b4e","#77a519":"#1f7ba2","#688f16":"#176c91","#4c6326":"#275265","#303909":"#082c3c","#4b4e12":"#143d4e","#59661f":"#1e4e62","#374c05":"#05394f","#3c510a":"#0a3c52","#4e7309":"#0a5271","#6c9420":"#227295","#475e1e":"#1c4c61","#47510a":"#0d3d52","#607425":"#28617a","#557119":"#18536d","#253500":"#002637","#57701d":"#205972","#425e15":"#15485e","#3c520e":"#0f3e52","#334900":"#003349","#4c650c":"#0b4964","#647e2b":"#286681","#608228":"#286681","#4b680e":"#0e4f6b","#202a00":"#001d29","#587422":"#205972","#1a1e1b":"#192125","#1a2919":"#192125","#1a3900":"#002738","#436a06":"#064b69","#52771f":"#1f5a74","#6a8d31":"#2d718e","#729539":"#377793","#688d36":"#34718b","#61801f":"#22627e","#4e660f":"#0f4d68","#4b6818":"#18516a","#1a3403":"#022635","#739035":"#377793","#769c35":"#367d9c","#7e9f43":"#4485a1","#92b645":"#4796b8","#80a33c":"#3a83a3","#73923b":"#3c7993","#6b8b28":"#276e8d","#445e05":"#04435e","#2b3500":"#002636","#5f891b":"#1c6889","#020b03":"#040a0d","#8fb03a":"#3a8caf","#a7c642":"#41a0c9","#95b83d":"#3b93b9","#95b949":"#4998ba","#7fa045":"#4685a0","#768e34":"#35748f","#5e7617":"#165a77","#313e00":"#002c3f","#213a09":"#0b2a38","#7aa93a":"#3c88a9","#a0bd38":"#3895bd","#a6ca33":"#379cc8","#87ac2b":"#2d88af","#7ea741":"#3c88a9","#728d39":"#34718b","#6c8822":"#1f6a8a","#4d630b":"#0b4964","#182700":"#001c28","#406207":"#084864","#577823":"#215f7a","#55641b":"#1a4d63","#aac83c":"#41a0c9","#94bb2e":"#328fb7","#779e32":"#327e9f","#76953b":"#3c7993","#6a9124":"#237192","#537a0e":"#115d7d","#3a4f02":"#033950","#0c1c00":"#00131b","#83a144":"#4485a1","#1d3506":"#062836","#728c2c":"#296e8b","#adce45":"#41a4cf","#83a937":"#3989ac","#729934":"#357c9a","#6c9523":"#227295","#648b18":"#186a8d","#4b630b":"#0b4964","#0f1a00":"#00121a","#6e8637":"#386f87","#434c26":"#233f4b","#b5d554":"#53b0d8","#81ac32":"#3185a9","#67932e":"#2f7492","#679020":"#1f6e90","#668d1e":"#1c6b8d","#43580a":"#09425b","#141800":"#001017","#405518":"#154154","#719439":"#367895","#010701":"#000507","#a2c051":"#51a0c2","#598416":"#186485","#6b9720":"#207295","#6c901d":"#1e6e90","#455109":"#063b52","#0f0f00":"#000c11","#334715":"#143645","#709738":"#367895","#1a3002":"#022331","#5e7d2a":"#28617a","#98c055":"#559dbc","#77a629":"#2e7fa2","#5f8011":"#0f5e80","#5c6e13":"#155672","#4c5706":"#013c56","#262900":"#001c28","#161f00":"#001721","#4e6c1b":"#1e556c","#7ead47":"#3d8db0","#102e00":"#001f2c","#375e07":"#05435d","#39520f":"#103d51","#405b11":"#0f445b","#263e01":"#012c3f","#132402":"#001924","#436612":"#124c65","#78a741":"#4185a2","#5a8829":"#2d6983","#1d251c":"#192125","#000601":"#000406","#103008":"#032635","#123f01":"#002c3f","#376000":"#004461","#557a20":"#215f7a","#577d22":"#21627e","#66922a":"#287191","#618e26":"#226e8e","#376209":"#084661","#081906":"#00121a","#2f3330":"#2d373c","#020703":"#040708","#0d1610":"#0e1113","#0e1d10":"#06151c","#0d1c0f":"#06151c","#1e2818":"#192125","#040502":"#010406","#1c201c":"#192125","#171d18":"#192125","#274201":"#002e42","#435c25":"#224c5e","#162809":"#061e29","#192b04":"#031f2b","#191d14":"#192125","#646607":"#0c5574","#415912":"#13455a","#5a8511":"#126386","#263511":"#0f2b37","#152a00":"#001e2b","#080808":"#05090b","#081300":"#000d13","#394b1b":"#1a3c4a","#2b420c":"#0c3040","#071600":"#000f16","#648127":"#286681","#99bf4d":"#509ec0","#264601":"#003146","#4d7926":"#27627b","#7aa22e":"#2e7fa2","#304f05":"#08394e","#324322":"#1a3c4a","#67913b":"#3c7892","#a4c844":"#47a3ca","#739618":"#1f7194","#445c24":"#224c5e","#050e00":"#000a0f","#739e46":"#4a849d","#a5cc3d":"#41a0c9","#769b13":"#14759e","#1d3400":"#002434","#aed13b":"#3ca4d1","#8fb327":"#298cb6","#759b3b":"#387d9b","#93b948":"#4896b8","#314b03":"#04354a","#2d4808":"#063347","#274a03":"#01344a","#50700c":"#0a5271","#426210":"#114961","#344c0e":"#0e3a4d","#3f5813":"#104359","#425f14":"#12475e","#325a04":"#05405a","#516f1f":"#21586f","#314c09":"#09394d","#293f07":"#072d3e","#3e5317":"#154154","#496219":"#1c4c61","#293b0a":"#092e3e","#2a5002":"#003951","#324d09":"#09394d","#283e06":"#072d3e","#334411":"#143645","#223008":"#062330","#1d2a05":"#07222d","#223505":"#052938","#030603":"#010406","#0e170c":"#0e1113","#2c4806":"#063347","#567016":"#18536d","#3e5715":"#154154","#506c24":"#25576d","#50701a":"#1c5a74","#46640f":"#104a63","#43561c":"#1b485c","#252c13":"#0e2732","#1f3b07":"#062d3e","#2b420e":"#0e3241","#243a08":"#052938","#314907":"#04354a","#3f590a":"#094058","#607f17":"#155e7e","#3e540e":"#0c3f55","#151a0a":"#071419","#306002":"#01425e","#446b0a":"#0a4c69","#1f350c":"#0b2733","#4f6c13":"#11516d","#5b7714":"#155a77","#263208":"#062532","#0b0c07":"#090d0f","#151e13":"#192125","#38690c":"#0c4d69","#679514":"#176c91","#3a5e00":"#004360","#274000":"#002d40","#142007":"#051b24","#23330d":"#0e2732","#627f18":"#1c617e","#334309":"#063143","#090a07":"#05090b","#5d901e":"#1d6c8e","#82a832":"#3185a9","#557114":"#125471","#465f11":"#124961","#354114":"#143645","#28330e":"#0e2732","#638314":"#136385","#2f3f09":"#0a2e3e","#385010":"#103d51","#88b036":"#398aad","#5b7b1a":"#1c5e7a","#577427":"#245b73","#45542d":"#324a55","#587714":"#185b78","#2b3717":"#13303d","#2c452a":"#2b3f48","#5d8a17":"#176a8d","#6b9821":"#207295","#466718":"#1a5169","#38580a":"#0a4057","#202d05":"#07222d","#0b1502":"#000e14","#395f0b":"#0a4660","#486a11":"#114f69","#517512":"#125876","#4e6e17":"#16526c","#45661b":"#1a4c61","#3f6113":"#114961","#203006":"#062330","#2f4b0f":"#10394a","#517522":"#215d77","#476715":"#15506a","#37580c":"#0a4057","#1c2e04":"#042330","#0f160e":"#0e1113","#93ac53":"#4c93b1","#7a9536":"#3a7c98","#738d4a":"#49798d","#40631a":"#1a4c61","#476a15":"#15506a","#456211":"#104a63","#283d0b":"#0c303f","#1f330d":"#0b2733","#a6c55b":"#5da6c6","#93b146":"#4c93b1","#6e8a2b":"#2a6c89","#4a6e1e":"#1e556c","#0e1b01":"#00141c","#080900":"#000609","#122307":"#051b24","#8eb140":"#3e91b4","#84a933":"#3185a9","#658533":"#2f6b85","#466a1d":"#1c556d","#284905":"#033347","#142a00":"#001e2b","#1a2718":"#192125","#142707":"#051b24","#679024":"#237192","#689123":"#237192","#698d2f":"#2d718e","#4c7318":"#185874","#345c08":"#09425a","#051702":"#021016","#1d350a":"#0b2733","#67833f":"#3f7187","#688f29":"#2a708e","#68951a":"#1c7195","#567e19":"#1a5f7d","#081605":"#021016","#1d2f06":"#07222d","#1c3603":"#022635","#071901":"#001118","#4d7e09":"#0c597a","#061502":"#000f16","#2f4810":"#10394a","#293b0f":"#0e2f3d","#101a03":"#061319","#274203":"#033043","#143500":"#002636","#0d1b07":"#06151c","#172807":"#061e29","#122905":"#051b24","#374e0e":"#0e3a4d","#101509":"#081013","#141a0a":"#071419","#141b11":"#0e1113","#1c2f0e":"#0b2631","#304e10":"#0f3b4e","#122201":"#001823","#587629":"#2b6178","#121810":"#0e1113","#1c2e0e":"#0b2631","#315013":"#143e50","#364d1e":"#1a3c4a","#0f150d":"#0e1113","#1d320a":"#0b2733","#26430d":"#0e3444","#304618":"#1a3c4a","#244402":"#013044","#070f02":"#000a0f","#223312":"#0e2732","#264805":"#033347","#30471a":"#1a3c4a","#040404":"#020303","#060606":"#040708","#161e12":"#081920","#244107":"#0a2f3f","#294c06":"#04374d","#171d08":"#04161e","#0f1500":"#000f15","#0d1200":"#000d12","#0f1400":"#000d13","#121802":"#001017","#101600":"#000f15","#0b1102":"#030d11","#303e23":"#2b3f48","#415f1f":"#224f62","#090e02":"#020a0d","#406910":"#104c66","#243b06":"#042939","#020901":"#000609","#2c3516":"#13303d","#557116":"#18536d","#384b0a":"#0a384c","#2c3d05":"#072d3e","#222902":"#001d29","#0c1300":"#000e14","#0e1700":"#001017","#0c1f00":"#00161f","#131f04":"#011720","#679f1d":"#207ca4","#3b600d":"#0f4861","#020602":"#010406","#1d250a":"#081920","#3a4910":"#103443","#65841d":"#1b6585","#172503":"#001a25","#42710a":"#0a516f","#203603":"#022838","#2f440c":"#0b3141","#5b7a18":"#185b78","#040407":"#040708","#3f6803":"#024968","#42630b":"#0e4963","#080c01":"#00090d","#354d0d":"#0e3a4d","#41630f":"#0e4963","#090c07":"#090d0f","#679115":"#176c91","#1c3605":"#062836","#0c0e08":"#090d0f","#080f00":"#000b10","#486e0b":"#0a4f6d","#112402":"#021a24","#538916":"#156588","#61901e":"#1f6f92","#659422":"#227193","#629021":"#226e8e","#5a8219":"#1a6180","#547f18":"#166181","#578519":"#1a6383","#5d901b":"#1d6c8e","#62931f":"#1f6f92","#4c790c":"#0c597a","#41680a":"#0a4c69","#496d0b":"#0a4f6d","#304112":"#0e3241","#4e7312":"#115674","#1c3500":"#002434","#44720f":"#115674","#588216":"#166181","#578217":"#166181","#5a8719":"#186485","#58861b":"#1c6585","#51781b":"#1c5d79","#4e7518":"#185874","#4c7715":"#155976","#48720f":"#0e5573","#3f6b06":"#064b69","#3c6406":"#064864","#3f650c":"#0d4b66","#0d1905":"#06151c","#839b4c":"#4685a0","#1f3606":"#042635","#050a01":"#00070a","#283b01":"#022a3b","#284100":"#002d41","#406d08":"#0a4f6d","#4f790c":"#0b5778","#69951d":"#1c7195","#385e09":"#09445d","#385f06":"#054560","#365a07":"#09425a","#3f620e":"#0f4861"} },
+    // Void Demon (owner 2026-07-14): demon reds -> void greys/black
+    1002: { base: 35, map: {"#3c0706":"#080808","#380706":"#080808","#330704":"#080808","#200604":"#080808","#180504":"#080808","#190402":"#080808","#370402":"#080808","#640603":"#080808","#9c170d":"#191919","#c42211":"#2f2f2f","#e2501b":"#434343","#cc3f14":"#353535","#be2e0c":"#2a2a2a","#ad2109":"#202020","#ab1003":"#1c1c1c","#a71205":"#1b1b1b","#900d06":"#101010","#8a0903":"#0b0b0b","#790a03":"#080808","#800b04":"#080808","#7d0903":"#080808","#af0b04":"#1e1e1e","#920a05":"#101010","#880a05":"#0b0b0b","#2c0604":"#080808","#170402":"#080808","#320502":"#080808","#a71207":"#1c1c1c","#300805":"#080808","#410605":"#080808","#3f0806":"#080808","#3a0706":"#080808","#240505":"#080808","#1a0403":"#080808","#210504":"#080808","#180403":"#080808","#510402":"#080808","#870b05":"#0b0b0b","#a2140e":"#1d1d1d","#b71507":"#242424","#d72f08":"#343434","#c53412":"#303030","#af3115":"#272727","#b61f09":"#242424","#a71003":"#1a1a1a","#aa1004":"#1c1c1c","#970a04":"#121212","#7c0a03":"#080808","#8c0e03":"#0c0c0c","#780a03":"#080808","#800904":"#080808","#900a05":"#0f0f0f","#5d0905":"#080808","#1b0403":"#080808","#1f0503":"#080808","#340402":"#080808","#990f06":"#141414","#310804":"#080808","#4c0907":"#080808","#450907":"#080808","#410806":"#080808","#2b0603":"#080808","#1f0404":"#080808","#240504":"#080808","#220503":"#080808","#1d0403":"#080808","#3d0403":"#080808","#810a05":"#080808","#a80f08":"#1d1d1d","#b41108":"#232323","#b51503":"#212121","#a41e07":"#1a1a1a","#9a1805":"#141414","#aa1a04":"#1c1c1c","#b71003":"#222222","#950a03":"#111111","#920a03":"#0f0f0f","#ac0f05":"#1d1d1d","#a00c05":"#171717","#780a05":"#080808","#6b0904":"#080808","#360604":"#080808","#180503":"#080808","#320402":"#080808","#800c05":"#080808","#310805":"#080808","#470906":"#080808","#450806":"#080808","#350704":"#080808","#290403":"#080808","#370605":"#080808","#310505":"#080808","#230604":"#080808","#270603":"#080808","#590804":"#080808","#870a07":"#0c0c0c","#9f0e06":"#171717","#a20d04":"#181818","#930d04":"#101010","#760c05":"#080808","#770c05":"#080808","#870b03":"#0a0a0a","#aa0f04":"#1c1c1c","#b10d05":"#202020","#970b05":"#131313","#750a04":"#080808","#3a0704":"#080808","#1d0503":"#080808","#6e0a03":"#080808","#2d0805":"#080808","#4d0a08":"#080808","#4d0907":"#080808","#410706":"#080808","#340705":"#080808","#390704":"#080808","#460705":"#080808","#4b0805":"#080808","#2b0705":"#080808","#220605":"#080808","#200504":"#080808","#330706":"#080808","#400706":"#080808","#680906":"#080808","#810a04":"#080808","#8b0b05":"#0d0d0d","#7c0a04":"#080808","#710a04":"#080808","#7a0a05":"#080808","#6f0904":"#080808","#510905":"#080808","#310705":"#080808","#210604":"#080808","#1a0504":"#080808","#610803":"#080808","#250604":"#080808","#530a09":"#080808","#4d0706":"#080808","#400504":"#080808","#330605":"#080808","#330803":"#080808","#490805":"#080808","#520905":"#080808","#590906":"#080808","#580a04":"#080808","#3c0805":"#080808","#270704":"#080808","#280805":"#080808","#250705":"#080808","#230705":"#080808","#260705":"#080808","#580904":"#080808","#650803":"#080808","#3e0704":"#080808","#260404":"#080808","#200605":"#080808","#500602":"#080808","#260604":"#080808","#580a08":"#080808","#4d0705":"#080808","#310704":"#080808","#420705":"#080808","#530a05":"#080808","#5e0c06":"#080808","#5e0b05":"#080808","#590a05":"#080808","#4a0904":"#080808","#510a05":"#080808","#3e0805":"#080808","#2d0704":"#080808","#4f0904":"#080808","#4f0905":"#080808","#3c0906":"#080808","#2c0905":"#080808","#290706":"#080808","#2c0805":"#080808","#240604":"#080808","#250c0a":"#080808","#3e0401":"#080808","#260907":"#080808","#660a08":"#080808","#480604":"#080808","#390604":"#080808","#3e0703":"#080808","#5e0e06":"#080808","#681106":"#080808","#631006":"#080808","#5d0b04":"#080808","#4e0a05":"#080808","#480904":"#080808","#410805":"#080808","#2d0604":"#080808","#2d0503":"#080808","#4e0b07":"#080808","#5e0d08":"#080808","#560e07":"#080808","#490d08":"#080808","#400e08":"#080808","#380c09":"#080808","#300c08":"#080808","#230905":"#080808","#270f0d":"#080808","#2a0301":"#080808","#240b09":"#080808","#610706":"#080808","#450604":"#080808","#320504":"#080808","#3a0603":"#080808","#500804":"#080808","#620b05":"#080808","#6d1005":"#080808","#671005":"#080808","#630b04":"#080808","#5a0a04":"#080808","#410804":"#080808","#220603":"#080808","#3b0706":"#080808","#670c09":"#080808","#610e09":"#080808","#5f0e09":"#080808","#600f08":"#080808","#5b0e08":"#080808","#520f09":"#080808","#490e08":"#080808","#320a07":"#080808","#240605":"#080808","#1d0604":"#080808","#300402":"#080808","#550706":"#080808","#3f0504":"#080808","#320704":"#080808","#4a0605":"#080808","#5c0904":"#080808","#700d07":"#080808","#770d05":"#080808","#680b05":"#080808","#5c0b05":"#080808","#5c0b04":"#080808","#2f0705":"#080808","#270604":"#080808","#500a07":"#080808","#700f08":"#080808","#741009":"#080808","#720f09":"#080808","#701008":"#080808","#700e07":"#080808","#6f0d07":"#080808","#5b0c07":"#080808","#420d08":"#080808","#280703":"#080808","#3c0905":"#080808","#0d0302":"#080808","#520803":"#080808","#370604":"#080808","#490807":"#080808","#680904":"#080808","#6e0b05":"#080808","#910e06":"#101010","#7a0e06":"#080808","#570904":"#080808","#4b0905":"#080808","#420804":"#080808","#180302":"#080808","#3a0705":"#080808","#7f1108":"#080808","#81160b":"#0b0b0b","#93110a":"#131313","#9a0f06":"#151515","#850c06":"#0a0a0a","#790c06":"#080808","#5e0e08":"#080808","#4a0f0a":"#080808","#260303":"#080808","#190503":"#080808","#210e06":"#080808","#2e1e1d":"#080808","#560605":"#080808","#4a0906":"#080808","#600b07":"#080808","#840c06":"#0a0a0a","#8c0c05":"#0d0d0d","#961106":"#131313","#5e1008":"#080808","#430905":"#080808","#210503":"#080808","#150302":"#080808","#320806":"#080808","#4a0a05":"#080808","#6b0f06":"#080808","#86140a":"#0d0d0d","#92170d":"#141414","#a81408":"#1d1d1d","#be2105":"#262626","#a01305":"#171717","#770b05":"#080808","#5a0d09":"#080808","#4d120c":"#080808","#330804":"#080808","#260c09":"#080808","#2f0f0b":"#080808","#251006":"#080808","#180909":"#080808","#530a08":"#080808","#560c0b":"#080808","#630d08":"#080808","#8d1006":"#0e0e0e","#8d0f05":"#0e0e0e","#6d0d06":"#080808","#460b07":"#080808","#3e0806":"#080808","#1f0303":"#080808","#160504":"#080808","#290807":"#080808","#460c06":"#080808","#690f05":"#080808","#7c1108":"#080808","#8d140b":"#111111","#9b140b":"#181818","#bd1b07":"#272727","#c12b0d":"#2c2c2c","#b51f04":"#212121","#770d06":"#080808","#550f09":"#080808","#53120c":"#080808","#360a06":"#080808","#3b0d09":"#080808","#2d0806":"#080808","#270f06":"#080808","#190707":"#080808","#530e0b":"#080808","#66100a":"#080808","#5d0e09":"#080808","#7d180c":"#090909","#7a110a":"#080808","#580c07":"#080808","#320404":"#080808","#1a0202":"#080808","#1c0707":"#080808","#2d0b08":"#080808","#3d0d09":"#080808","#691005":"#080808","#8a1605":"#0c0c0c","#8e1307":"#0f0f0f","#8d1309":"#101010","#a01108":"#191919","#c11a08":"#292929","#d3511f":"#3e3e3e","#c32c0a":"#2b2b2b","#861305":"#0a0a0a","#5b1108":"#080808","#52120b":"#080808","#330b06":"#080808","#1a0503":"#080808","#200a0a":"#080808","#660906":"#080808","#681c12":"#080808","#590b09":"#080808","#500b08":"#080808","#440706":"#080808","#210202":"#080808","#160201":"#080808","#1b0404":"#080808","#2d0907":"#080808","#330c07":"#080808","#2c0b04":"#080808","#781404":"#080808","#a62208":"#1c1c1c","#c02809":"#292929","#8a0f08":"#0e0e0e","#9e0e06":"#171717","#bb1709":"#272727","#d6491a":"#3d3d3d","#ca370f":"#313131","#8a1305":"#0c0c0c","#5d130a":"#080808","#4c140b":"#080808","#2e0905":"#080808","#2d0a08":"#080808","#3f0a07":"#080808","#220604":"#080808","#2f0f07":"#080808","#502e10":"#080808","#3e0907":"#080808","#250808":"#080808","#590a08":"#080808","#4e0e0b":"#080808","#410b08":"#080808","#2c0505":"#080808","#1b0202":"#080808","#300706":"#080808","#320805":"#080808","#290b08":"#080808","#160402":"#080808","#3f0a03":"#080808","#b0250a":"#222222","#d1330b":"#333333","#9a1607":"#151515","#8d0d07":"#0f0f0f","#a40d05":"#191919","#c32008":"#2a2a2a","#c92b0b":"#2f2f2f","#8f1404":"#0e0e0e","#5f140b":"#080808","#47110c":"#080808","#2f0c06":"#080808","#520b07":"#080808","#450905":"#080808","#540a05":"#080808","#400906":"#080808","#290705":"#080808","#360d0d":"#080808","#2c0606":"#080808","#280404":"#080808","#240402":"#080808","#1e0201":"#080808","#360606":"#080808","#370906":"#080808","#300905":"#080808","#28110f":"#080808","#0f0202":"#080808","#160301":"#080808","#961a05":"#121212","#c72e0b":"#2e2e2e","#ab1a06":"#1d1d1d","#860c06":"#0b0b0b","#9c0c05":"#151515","#a41105":"#191919","#c32509":"#2b2b2b","#8f1804":"#0e0e0e","#5c140a":"#080808","#400d0a":"#080808","#2a0705":"#080808","#350d07":"#080808","#450906":"#080808","#520a05":"#080808","#6e0f09":"#080808","#450d09":"#080808","#260704":"#080808","#410a09":"#080808","#360805":"#080808","#340503":"#080808","#2b0202":"#080808","#3e0504":"#080808","#460707":"#080808","#360905":"#080808","#130403":"#080808","#110201":"#080808","#4d0802":"#080808","#a82009":"#1d1d1d","#b01f08":"#212121","#8b0e06":"#0d0d0d","#7e0b05":"#080808","#910d06":"#101010","#c12108":"#292929","#981908":"#151515","#3c0d08":"#080808","#2a0604":"#080808","#310905":"#080808","#430906":"#080808","#520a04":"#080808","#5c0905":"#080808","#530a06":"#080808","#350a07":"#080808","#4d0c07":"#080808","#4c0a06":"#080808","#500806":"#080808","#450705":"#080808","#390403":"#080808","#420807":"#080808","#2a0704":"#080808","#0f0402":"#080808","#1a0301":"#080808","#2c0502":"#080808","#771003":"#080808","#af1c06":"#1f1f1f","#911206":"#101010","#7c0b05":"#080808","#ae1906":"#1f1f1f","#9f1807":"#181818","#661308":"#080808","#3e0c07":"#080808","#290503":"#080808","#330a06":"#080808","#410905":"#080808","#4d0804":"#080808","#5a0905":"#080808","#2b0806":"#080808","#0e0201":"#080808","#6d0d07":"#080808","#7d0f08":"#080808","#770e07":"#080808","#520604":"#080808","#340403":"#080808","#330505":"#080808","#43150f":"#080808","#280704":"#080808","#1e1412":"#080808","#1b0402":"#080808","#390602":"#080808","#710f05":"#080808","#851306":"#0a0a0a","#7f0e05":"#080808","#790b05":"#080808","#8f0e05":"#0f0f0f","#991605":"#141414","#771206":"#080808","#400b07":"#080808","#2a0603":"#080808","#3b0906":"#080808","#490905":"#080808","#500904":"#080808","#730b04":"#080808","#440905":"#080808","#200704":"#080808","#0d0201":"#080808","#790f08":"#080808","#991307":"#151515","#931305":"#111111","#5d0805":"#080808","#2f0604":"#080808","#3d100d":"#080808","#340805":"#080808","#1c0503":"#080808","#190403":"#080808","#3f0804":"#080808","#4b0b05":"#080808","#871107":"#0c0c0c","#6c0b05":"#080808","#6b0a05":"#080808","#8c1306":"#0e0e0e","#7a1306":"#080808","#450c06":"#080808","#4b0a05":"#080808","#5e0a05":"#080808","#6f0a05":"#080808","#400705":"#080808","#110302":"#080808","#8d0f07":"#0f0f0f","#9a1107":"#151515","#9f1105":"#171717","#6c0a05":"#080808","#350303":"#080808","#350b09":"#080808","#360b07":"#080808","#100302":"#080808","#220404":"#080808","#620d07":"#080808","#760d09":"#080808","#630a06":"#080808","#760e06":"#080808","#751106":"#080808","#490a06":"#080808","#420904":"#080808","#720d06":"#080808","#700a05":"#080808","#7d0b05":"#080808","#0b0101":"#080808","#a41007":"#1a1a1a","#a30f05":"#191919","#6b0803":"#080808","#3b110e":"#080808","#360b08":"#080808","#290804":"#080808","#0c0302":"#080808","#1a0302":"#080808","#70110b":"#080808","#690c09":"#080808","#640b05":"#080808","#670d06":"#080808","#4c0a04":"#080808","#880f06":"#0c0c0c","#710b05":"#080808","#620603":"#080808","#180101":"#080808","#0f0201":"#080808","#a51105":"#1a1a1a","#a30c06":"#191919","#ae0c05":"#1e1e1e","#750803":"#080808","#460907":"#080808","#380d0b":"#080808","#350c08":"#080808","#160503":"#080808","#110807":"#080808","#340807":"#080808","#650d09":"#080808","#660c06":"#080808","#600b05":"#080808","#4e0805":"#080808","#400904":"#080808","#700b05":"#080808","#240101":"#080808","#0a0000":"#080808","#9b1007":"#161616","#a00d06":"#181818","#ac0d05":"#1d1d1d","#850b05":"#0a0a0a","#4c0e08":"#080808","#3d0e0d":"#080808","#3a0906":"#080808","#6c0d07":"#080808","#8d0d06":"#0e0e0e","#920c06":"#111111","#360804":"#080808","#4a0502":"#080808","#0c0101":"#080808","#770a07":"#080808","#950c06":"#121212","#a60d05":"#1a1a1a","#930b06":"#111111","#5a110c":"#080808","#3a0e0b":"#080808","#1b0504":"#080808","#380704":"#080808","#740a05":"#080808","#980b05":"#131313","#990d05":"#141414","#9a0c05":"#141414","#9d0d05":"#161616","#740a04":"#080808","#230101":"#080808","#640804":"#080808","#8d0c06":"#0e0e0e","#9e0c05":"#161616","#68100b":"#080808","#601007":"#080808","#5c210f":"#080808","#531f0d":"#080808","#6d2d14":"#080808","#170101":"#080808","#590e07":"#080808","#b24b21":"#2e2e2e","#670c08":"#080808","#140402":"#080808","#844d22":"#181818","#240805":"#080808","#1c0a05":"#080808","#9a471e":"#212121","#120504":"#080808","#150404":"#080808","#150202":"#080808","#2d1b0b":"#080808","#582511":"#080808","#150503":"#080808","#1f1007":"#080808","#37210e":"#080808","#4b2a15":"#080808","#110706":"#080808","#1f1107":"#080808","#2d160a":"#080808","#0d0402":"#080808","#170a06":"#080808","#1f110a":"#080808","#301d19":"#080808","#340907":"#080808","#450603":"#080808","#800f07":"#080808","#a10f05":"#181818","#3d0705":"#080808","#630907":"#080808","#a10c06":"#181818","#9b0e08":"#161616","#950806":"#121212","#870b07":"#0c0c0c","#4a0603":"#080808","#a41407":"#1a1a1a","#b11308":"#212121","#600606":"#080808","#410404":"#080808","#d4130d":"#353535","#cb0e06":"#2d2d2d","#c10803":"#272727","#bb0905":"#252525","#a50b02":"#181818","#950a04":"#111111","#820904":"#080808","#720904":"#080808","#670a04":"#080808","#550805":"#080808","#470805":"#080808","#3f0605":"#080808","#1a0402":"#080808","#320b08":"#080808","#910d04":"#0f0f0f","#860903":"#090909","#330603":"#080808","#480906":"#080808","#b01005":"#1f1f1f","#b41206":"#222222","#b11506":"#202020","#bb2002":"#232323","#500403":"#080808","#6e0904":"#080808","#8b1208":"#0e0e0e","#82120a":"#0b0b0b","#630302":"#080808","#f13003":"#3f3f3f","#c51d03":"#292929","#9e0b03":"#151515","#890a03":"#0b0b0b","#8a0904":"#0c0c0c","#8a0a04":"#0c0c0c","#7f0a04":"#080808","#760904":"#080808","#640706":"#080808","#560806":"#080808","#470806":"#080808","#440906":"#080808","#1b0303":"#080808","#2a0908":"#080808","#350907":"#080808","#2f0403":"#080808","#740802":"#080808","#480502":"#080808","#720c05":"#080808","#a20c04":"#181818","#a61006":"#1b1b1b","#dd2c02":"#343434","#610604":"#080808","#660c05":"#080808","#aa351a":"#272727","#8f1c10":"#141414","#440403":"#080808","#6a0703":"#080808","#7c0c03":"#080808","#7d0a03":"#080808","#750704":"#080808","#690903":"#080808","#620806":"#080808","#610906":"#080808","#550a06":"#080808","#530906":"#080808","#4f0a06":"#080808","#520906":"#080808","#2e0401":"#080808","#210603":"#080808","#270504":"#080808","#2f0302":"#080808","#490503":"#080808","#520502":"#080808","#270404":"#080808","#530c09":"#080808","#7e0d09":"#080808","#8e0902":"#0d0d0d","#910b05":"#101010","#770b06":"#080808","#a70b03":"#1a1a1a","#d62409":"#343434","#7a1610":"#0a0a0a","#440504":"#080808","#3c0201":"#080808","#710604":"#080808","#6e0803":"#080808","#6a0803":"#080808","#670804":"#080808","#690b06":"#080808","#6e0b07":"#080808","#720c08":"#080808","#6a0b08":"#080808","#5f0a08":"#080808","#550907":"#080808","#240503":"#080808","#2a0200":"#080808","#2d0403":"#080808","#240202":"#080808","#2a0303":"#080808","#370705":"#080808","#610b09":"#080808","#82110c":"#0c0c0c","#8a0d08":"#0e0e0e","#760b04":"#080808","#410703":"#080808","#570a04":"#080808","#5d0d0a":"#080808","#430705":"#080808","#1e0200":"#080808","#7c0603":"#080808","#8a0b08":"#0e0e0e","#860e09":"#0c0c0c","#860d07":"#0b0b0b","#870d09":"#0d0d0d","#8e0b07":"#0f0f0f","#830a06":"#090909","#770c07":"#080808","#690c0a":"#080808","#580907":"#080808","#520807":"#080808","#250503":"#080808","#890d04":"#0b0b0b","#0e0101":"#080808","#1b0201":"#080808","#560401":"#080808","#170303":"#080808","#2c0403":"#080808","#410707":"#080808","#80110f":"#0c0c0c","#8a0a07":"#0d0d0d","#e43002":"#383838","#2d0303":"#080808","#5d0706":"#080808","#5e0907":"#080808","#380201":"#080808","#a91a09":"#1e1e1e","#e4450f":"#3e3e3e","#a01e0f":"#1c1c1c","#910b04":"#0f0f0f","#8d0703":"#0d0d0d","#800805":"#080808","#650905":"#080808","#550c07":"#080808","#670d0d":"#080808","#630806":"#080808","#530907":"#080808","#260806":"#080808","#870903":"#0a0a0a","#570401":"#080808","#2a0302":"#080808","#100202":"#080808","#170202":"#080808","#240603":"#080808","#2c0705":"#080808","#840a07":"#0a0a0a","#921004":"#101010","#6c0703":"#080808","#320303":"#080808","#880904":"#0b0b0b","#860b06":"#0b0b0b","#4c0303":"#080808","#86150a":"#0d0d0d","#c54114":"#313131","#832713":"#101010","#6c0504":"#080808","#690703":"#080808","#5b0605":"#080808","#580704":"#080808","#660b07":"#080808","#730d09":"#080808","#5d0b08":"#080808","#510908":"#080808","#840a04":"#090909","#220302":"#080808","#160302":"#080808","#690502":"#080808","#190302":"#080808","#2b0604":"#080808","#2b0605":"#080808","#620906":"#080808","#6e0806":"#080808","#870905":"#0b0b0b","#490502":"#080808","#bd1907":"#272727","#ae1d0a":"#212121","#590605":"#080808","#3e0606":"#080808","#760805":"#080808","#780501":"#080808","#6e0603":"#080808","#800a07":"#080808","#780905":"#080808","#560704":"#080808","#4b0a06":"#080808","#650c0b":"#080808","#830e04":"#080808","#410603":"#080808","#7b0a03":"#080808","#6b0702":"#080808","#230503":"#080808","#2b0704":"#080808","#400905":"#080808","#550604":"#080808","#640302":"#080808","#620601":"#080808","#470602":"#080808","#82100f":"#0d0d0d","#5e110d":"#080808","#540907":"#080808","#9d0b05":"#161616","#a90701":"#1a1a1a","#940904":"#111111","#6c0604":"#080808","#710f0d":"#080808","#7a0f0b":"#080808","#730d05":"#080808","#5b0903":"#080808","#280503":"#080808","#8f0c03":"#0e0e0e","#230403":"#080808","#360404":"#080808","#260504":"#080808","#500b07":"#080808","#610502":"#080808","#260302":"#080808","#910e07":"#111111","#350201":"#080808","#670403":"#080808","#bb1a0c":"#282828","#a9170a":"#1e1e1e","#730706":"#080808","#560404":"#080808","#700e0e":"#080808","#83110e":"#0d0d0d","#730906":"#080808","#470804":"#080808","#770b04":"#080808","#400805":"#080808","#260402":"#080808","#310403":"#080808","#6e120b":"#080808","#9b0f06":"#151515","#430702":"#080808","#340302":"#080808","#8d170a":"#101010","#570805":"#080808","#580101":"#080808","#be160a":"#292929","#911e0f":"#151515","#6e0d09":"#080808","#871310":"#101010","#880e0b":"#0e0e0e","#7e0a04":"#080808","#630502":"#080808","#920d05":"#101010","#270402":"#080808","#2d0404":"#080808","#310904":"#080808","#9f1b0c":"#1a1a1a","#920e05":"#101010","#530402":"#080808","#9a1a0c":"#181818","#78120a":"#080808","#370303":"#080808","#730707":"#080808","#7c130d":"#090909","#841b0f":"#0e0e0e","#ae0b08":"#202020","#ae120c":"#222222","#900f09":"#111111","#760704":"#080808","#620301":"#080808","#981006":"#141414","#3c0503":"#080808","#250402":"#080808","#550a05":"#080808","#710d07":"#080808","#450401":"#080808","#4c0503":"#080808","#850f07":"#0b0b0b","#360302":"#080808","#3e0404":"#080808","#8f0b09":"#111111","#aa1b13":"#232323","#980d09":"#151515","#740605":"#080808","#5d0402":"#080808","#5e0400":"#080808","#690a07":"#080808","#540904":"#080808","#6d0803":"#080808","#1b0302":"#080808","#770e06":"#080808","#730703":"#080808","#360503":"#080808","#6f0604":"#080808","#5b0403":"#080808","#840605":"#090909","#8a0a05":"#0c0c0c","#640704":"#080808","#630704":"#080808","#6e0301":"#080808","#850802":"#080808","#6c1410":"#080808","#220403":"#080808","#8b0b04":"#0c0c0c","#2e0603":"#080808","#1f0202":"#080808","#640b06":"#080808","#a71005":"#1b1b1b","#8c0903":"#0c0c0c","#861f0f":"#0f0f0f","#a1200e":"#1c1c1c","#6c0302":"#080808","#500603":"#080808","#680805":"#080808","#800701":"#080808","#800502":"#080808","#790a05":"#080808","#681815":"#080808","#5a0906":"#080808","#140302":"#080808","#6b0b04":"#080808","#480805":"#080808","#630903":"#080808","#541108":"#080808","#7e1e13":"#0d0d0d","#570705":"#080808","#600907":"#080808","#830d0a":"#0b0b0b","#86120d":"#0e0e0e","#771615":"#0b0b0b","#681311":"#080808","#5e0a08":"#080808","#7d0906":"#080808","#2b0502":"#080808","#140202":"#080808","#7b0d07":"#080808","#a02010":"#1d1d1d","#a71e0f":"#202020","#a50b06":"#1a1a1a","#890a06":"#0c0c0c","#6a0806":"#080808","#3b0402":"#080808","#480808":"#080808","#8f0b05":"#0f0f0f","#200503":"#080808","#5e0f0d":"#080808","#c42010":"#2f2f2f","#bd2d16":"#2e2e2e","#9d0705":"#161616","#870704":"#0a0a0a","#700403":"#080808","#4a0503":"#080808","#2e0504":"#080808","#3f0f0e":"#080808","#230504":"#080808","#620e0a":"#080808","#700805":"#080808","#4f0301":"#080808","#300503":"#080808","#480807":"#080808","#cc180f":"#323232","#bf1a0a":"#292929","#880604":"#0b0b0b","#3a0404":"#080808","#5a0a08":"#080808","#690d0a":"#080808","#110909":"#080808","#500b05":"#080808","#ae1004":"#1e1e1e","#910606":"#101010","#3e0505":"#080808","#830f07":"#0a0a0a","#9c1607":"#161616","#1a0f0f":"#080808","#130908":"#080808","#b20706":"#212121","#330606":"#080808","#790e0a":"#080808","#bb1b06":"#252525","#1d1615":"#080808","#ae0c04":"#1e1e1e","#d60606":"#333333","#210706":"#080808","#6c1211":"#080808","#aa1507":"#1d1d1d","#1f1414":"#080808","#370504":"#080808","#89100b":"#0f0f0f","#ae0c0c":"#222222","#320705":"#080808","#520b08":"#080808","#420d0b":"#080808","#320605":"#080808","#110d0d":"#080808","#120302":"#080808","#100503":"#080808","#120603":"#080808","#170805":"#080808","#1a0905":"#080808","#0e0402":"#080808","#1b0906":"#080808","#322013":"#080808","#482f1b":"#080808","#0e0505":"#080808","#715031":"#161616","#120a07":"#080808","#0a0201":"#080808","#0b0303":"#080808","#180907":"#080808","#28170f":"#080808","#3f0301":"#080808","#430401":"#080808","#230402":"#080808","#110202":"#080808","#1a0a0a":"#080808","#1e0e0c":"#080808","#130805":"#080808","#503822":"#080808","#4a331e":"#080808","#050101":"#080808","#392516":"#080808","#48301f":"#080808","#1c0909":"#080808","#1c0d09":"#080808","#8b0802":"#0b0b0b","#840701":"#080808","#600602":"#080808","#0c0202":"#080808","#170808":"#080808","#0d0502":"#080808","#302015":"#080808","#0d0403":"#080808","#352315":"#080808","#170906":"#080808","#130604":"#080808","#9d0c02":"#141414","#a10c03":"#171717","#9f0a02":"#151515","#940802":"#101010","#820701":"#080808","#0d0202":"#080808","#100505":"#080808","#1b0b07":"#080808","#0c0403":"#080808","#44281c":"#080808","#160705":"#080808","#d11a04":"#2f2f2f","#ce1405":"#2e2e2e","#c11104":"#272727","#9c0a02":"#141414","#920702":"#0f0f0f","#6a0603":"#080808","#2e0503":"#080808","#180402":"#080808","#0d0404":"#080808","#0b0301":"#080808","#1b0f09":"#080808","#281512":"#080808","#20100b":"#080808","#633b34":"#101010","#160604":"#080808","#472818":"#080808","#281402":"#080808","#1e0702":"#080808","#ee4211":"#444444","#eb290c":"#404040","#dd1d06":"#363636","#cf1505":"#2f2f2f","#b80f03":"#222222","#a30b03":"#181818","#8f0702":"#0d0d0d","#700603":"#080808","#460603":"#080808","#250303":"#080808","#23140e":"#080808","#180c08":"#080808","#46321f":"#080808","#100303":"#080808","#130402":"#080808","#150403":"#080808","#2b0f09":"#080808","#a9371a":"#262626","#6e1504":"#080808","#f36323":"#505050","#f3511d":"#4d4d4d","#ef310d":"#434343","#df2005":"#373737","#ca1404":"#2c2c2c","#ba1003":"#232323","#ab0c03":"#1c1c1c","#930802":"#0f0f0f","#6b0602":"#080808","#4f0503":"#080808","#290302":"#080808","#140705":"#080808","#67492d":"#0f0f0f","#140403":"#080808","#120403":"#080808","#230a08":"#080808","#280b09":"#080808","#4e2114":"#080808","#995432":"#2a2a2a","#ed3804":"#3d3d3d","#f53a03":"#414141","#691b00":"#080808","#ed6022":"#4c4c4c","#eb4815":"#454545","#ea4616":"#454545","#eb3311":"#434343","#da1f07":"#353535","#ba1306":"#252525","#bd1205":"#262626","#a80c03":"#1a1a1a","#8f0803":"#0e0e0e","#490401":"#080808","#0b0202":"#080808","#482e1d":"#080808","#140503":"#080808","#1b0503":"#080808","#3b0f0e":"#080808","#1a0000":"#080808","#8b1a0b":"#101010","#e13006":"#383838","#6f1b09":"#080808","#f45b1a":"#4c4c4c","#f64f11":"#484848","#ee4916":"#474747","#e23d17":"#414141","#e8240a":"#3e3e3e","#c91906":"#2c2c2c","#b11105":"#202020","#be1103":"#252525","#a70a03":"#1a1a1a","#870702":"#090909","#4f0402":"#080808","#350503":"#080808","#0d0303":"#080808","#1f120c":"#080808","#32110a":"#080808","#1e0504":"#080808","#1c0403":"#080808","#831306":"#090909","#bc1d0a":"#282828","#7f1b11":"#0d0d0d","#f93e04":"#434343","#f63f06":"#434343","#ee3e0e":"#434343","#ee4714":"#464646","#e52f0f":"#3f3f3f","#e52007":"#3b3b3b","#b81405":"#232323","#ad1004":"#1d1d1d","#bd1004":"#252525","#a60b03":"#191919","#700602":"#080808","#400402":"#080808","#270503":"#080808","#5a3c26":"#080808","#904f32":"#262626","#701207":"#080808","#440805":"#080808","#3f0807":"#080808","#570a06":"#080808","#ae1607":"#1f1f1f","#bb1b07":"#262626","#8b160a":"#0f0f0f","#220807":"#080808","#f63a04":"#424242","#e72905":"#3b3b3b","#ed2e03":"#3d3d3d","#eb2e05":"#3d3d3d","#eb3a0e":"#414141","#e02208":"#393939","#df1d06":"#373737","#a91004":"#1b1b1b","#af0f04":"#1e1e1e","#b10d03":"#1f1f1f","#880803":"#0a0a0a","#540503":"#080808","#330604":"#080808","#140703":"#080808","#4a0702":"#080808","#c92603":"#2b2b2b","#d22503":"#2f2f2f","#c31a04":"#282828","#9d0e07":"#171717","#aa1106":"#1d1d1d","#bf1a07":"#282828","#a61907":"#1b1b1b","#5b0d01":"#080808","#e02707":"#383838","#e32307":"#3a3a3a","#dd2206":"#363636","#e32607":"#3a3a3a","#e92f05":"#3c3c3c","#e42d0f":"#3e3e3e","#e11f07":"#393939","#d01706":"#303030","#9f0e04":"#161616","#af0e04":"#1e1e1e","#990a03":"#131313","#770903":"#080808","#460704":"#080808","#390805":"#080808","#180604":"#080808","#0f0300":"#080808","#330904":"#080808","#f43a03":"#404040","#eb3303":"#3c3c3c","#bd0b02":"#242424","#9c1005":"#151515","#aa1707":"#1d1d1d","#6e1007":"#080808","#1c0702":"#080808","#c81807":"#2c2c2c","#e32e08":"#3a3a3a","#de2006":"#373737","#d01d07":"#303030","#ce2004":"#2e2e2e","#e22808":"#3a3a3a","#de2009":"#383838","#dd1b06":"#363636","#bb1305":"#252525","#a00f04":"#171717","#a20c05":"#181818","#830904":"#080808","#650804":"#080808","#7b0b06":"#080808","#2b0805":"#080808","#1a0604":"#080808","#1c0908":"#080808","#0a0202":"#080808","#9c2304":"#151515","#761805":"#080808","#660b05":"#080808","#941205":"#111111","#9f1507":"#181818","#4f0902":"#080808","#b81306":"#242424","#ca1f09":"#2e2e2e","#de2b0a":"#393939","#c61d05":"#2a2a2a","#c01b05":"#272727","#ce1c08":"#303030","#d01607":"#303030","#ad1205":"#1e1e1e","#b00e04":"#1f1f1f","#8c0904":"#0d0d0d","#7c0904":"#080808","#7e0a05":"#080808","#6a0a05":"#080808","#400704":"#080808","#280604":"#080808","#180303":"#080808","#1e0908":"#080808","#250504":"#080808","#360705":"#080808","#5c0b06":"#080808","#8f1206":"#0f0f0f","#9c1507":"#161616","#960e06":"#131313","#560904":"#080808","#971007":"#141414","#b01105":"#1f1f1f","#c21c08":"#2a2a2a","#cb1f09":"#2f2f2f","#ca1f07":"#2d2d2d","#c21a06":"#292929","#bc1905":"#252525","#c31806":"#292929","#c51706":"#2a2a2a","#bd1305":"#262626","#b40f05":"#212121","#970d04":"#121212","#820a04":"#080808","#8b0a05":"#0d0d0d","#800a05":"#080808","#450904":"#080808","#300705":"#080808","#340604":"#080808","#300605":"#080808","#6b0c05":"#080808","#96190e":"#171717","#a01309":"#191919","#8c0e06":"#0e0e0e","#5a0904":"#080808","#910d05":"#101010","#a81105":"#1b1b1b","#ab1304":"#1c1c1c","#b51506":"#222222","#bf1907":"#282828","#ba1907":"#252525","#b81707":"#242424","#be1806":"#272727","#bb1606":"#252525","#b41105":"#212121","#a90e06":"#1c1c1c","#8b0c04":"#0c0c0c","#8d0a06":"#0e0e0e","#980e06":"#141414","#7e1308":"#080808","#600904":"#080808","#440904":"#080808","#530904":"#080808","#5b0905":"#080808","#590904":"#080808","#680a04":"#080808","#930e05":"#111111","#9f0c05":"#171717","#4b0903":"#080808","#300603":"#080808","#310603":"#080808","#5a0a05":"#080808","#7a0c04":"#080808","#870e04":"#0a0a0a","#981005":"#131313","#9e1105":"#161616","#a71306":"#1b1b1b","#a41406":"#1a1a1a","#aa1406":"#1d1d1d","#b11305":"#202020","#ad1206":"#1e1e1e","#9b0f05":"#151515","#870d06":"#0b0b0b","#951d0c":"#151515","#a3230f":"#1e1e1e","#7d0b04":"#080808","#5e0803":"#080808","#430804":"#080808","#6a0905":"#080808","#740903":"#080808","#800703":"#080808","#880a03":"#0a0a0a","#990b04":"#131313","#8c0905":"#0d0d0d","#420803":"#080808","#330705":"#080808","#660a04":"#080808","#700b04":"#080808","#760c04":"#080808","#800f05":"#080808","#8b0e05":"#0d0d0d","#860e06":"#0b0b0b","#8f1006":"#0f0f0f","#971105":"#131313","#921005":"#101010","#8c1f0f":"#121212","#9d1f0f":"#1b1b1b","#921308":"#121212","#6f0903":"#080808","#720905":"#080808","#870803":"#0a0a0a","#a40804":"#191919","#aa0a04":"#1c1c1c","#a00b05":"#171717","#670b05":"#080808","#3b0703":"#080808","#610b05":"#080808","#3f0705":"#080808","#2e0505":"#080808","#2d0504":"#080808","#490703":"#080808","#670c05":"#080808","#730e05":"#080808","#7f0e06":"#080808","#8a1207":"#0d0d0d","#931506":"#111111","#921206":"#111111","#8e0f06":"#0f0f0f","#810d05":"#080808","#841008":"#0b0b0b","#9a1d0c":"#181818","#9a150a":"#171717","#900c05":"#0f0f0f","#730903":"#080808","#4e0804":"#080808","#6a0904":"#080808","#960903":"#111111","#b20b05":"#202020","#9c0f06":"#161616","#500a05":"#080808","#3f0704":"#080808","#350604":"#080808","#3f0503":"#080808","#620702":"#080808","#840c04":"#090909","#9c1307":"#161616","#ae1908":"#202020","#a81807":"#1c1c1c","#a61807":"#1b1b1b","#9e1406":"#171717","#941405":"#111111","#8d0f04":"#0d0d0d","#8b0d03":"#0c0c0c","#9e0d05":"#161616","#8c0b04":"#0d0d0d","#5d0904":"#080808","#730804":"#080808","#a80a04":"#1b1b1b","#b90b04":"#232323","#a8110a":"#1e1e1e","#8d0f0a":"#101010","#420905":"#080808","#820e05":"#080808","#290704":"#080808","#310605":"#080808","#410503":"#080808","#600402":"#080808","#980904":"#131313","#a81006":"#1c1c1c","#b71b0b":"#262626","#bd2d0e":"#2a2a2a","#bb220b":"#282828","#a81906":"#1c1c1c","#b51804":"#212121","#991505":"#141414","#920f07":"#111111","#950c03":"#111111","#830a04":"#080808","#880a04":"#0b0b0b","#720804":"#080808","#b50b04":"#212121","#ba0b04":"#242424","#970b06":"#131313","#720c07":"#080808","#290604":"#080808","#3e0705":"#080808","#370706":"#080808","#300604":"#080808","#310503":"#080808","#4f0403":"#080808","#810a06":"#080808","#b7110a":"#252525","#bf2712":"#2d2d2d","#e45d1d":"#454545","#c32f0a":"#2b2b2b","#bc2709":"#272727","#b61c04":"#222222","#a91505":"#1c1c1c","#971008":"#141414","#7e0904":"#080808","#880b04":"#0b0b0b","#7b0904":"#080808","#7a0903":"#080808","#b90c05":"#242424","#b20b04":"#202020","#8e0a05":"#0e0e0e","#410704":"#080808","#1d0402":"#080808","#380703":"#080808","#9b1006":"#151515","#b6420c":"#262626","#fa3f09":"#464646","#e0421e":"#444444","#1e0d0a":"#080808","#e34612":"#3f3f3f","#de310d":"#3a3a3a","#d53115":"#3a3a3a","#ec4b21":"#4b4b4b","#e54d24":"#494949","#481608":"#080808","#e95217":"#454545","#e53109":"#3c3c3c","#b1190c":"#232323","#bb190b":"#282828","#b82312":"#2a2a2a","#e23213":"#3f3f3f","#c8421b":"#363636","#341207":"#080808","#d1440f":"#353535","#dd2809":"#383838","#680d05":"#080808","#511206":"#080808","#6a1304":"#080808","#8c0f03":"#0c0c0c","#ad150a":"#202020","#cc3b1b":"#383838","#7a1c10":"#0a0a0a","#6b3509":"#080808","#ab3f08":"#1e1e1e","#d9250a":"#363636","#9e0e08":"#181818","#8c1804":"#0d0d0d","#ad1e04":"#1d1d1d","#881505":"#0b0b0b","#590f06":"#080808","#8d1005":"#0e0e0e","#b02112":"#262626","#a7180c":"#1e1e1e","#45150d":"#080808","#c22107":"#292929","#cd240b":"#313131","#d12504":"#2f2f2f","#dc2704":"#353535","#de2504":"#363636","#c81805":"#2b2b2b","#81150d":"#0c0c0c","#af1c13":"#262626","#ba1308":"#262626","#761209":"#080808","#713006":"#080808","#bc1a09":"#272727","#cc2308":"#2f2f2f","#d42406":"#323232","#9f160c":"#1a1a1a","#a21309":"#1a1a1a","#a50c03":"#191919","#930b03":"#101010","#bf1304":"#262626","#cc1b08":"#2f2f2f","#b31305":"#212121","#341308":"#080808","#411902":"#080808","#231006":"#080808","#922e07":"#111111","#bf3616":"#2f2f2f","#99190b":"#171717","#bd1808":"#272727","#ae0e04":"#1e1e1e","#761b08":"#080808","#641607":"#080808","#621109":"#080808","#940702":"#101010","#da2f15":"#3c3c3c","#d94b1f":"#414141","#c51505":"#2a2a2a","#330f08":"#080808","#2d1106":"#080808","#401202":"#080808","#3f0c02":"#080808","#2b0e09":"#080808","#34160b":"#080808","#2d1a0a":"#080808","#7b1a04":"#080808","#de5c23":"#454545","#bb5423":"#343434","#ad160d":"#222222","#cc1a09":"#2f2f2f","#d52008":"#333333","#860d04":"#0a0a0a","#751205":"#080808","#a61406":"#1b1b1b","#df662d":"#4b4b4b","#ec722d":"#515151","#39170d":"#080808","#2d120b":"#080808","#3e1b0c":"#080808","#351a09":"#080808","#301308":"#080808","#411c11":"#080808","#3d170e":"#080808","#120705":"#080808","#100404":"#080808","#1a0705":"#080808","#39120c":"#080808","#461d14":"#080808","#89482d":"#202020","#6f4432":"#151515","#2c1308":"#080808","#e1571f":"#454545","#b5441b":"#2d2d2d","#821812":"#0f0f0f","#6b120d":"#080808","#7f150c":"#0a0a0a","#800a06":"#080808","#840b05":"#090909","#98170e":"#181818","#df6a2d":"#4b4b4b","#e35d20":"#464646","#58220c":"#080808","#442c17":"#080808","#3f210a":"#080808","#280f08":"#080808","#2f120b":"#080808","#31120b":"#080808","#560e02":"#080808","#3d0a03":"#080808","#2c0301":"#080808","#0f0502":"#080808","#300e0a":"#080808","#3e1610":"#080808","#bc8f69":"#575757","#552212":"#080808","#b7471a":"#2d2d2d","#bc4018":"#2f2f2f","#841913":"#101010","#b31909":"#232323","#b51c09":"#242424","#652107":"#080808","#642207":"#080808","#79160a":"#080808","#ad3012":"#242424","#a93513":"#232323","#3f1e09":"#080808","#2a1208":"#080808","#230a06":"#080808","#42160d":"#080808","#580804":"#080808","#881d04":"#0b0b0b","#972003":"#121212","#871002":"#090909","#130707":"#080808","#2a0804":"#080808","#3d110d":"#080808","#5e2613":"#080808","#4d1a0c":"#080808","#8f1a0d":"#131313","#852116":"#121212","#921007":"#111111","#930c06":"#111111","#7a1606":"#080808","#6c1b07":"#080808","#621f08":"#080808","#a11e12":"#1e1e1e","#9b2010":"#1a1a1a","#371a09":"#080808","#2a1406":"#080808","#260a06":"#080808","#570e0a":"#080808","#660803":"#080808","#c42c03":"#282828","#c52c03":"#292929","#9c1503":"#141414","#220502":"#080808","#bc2a05":"#252525","#49130d":"#080808","#2d0e06":"#080808","#651409":"#080808","#861d10":"#101010","#84140c":"#0d0d0d","#7a130d":"#080808","#741611":"#080808","#65100d":"#080808","#800c08":"#090909","#77100c":"#080808","#721813":"#080808","#71130f":"#080808","#440f06":"#080808","#301708":"#080808","#49280d":"#080808","#700c07":"#080808","#9c0e03":"#141414","#ec3302":"#3c3c3c","#e32c03":"#383838","#e42d03":"#383838","#0d0101":"#080808","#691502":"#080808","#c62b04":"#2a2a2a","#58160e":"#080808","#250e06":"#080808","#2b0904":"#080808","#8a1c10":"#121212","#b6250f":"#272727","#9f1207":"#181818","#8c0e08":"#0f0f0f","#a91007":"#1d1d1d","#c40a07":"#2a2a2a","#650705":"#080808","#690f0d":"#080808","#951005":"#121212","#4b0e07":"#080808","#431a0b":"#080808","#3a160a":"#080808","#480905":"#080808","#84110a":"#0c0c0c","#ce2508":"#303030","#ea2c04":"#3c3c3c","#e62704":"#3a3a3a","#ee3005":"#3e3e3e","#070101":"#080808","#c22802":"#272727","#d52505":"#323232","#63170e":"#080808","#5a321d":"#080808","#2d0a06":"#080808","#6d0e06":"#080808","#8e2113":"#151515","#c4250e":"#2e2e2e","#c61c0a":"#2d2d2d","#8b0b07":"#0e0e0e","#9b0e05":"#151515","#900e0a":"#121212","#7f1010":"#0c0c0c","#920d0a":"#131313","#b70c05":"#232323","#981308":"#151515","#46120d":"#080808","#5a0e08":"#080808","#490e07":"#080808","#5e3919":"#080808","#5d0d07":"#080808","#9c210c":"#191919","#ea3206":"#3d3d3d","#d61c08":"#343434","#dd1c08":"#373737","#ee3b0f":"#434343","#0a0101":"#080808","#3a0902":"#080808","#cb2a03":"#2c2c2c","#d72005":"#333333","#6a170d":"#080808","#a4805e":"#464646","#6c4827":"#0e0e0e","#3d150e":"#080808","#8d1508":"#0f0f0f","#8e2214":"#161616","#c1250f":"#2d2d2d","#a71a0f":"#202020","#6a0a06":"#080808","#550c08":"#080808","#671110":"#080808","#910a03":"#0f0f0f","#8b0f08":"#0e0e0e","#54120c":"#080808","#4a0b06":"#080808","#64351b":"#080808","#572a18":"#080808","#711307":"#080808","#b72504":"#222222","#cf210c":"#323232","#cf1c0a":"#313131","#d31b08":"#323232","#e94c1a":"#464646","#5b0b04":"#080808","#b32006":"#212121","#d01b06":"#303030","#901c0d":"#131313","#682d21":"#090909","#5b2d1a":"#080808","#672013":"#080808","#80160a":"#0a0a0a","#85180c":"#0d0d0d","#840f0a":"#0c0c0c","#740901":"#080808","#9f1206":"#171717","#9f0d07":"#181818","#760e0c":"#080808","#930f0a":"#131313","#870a06":"#0b0b0b","#410e0a":"#080808","#421b0f":"#080808","#895e34":"#232323","#3a140e":"#080808","#7d1507":"#080808","#bd1809":"#282828","#be1809":"#282828","#d21b0a":"#333333","#cd1a09":"#303030","#e6501c":"#464646","#700d04":"#080808","#98190a":"#161616","#ca2210":"#323232","#be2b17":"#2f2f2f","#7c1e13":"#0c0c0c","#633f32":"#0f0f0f","#8f5f32":"#252525","#552419":"#080808","#6c1108":"#080808","#6a130b":"#080808","#900e0b":"#121212","#700d02":"#080808","#a11307":"#191919","#b4150c":"#252525","#58100f":"#080808","#5f100f":"#080808","#990b09":"#161616","#aa0907":"#1d1d1d","#2f0a05":"#080808","#562e1d":"#080808","#300d09":"#080808","#52120c":"#080808","#63130c":"#080808","#82160b":"#0b0b0b","#c61a0a":"#2d2d2d","#cf1708":"#303030","#e62e0b":"#3d3d3d","#691006":"#080808","#8e1d0d":"#121212","#6c160b":"#080808","#a22c1a":"#232323","#7d190e":"#0a0a0a","#591b14":"#080808","#8c6850":"#333333","#702c19":"#090909","#7c1409":"#080808","#83130a":"#0b0b0b","#a20b07":"#191919","#4d0404":"#080808","#690a05":"#080808","#7d0c08":"#080808","#570806":"#080808","#5c0e0a":"#080808","#8b0c09":"#0f0f0f","#690a06":"#080808","#3a0d07":"#080808","#72461e":"#0d0d0d","#3e0b05":"#080808","#340e09":"#080808","#67110a":"#080808","#a3170a":"#1b1b1b","#7b1309":"#080808","#ad1608":"#1f1f1f","#cd1707":"#2f2f2f","#d51b09":"#343434","#701006":"#080808","#833414":"#101010","#57180e":"#080808","#4f0e06":"#080808","#71150c":"#080808","#5a140e":"#080808","#54251c":"#080808","#441007":"#080808","#7c110d":"#090909","#9e110a":"#191919","#4e0907":"#080808","#6b0a07":"#080808","#5e0806":"#080808","#550703":"#080808","#3d0a05":"#080808","#552914":"#080808","#380a05":"#080808","#330d0a":"#080808","#5a2d19":"#080808","#783513":"#0a0a0a","#721108":"#080808","#bf1509":"#292929","#c91707":"#2d2d2d","#670c04":"#080808","#7e2912":"#0d0d0d","#441009":"#080808","#380c07":"#080808","#230806":"#080808","#4c261c":"#080808","#300704":"#080808","#730b05":"#080808","#a3150d":"#1d1d1d","#640905":"#080808","#520706":"#080808","#7d0b07":"#080808","#6d0806":"#080808","#670303":"#080808","#7e0804":"#080808","#7a0a04":"#080808","#5f0a05":"#080808","#7d532b":"#191919","#552b1e":"#080808","#51261c":"#080808","#4a2218":"#080808","#5d3713":"#080808","#5a1209":"#080808","#b41508":"#232323","#bf1607":"#282828","#520802":"#080808","#7f180a":"#090909","#654837":"#131313","#573a24":"#080808","#693a15":"#080808","#580703":"#080808","#99100b":"#171717","#770a06":"#080808","#5c0704":"#080808","#a41e0d":"#1d1d1d","#a04723":"#262626","#570804":"#080808","#9a0502":"#131313","#a20e03":"#171717","#800d06":"#080808","#ac7753":"#444444","#46230f":"#080808","#540f07":"#080808","#730c05":"#080808","#080100":"#080808","#360502":"#080808","#971808":"#141414","#682d16":"#080808","#530f08":"#080808","#9e0e07":"#171717","#d22504":"#303030","#9b1205":"#151515","#570b09":"#080808","#ba1f0d":"#282828","#b32d12":"#272727","#4c0a08":"#080808","#8f0e07":"#101010","#c61307":"#2b2b2b","#c21709":"#2a2a2a","#a6351c":"#262626","#cd996b":"#616161","#492713":"#080808","#3e170b":"#080808","#420e09":"#080808","#4f0906":"#080808","#670a05":"#080808","#070100":"#080808","#1e0302":"#080808","#931005":"#111111","#6e160b":"#080808","#5e2413":"#080808","#421a12":"#080808","#77100a":"#080808","#820e09":"#0a0a0a","#850e0a":"#0c0c0c","#bc1c0a":"#282828","#a82109":"#1d1d1d","#4a120d":"#080808","#6d110f":"#080808","#700d0b":"#080808","#860f05":"#0a0a0a","#af2108":"#202020","#8f140e":"#131313","#96301d":"#1e1e1e","#692719":"#080808","#663120":"#080808","#522518":"#080808","#421e0f":"#080808","#39170c":"#080808","#38150b":"#080808","#3a130d":"#080808","#3b120c":"#080808","#440b07":"#080808","#460803":"#080808","#130201":"#080808","#600b04":"#080808","#9e1507":"#171717","#6a1309":"#080808","#710f07":"#080808","#620c05":"#080808","#3d100c":"#080808","#59110a":"#080808","#a91709":"#1e1e1e","#8f140b":"#121212","#7d130f":"#0b0b0b","#89140b":"#0f0f0f","#630706":"#080808","#580808":"#080808","#7e0e0d":"#0a0a0a","#670706":"#080808","#610605":"#080808","#720d08":"#080808","#6d0e0a":"#080808","#701810":"#080808","#54170e":"#080808","#41120d":"#080808","#3b110b":"#080808","#3b120d":"#080808","#3c140e":"#080808","#3d140e":"#080808","#3d120c":"#080808","#370c07":"#080808","#350703":"#080808","#9e1005":"#161616","#941505":"#111111","#8b1007":"#0e0e0e","#530f0b":"#080808","#400f0b":"#080808","#660e05":"#080808","#b61505":"#222222","#af1608":"#202020","#9c1a0f":"#1a1a1a","#94140c":"#151515","#420503":"#080808","#7e0b06":"#080808","#960d08":"#141414","#8b0705":"#0d0d0d","#7f0707":"#080808","#c41a13":"#303030","#b5160e":"#262626","#a3160a":"#1b1b1b","#9c180c":"#191919","#97190c":"#161616","#8c1b0f":"#121212","#881c0f":"#101010","#831b10":"#0e0e0e","#78160c":"#080808","#641008":"#080808","#5e0c05":"#080808","#4e0702":"#080808","#310604":"#080808","#821006":"#090909","#5d1009":"#080808","#661109":"#080808","#620c06":"#080808","#4c0905":"#080808","#9c0c04":"#151515","#b21305":"#202020","#ba1806":"#252525","#c1220b":"#2b2b2b","#a91c0b":"#1f1f1f","#6d0a02":"#080808","#a41a07":"#1a1a1a","#88140b":"#0e0e0e","#76100f":"#080808","#740603":"#080808","#d11f08":"#313131","#d52606":"#323232","#bb1505":"#252525","#ab1006":"#1d1d1d","#9d1105":"#161616","#890f05":"#0c0c0c","#780e06":"#080808","#630b05":"#080808","#580705":"#080808","#460604":"#080808","#130302":"#080808","#8c0e05":"#0d0d0d","#760d05":"#080808","#620803":"#080808","#ac1507":"#1e1e1e","#cf3610":"#343434","#be3318":"#303030","#7e2411":"#0c0c0c","#b42a0f":"#262626","#96331a":"#1d1d1d","#711410":"#080808","#4d0606":"#080808","#cd4a1d":"#3a3a3a","#d25720":"#3e3e3e","#9d1408":"#171717","#900e05":"#0f0f0f","#8a0d05":"#0c0c0c","#800d05":"#080808","#6e0c06":"#080808","#550c06":"#080808","#410a05":"#080808","#3c0705":"#080808","#5a0a06":"#080808","#6c0d06":"#080808","#7a0b04":"#080808","#4a0805":"#080808","#5c0c07":"#080808","#7a0505":"#080808","#9f1007":"#181818","#a71c12":"#212121","#650c07":"#080808","#6d1206":"#080808","#72241c":"#0c0c0c","#450707":"#080808","#5c170e":"#080808","#79170d":"#080808","#7f1109":"#090909","#7d1209":"#080808","#791009":"#080808","#700e0a":"#080808","#550b06":"#080808","#3f0805":"#080808","#3e0804":"#080808","#340704":"#080808","#1f0504":"#080808","#360907":"#080808","#83110a":"#0b0b0b","#8b0d05":"#0d0d0d","#490804":"#080808","#830c08":"#0a0a0a","#8b0b08":"#0e0e0e","#8a0e08":"#0e0e0e","#89120b":"#0f0f0f","#680b08":"#080808","#340504":"#080808","#780e0d":"#080808","#880f0d":"#0f0f0f","#550606":"#080808","#891712":"#121212","#91110c":"#131313","#94120c":"#151515","#94110a":"#141414","#95100a":"#141414","#9d0e09":"#181818","#940b07":"#121212","#8d0a07":"#0f0f0f","#850a05":"#0a0a0a","#520805":"#080808","#3d0704":"#080808","#190502":"#080808","#230605":"#080808","#250704":"#080808","#240705":"#080808","#1b0604":"#080808","#280a06":"#080808","#2c0a07":"#080808","#330c08":"#080808","#310c08":"#080808","#270806":"#080808","#380d09":"#080808","#5b160e":"#080808","#57130a":"#080808","#54110b":"#080808","#480e09":"#080808","#a01006":"#181818","#6a0c05":"#080808","#420704":"#080808","#250502":"#080808","#110403":"#080808","#310907":"#080808","#2f0e09":"#080808","#3a0b06":"#080808","#350806":"#080808","#370905":"#080808","#1f0704":"#080808","#130303":"#080808","#240907":"#080808","#250806":"#080808","#370e09":"#080808","#430e0a":"#080808","#380906":"#080808","#99130c":"#171717","#9e1207":"#171717","#aa1504":"#1c1c1c","#b22502":"#1f1f1f","#a82104":"#1b1b1b","#861804":"#0a0a0a","#500d05":"#080808","#9d603f":"#333333","#0f0703":"#080808","#380f09":"#080808","#2b0b05":"#080808","#370a05":"#080808","#520c06":"#080808","#670f06":"#080808","#841206":"#0a0a0a","#791205":"#080808","#540c05":"#080808","#200705":"#080808","#2d0906":"#080808","#82160c":"#0c0c0c","#b9170d":"#282828","#c71308":"#2c2c2c","#e41e02":"#383838","#ec2502":"#3c3c3c","#e41b03":"#383838","#a10e06":"#181818","#530b05":"#080808","#99523c":"#2f2f2f","#b9753f":"#414141","#0f0603":"#080808","#46110b":"#080808","#350d06":"#080808","#240703":"#080808","#530c06":"#080808","#981a04":"#131313","#9e1c04":"#161616","#a31604":"#181818","#a81504":"#1b1b1b","#821103":"#080808","#320603":"#080808","#180806":"#080808","#110503":"#080808","#360b09":"#080808","#5d110a":"#080808","#731007":"#080808","#8b0b03":"#0c0c0c","#8d0b03":"#0d0d0d","#910d02":"#0e0e0e","#940d02":"#101010","#580905":"#080808","#440b08":"#080808","#450f09":"#080808","#250803":"#080808","#380905":"#080808","#500c05":"#080808","#681903":"#080808","#701903":"#080808","#7a1b02":"#080808","#971b02":"#111111","#b31503":"#202020","#af1503":"#1e1e1e","#630f06":"#080808","#391711":"#080808","#301b12":"#080808","#120805":"#080808","#570c07":"#080808","#5e0c07":"#080808","#5e0b06":"#080808","#540905":"#080808","#420502":"#080808","#3e0300":"#080808","#390301":"#080808","#3e0604":"#080808","#440705":"#080808","#4a0b07":"#080808","#3b0c07":"#080808","#330905":"#080808","#340a06":"#080808","#490e06":"#080808","#5f1205":"#080808","#861f05":"#0a0a0a","#ad2803":"#1d1d1d","#c83103":"#2a2a2a","#d03303":"#2e2e2e","#ce3006":"#2f2f2f","#ca2305":"#2c2c2c","#c41803":"#282828","#601109":"#080808","#553a25":"#080808","#5c4229":"#080808","#1f100a":"#080808","#0b0302":"#080808","#150502":"#080808","#2b0804":"#080808","#3d0905":"#080808","#3c0d07":"#080808","#2b0905":"#080808","#370b05":"#080808","#551007":"#080808","#4f1007":"#080808","#6f1608":"#080808","#761409":"#080808","#841a06":"#0a0a0a","#a83616":"#242424","#be411d":"#323232","#cd522b":"#414141","#9f210a":"#191919","#5c1e0a":"#080808","#8e4c27":"#1f1f1f","#4e2c1a":"#080808","#392117":"#080808","#100403":"#080808","#0d0504":"#080808","#0f0302":"#080808","#0e0302":"#080808","#230804":"#080808","#2e0a05":"#080808","#4e0f07":"#080808","#611409":"#080808","#691509":"#080808","#71150a":"#080808","#80170c":"#0b0b0b","#89180a":"#0e0e0e","#8a1909":"#0e0e0e","#8b190a":"#0f0f0f","#9e341b":"#212121","#8a482c":"#202020","#6f3a20":"#0c0c0c","#b5773d":"#3e3e3e","#5d3419":"#080808","#442310":"#080808","#5c2d1b":"#080808","#643d27":"#0a0a0a","#1e0c09":"#080808","#2f0805":"#080808","#400d06":"#080808","#561209":"#080808","#62140a":"#080808","#64120c":"#080808","#6a140c":"#080808","#8b1b0d":"#111111","#a1200d":"#1c1c1c","#ac210e":"#222222","#b3210e":"#252525","#641f0f":"#080808","#6a4624":"#0c0c0c","#5c2f16":"#080808","#360d04":"#080808","#893614":"#131313","#6e4322":"#0d0d0d","#b06036":"#383838","#430f07":"#080808","#501209":"#080808","#571409":"#080808","#5d140b":"#080808","#5f100c":"#080808","#5e120e":"#080808","#69140d":"#080808","#74160e":"#080808","#7e190e":"#0b0b0b","#532110":"#080808","#74401e":"#0e0e0e","#310b04":"#080808","#a41c07":"#1a1a1a","#ba2b07":"#252525","#824928":"#1a1a1a","#491108":"#080808","#501309":"#080808","#51140a":"#080808","#4f110b":"#080808","#470f0c":"#080808","#4a0d0c":"#080808","#61130a":"#080808","#491f10":"#080808","#905e32":"#262626","#2d0904":"#080808","#8c1b07":"#0e0e0e","#ba4418":"#2e2e2e","#512913":"#080808","#a66a35":"#323232","#170503":"#080808","#451209":"#080808","#4d1309":"#080808","#4d130a":"#080808","#4b120a":"#080808","#480e0c":"#080808","#450e0c":"#080808","#4d0e09":"#080808","#320e08":"#080808","#2b1009":"#080808","#560f06":"#080808","#931f0d":"#151515","#5d1606":"#080808","#a05c2e":"#2c2c2c","#4a0802":"#080808","#1a0603":"#080808","#2f0b06":"#080808","#320c06":"#080808","#280906":"#080808","#2a0906":"#080808","#2e0a07":"#080808","#380c05":"#080808","#452b18":"#080808","#490d06":"#080808","#a5230e":"#1e1e1e","#641808":"#080808","#3c170c":"#080808","#97663c":"#2e2e2e","#1b0603":"#080808","#2e0a06":"#080808","#4c1008":"#080808","#490e0c":"#080808","#420a0a":"#080808","#3e0905":"#080808","#9c5f30":"#2b2b2b","#422112":"#080808","#ae1e0b":"#212121","#a5200d":"#1e1e1e","#5a0c06":"#080808","#af511b":"#2a2a2a","#3d2212":"#080808","#1c0706":"#080808","#2c0704":"#080808","#380a06":"#080808","#410c07":"#080808","#370808":"#080808","#520d08":"#080808","#6b2b10":"#080808","#612e1a":"#080808","#901709":"#111111","#a91b0b":"#1f1f1f","#4b0906":"#080808","#74280b":"#080808","#604123":"#080808","#734e35":"#191919","#260b08":"#080808","#390906":"#080808","#300806":"#080808","#500c08":"#080808","#792b0f":"#090909","#612b12":"#080808","#4e1209":"#080808","#350c07":"#080808","#490704":"#080808","#5d0b06":"#080808","#3a0505":"#080808","#571503":"#080808","#432310":"#080808","#32170f":"#080808","#1d0805":"#080808","#731107":"#080808","#6e1008":"#080808","#630f07":"#080808","#270403":"#080808","#651108":"#080808","#a31b0b":"#1c1c1c","#8b1609":"#0f0f0f","#7f1409":"#090909","#661008":"#080808","#471303":"#080808","#5e3c20":"#080808","#250603":"#080808","#2c0401":"#080808","#cd2509":"#303030","#a01c09":"#191919","#951809":"#141414","#761106":"#080808","#4a0a04":"#080808","#a51b08":"#1b1b1b","#e12f15":"#404040","#e7421d":"#474747","#e3230f":"#3e3e3e","#b4200e":"#262626","#470b08":"#080808","#200403":"#080808","#3b0705":"#080808","#7a2503":"#080808","#824625":"#181818","#2e110a":"#080808","#330703":"#080808","#260603":"#080808","#3a0904":"#080808","#0e0202":"#080808","#0b0201":"#080808","#ef4311":"#454545","#de2c08":"#383838","#c51f05":"#2a2a2a","#b01e06":"#202020","#b82007":"#242424","#d42009":"#333333","#e6270e":"#3f3f3f","#e84e22":"#4a4a4a","#e43b1a":"#444444","#d7230e":"#373737","#b31d0b":"#242424","#ac190a":"#202020","#c5220e":"#2e2e2e","#cc250e":"#323232","#cb2b06":"#2d2d2d","#781704":"#080808","#2d0905":"#080808","#390803":"#080808","#560f07":"#080808","#ce2c15":"#363636","#bb1f0b":"#282828","#c31c04":"#282828","#b21904":"#202020","#8f1509":"#111111","#651710":"#080808","#6a251b":"#080808","#5c1f16":"#080808","#240704":"#080808","#d43911":"#373737","#d4310d":"#353535","#ce2607":"#2f2f2f","#d02003":"#2e2e2e","#cd2104":"#2d2d2d","#c72205":"#2b2b2b","#d12106":"#303030","#d82109":"#353535","#d92d0f":"#393939","#d62a0e":"#373737","#d5260d":"#363636","#d9260e":"#383838","#de250f":"#3b3b3b","#dc2810":"#3b3b3b","#c9260a":"#2e2e2e","#581005":"#080808","#380c06":"#080808","#310703":"#080808","#320804":"#080808","#be1606":"#272727","#d61505":"#323232","#e42002":"#383838","#e31e02":"#373737","#d51d02":"#303030","#9b1f05":"#151515","#65110a":"#080808","#5a1810":"#080808","#80461d":"#131313","#461e0c":"#080808","#290a04":"#080808","#c81904":"#2b2b2b","#af1906":"#1f1f1f","#861406":"#0b0b0b","#7d1207":"#080808","#6b1105":"#080808","#891405":"#0c0c0c","#ba1a05":"#242424","#c61b05":"#2a2a2a","#c91d05":"#2c2c2c","#cb1d06":"#2d2d2d","#cf1d08":"#303030","#cd220c":"#313131","#900f04":"#0f0f0f","#570e05":"#080808","#571007":"#080808","#370904":"#080808","#430c06":"#080808","#a51306":"#1a1a1a","#d31304":"#303030","#980e05":"#131313","#5d0602":"#080808","#7a0a02":"#080808","#9d0e04":"#151515","#8f1005":"#0f0f0f","#591607":"#080808","#8f1506":"#0f0f0f","#951506":"#121212","#9b1605":"#151515","#881406":"#0c0c0c","#4c0c04":"#080808","#4b0c05":"#080808","#6e1005":"#080808","#981505":"#131313","#ab1705":"#1d1d1d","#a81706":"#1c1c1c","#a51807":"#1b1b1b","#961404":"#121212","#660b02":"#080808","#470a04":"#080808","#470c05":"#080808","#360703":"#080808","#591007":"#080808","#831207":"#0a0a0a","#c81104":"#2b2b2b","#d41d02":"#303030","#c61f02":"#292929","#770e03":"#080808","#470502":"#080808","#410401":"#080808","#250302":"#080808","#360603":"#080808","#3e0a04":"#080808","#300e04":"#080808","#150402":"#080808","#821406":"#090909","#6c1107":"#080808","#410b05":"#080808","#2c0904":"#080808","#350905":"#080808","#340501":"#080808","#7a1104":"#080808","#7c1003":"#080808","#4e0801":"#080808","#2d0401":"#080808","#200402":"#080808","#2d0603":"#080808","#550d05":"#080808","#7e150a":"#090909","#6a0d07":"#080808","#b31004":"#202020","#e42e01":"#373737","#f53601":"#404040","#eb2c02":"#3b3b3b","#b22707":"#212121","#581107":"#080808","#1b0502":"#080808","#130301":"#080808","#600a02":"#080808","#811104":"#080808","#5c0a02":"#080808","#2b0501":"#080808","#1b0706":"#080808","#3c0903":"#080808","#741206":"#080808","#901405":"#0f0f0f","#640e06":"#080808","#830d05":"#090909","#b41204":"#212121","#bf1d05":"#272727","#cd2505":"#2e2e2e","#992704":"#131313","#5a100a":"#080808","#500d08":"#080808","#340605":"#080808","#0c0606":"#080808","#0c0201":"#080808","#8f1a0a":"#111111","#732712":"#080808","#1c0302":"#080808","#210502":"#080808","#1f0907":"#080808","#260d0c":"#080808","#48110d":"#080808","#630c07":"#080808","#610b07":"#080808","#580a05":"#080808","#601c15":"#080808","#70241a":"#0a0a0a","#580f09":"#080808","#622118":"#080808","#753a2f":"#171717","#390c09":"#080808","#1f1515":"#080808","#0c0605":"#080808","#290502":"#080808","#8d1506":"#0e0e0e","#b53a1b":"#2d2d2d","#5e361b":"#080808","#28190c":"#080808","#16100e":"#080808","#4e0906":"#080808","#4f120f":"#080808","#5a150f":"#080808","#703309":"#080808","#9f693c":"#323232","#260503":"#080808","#0c0807":"#080808","#170301":"#080808","#6f0f04":"#080808","#aa1a08":"#1e1e1e","#7e2811":"#0c0c0c","#24140a":"#080808","#5d2f08":"#080808","#2c0b05":"#080808","#150504":"#080808","#32100c":"#080808","#821005":"#080808","#ab1806":"#1d1d1d","#781606":"#080808","#39180b":"#080808","#26150b":"#080808","#290703":"#080808","#320d04":"#080808","#120803":"#080808","#a41507":"#1a1a1a","#951406":"#121212","#620f04":"#080808","#1f0804":"#080808","#180a06":"#080808","#1a0502":"#080808","#b81e0c":"#272727","#d0270d":"#333333","#de2109":"#383838","#f02808":"#414141","#f83d0f":"#484848","#f2551b":"#4b4b4b","#f65c17":"#4b4b4b","#e53b10":"#3f3f3f","#e01f08":"#393939","#dc1807":"#363636","#ca1e07":"#2d2d2d","#be1c04":"#262626","#ad1c05":"#1e1e1e","#911904":"#0f0f0f","#8f1405":"#0f0f0f","#a81806":"#1c1c1c","#c7230d":"#2f2f2f","#c93816":"#343434","#e84219":"#454545","#ee5a25":"#4e4e4e","#df4217":"#404040","#b9280e":"#282828","#8a190a":"#0f0f0f","#841709":"#0b0b0b","#9d1b0b":"#191919","#88150a":"#0e0e0e","#3e0d06":"#080808","#1a0703":"#080808","#951a0a":"#141414","#ca2910":"#323232","#e3250d":"#3d3d3d","#f22c09":"#424242","#f63e10":"#484848","#f7661d":"#4f4f4f","#f3601e":"#4d4d4d","#df3813":"#3e3e3e","#e12a0d":"#3c3c3c","#db1d07":"#363636","#cb1c05":"#2d2d2d","#bf1904":"#262626","#a61b04":"#1a1a1a","#7a1504":"#080808","#691105":"#080808","#ae1a09":"#202020","#d8260e":"#383838","#e1441d":"#444444","#df662b":"#4a4a4a","#c8461d":"#373737","#c52e0e":"#2e2e2e","#b0220d":"#232323","#ad1e0a":"#202020","#c01f0a":"#2a2a2a","#9e1a0b":"#191919","#661208":"#080808","#2a0a04":"#080808","#0e0503":"#080808","#6d1207":"#080808","#cd2f10":"#333333","#eb3015":"#454545","#ed2d09":"#404040","#f03b0f":"#444444","#f75214":"#4a4a4a","#f65819":"#4c4c4c","#e93b0e":"#404040","#da2a09":"#363636","#de1e06":"#373737","#cc1905":"#2d2d2d","#b61904":"#222222","#9b1a04":"#141414","#6e1603":"#080808","#631105":"#080808","#9a1705":"#141414","#d7220b":"#363636","#dc3817":"#3e3e3e","#d3421b":"#3c3c3c","#cf3915":"#373737","#d63f18":"#3c3c3c","#c82e12":"#323232","#cc1f09":"#2f2f2f","#b71f0a":"#252525","#7f1609":"#090909","#641109":"#080808","#581108":"#080808","#250703":"#080808","#140504":"#080808","#4a0d05":"#080808","#c63014":"#323232","#e9270e":"#404040","#e6280b":"#3d3d3d","#e4330a":"#3c3c3c","#f33c0e":"#454545","#f54311":"#484848","#ee370d":"#424242","#d42909":"#333333","#db1805":"#353535","#d11504":"#2f2f2f","#b31504":"#202020","#971a05":"#131313","#751604":"#080808","#611104":"#080808","#731206":"#080808","#a71b07":"#1c1c1c","#b8210a":"#262626","#ae250d":"#222222","#bc280e":"#2a2a2a","#c32a0e":"#2d2d2d","#bc1f09":"#272727","#af1c09":"#212121","#971a0a":"#151515","#761609":"#080808","#691209":"#080808","#390b06":"#080808","#1c0602":"#080808","#370802":"#080808","#a8260f":"#202020","#de3113":"#3d3d3d","#e4210a":"#3c3c3c","#d22308":"#323232","#dd1b07":"#373737","#ef370e":"#434343","#ee330b":"#414141","#d91f05":"#343434","#d21603":"#2f2f2f","#d41304":"#313131","#b31604":"#202020","#9e1c05":"#161616","#781904":"#080808","#611004":"#080808","#611005":"#080808","#5c0f05":"#080808","#7e1507":"#080808","#871507":"#0c0c0c","#901708":"#111111","#911a09":"#121212","#881c0b":"#0e0e0e","#81190a":"#0a0a0a","#77180a":"#080808","#601208":"#080808","#3f0d06":"#080808","#1f0603":"#080808","#7d1709":"#080808","#bb3012":"#2b2b2b","#df270c":"#3a3a3a","#d71a06":"#333333","#c81906":"#2c2c2c","#e0230c":"#3b3b3b","#ed350d":"#424242","#db1703":"#343434","#d11703":"#2f2f2f","#d51603":"#313131","#aa1404":"#1c1c1c","#a21d05":"#181818","#681306":"#080808","#671404":"#080808","#580e04":"#080808","#621105":"#080808","#871a04":"#0a0a0a","#851a05":"#0a0a0a","#801905":"#080808","#6c1306":"#080808","#7c1706":"#080808","#791807":"#080808","#5d0f08":"#080808","#3f0b06":"#080808","#400807":"#080808","#540d05":"#080808","#912710":"#151515","#c62b0f":"#2f2f2f","#ce240a":"#313131","#bd1408":"#272727","#d11a05":"#303030","#e7300c":"#3e3e3e","#d61c06":"#333333","#c91603":"#2b2b2b","#ca1703":"#2b2b2b","#9d1c05":"#161616","#671104":"#080808","#601205":"#080808","#4a0b04":"#080808","#450b04":"#080808","#5e0f04":"#080808","#851a03":"#090909","#971e04":"#121212","#921c04":"#101010","#7b1805":"#080808","#5d1006":"#080808","#3a0a04":"#080808","#340804":"#080808","#470a07":"#080808","#4f0f09":"#080808","#290602":"#080808","#6f190a":"#080808","#92230f":"#151515","#b2280c":"#242424","#b52008":"#232323","#b81203":"#222222","#d01a06":"#303030","#d22007":"#313131","#c91904":"#2b2b2b","#b11503":"#1f1f1f","#9b1404":"#141414","#7e1604":"#080808","#821605":"#080808","#8f1805":"#0f0f0f","#901a07":"#101010","#7d1407":"#080808","#4c0b04":"#080808","#310803":"#080808","#320903":"#080808","#490d04":"#080808","#480d04":"#080808","#370a03":"#080808","#340903":"#080808","#3e0c05":"#080808","#5c1208":"#080808","#50140c":"#080808","#360d08":"#080808","#540f05":"#080808","#7e1d0c":"#0a0a0a","#8e200b":"#111111","#aa2107":"#1d1d1d","#a71d06":"#1b1b1b","#b61704":"#222222","#c61d07":"#2b2b2b","#b91c07":"#252525","#a51706":"#1a1a1a","#951705":"#121212","#a01d05":"#171717","#ab1e05":"#1d1d1d","#b62005":"#222222","#b51f08":"#232323","#b71e07":"#242424","#a41807":"#1a1a1a","#611006":"#080808","#390903":"#080808","#270903":"#080808","#3d0d03":"#080808","#7e1804":"#080808","#911c06":"#101010","#931b05":"#111111","#751605":"#080808","#3f0d08":"#080808","#230a07":"#080808","#320803":"#080808","#781807":"#080808","#801b0b":"#0a0a0a","#911f09":"#121212","#9f1f07":"#181818","#a11e05":"#181818","#b01f05":"#1f1f1f","#b21d05":"#202020","#a31d05":"#191919","#a01b05":"#171717","#bf1f06":"#272727","#d32404":"#303030","#eb2d03":"#3c3c3c","#ee2f03":"#3d3d3d","#de2605":"#363636","#c71d06":"#2b2b2b","#b82005":"#232323","#7a1505":"#080808","#310903":"#080808","#1e0703":"#080808","#340904":"#080808","#2f0904":"#080808","#350b06":"#080808","#1a0707":"#080808","#470c03":"#080808","#8b1b07":"#0e0e0e","#891b08":"#0d0d0d","#911c07":"#111111","#971e05":"#131313","#961b05":"#121212","#a21905":"#181818","#981905":"#131313","#b42106":"#222222","#c52206":"#2a2a2a","#e2370f":"#3d3d3d","#ef5317":"#484848","#ed5719":"#484848","#ef4a11":"#454545","#ef3104":"#3e3e3e","#da2205":"#343434","#bd2104":"#252525","#751404":"#080808","#180803":"#080808","#220804":"#080808","#2d0b05":"#080808","#330a05":"#080808","#310a05":"#080808","#350c05":"#080808","#451008":"#080808","#190702":"#080808","#470e05":"#080808","#7b1707":"#080808","#7b1a07":"#080808","#851907":"#0b0b0b","#931c06":"#111111","#891805":"#0c0c0c","#8f1806":"#0f0f0f","#bc2006":"#262626","#c82208":"#2d2d2d","#da3c14":"#3c3c3c","#e14817":"#414141","#d64317":"#3b3b3b","#ca3e13":"#333333","#d83b0f":"#383838","#e0340a":"#3a3a3a","#d01c06":"#303030","#a51a05":"#1a1a1a","#570d04":"#080808","#170602":"#080808","#1c0704":"#080808","#280904":"#080808","#2a0905":"#080808","#3d0e07":"#080808","#390b03":"#080808","#701406":"#080808","#6d1408":"#080808","#8a1c08":"#0e0e0e","#8d1605":"#0e0e0e","#881a05":"#0b0b0b","#ba1f06":"#252525","#bb2007":"#262626","#d42308":"#333333","#db2407":"#363636","#d02007":"#303030","#c2210c":"#2c2c2c","#bb280e":"#292929","#d13710":"#353535","#d5300e":"#363636","#c31506":"#292929","#791605":"#080808","#2f0603":"#080808","#1c0703":"#080808","#1c0603":"#080808","#1e0604":"#080808","#2a0a05":"#080808","#2b0a06":"#080808","#2d0a05":"#080808","#140602":"#080808","#310c07":"#080808","#5c1107":"#080808","#681207":"#080808","#851406":"#0a0a0a","#7c1505":"#080808","#a71c06":"#1b1b1b","#ba1f04":"#242424","#ca2a02":"#2b2b2b","#ce2407":"#2f2f2f","#d12007":"#313131","#c81907":"#2c2c2c","#bf1808":"#282828","#b71e0c":"#262626","#d43011":"#373737","#cc210a":"#303030","#8f1607":"#101010","#440b04":"#080808","#280502":"#080808","#350a06":"#080808","#220704":"#080808","#1f0604":"#080808","#260905":"#080808","#1c0e0d":"#080808","#100402":"#080808","#160703":"#080808","#3f0c06":"#080808","#651007":"#080808","#751307":"#080808","#731306":"#080808","#881606":"#0c0c0c","#a11906":"#181818","#b71904":"#222222","#b81a06":"#242424","#c21f07":"#292929","#c71c06":"#2b2b2b","#c81607":"#2c2c2c","#c21808":"#2a2a2a","#bc220e":"#2a2a2a","#c5240e":"#2e2e2e","#a11a09":"#1a1a1a","#510c05":"#080808","#4f0c05":"#080808","#490c04":"#080808","#2c0804":"#080808","#250804":"#080808","#170b0b":"#080808","#130504":"#080808","#390a05":"#080808","#8d1204":"#0d0d0d","#680e04":"#080808","#390a03":"#080808","#3f0b03":"#080808","#490d05":"#080808","#801407":"#080808","#981606":"#141414","#b91804":"#232323","#be1b04":"#262626","#b21906":"#212121","#bd1807":"#272727","#c31306":"#292929","#be1307":"#272727","#ba190a":"#272727","#aa1708":"#1e1e1e","#4d0f04":"#080808","#7a1406":"#080808","#8c1508":"#0f0f0f","#6c1006":"#080808","#560c05":"#080808","#530d05":"#080808","#180d0d":"#080808","#1b0c09":"#080808","#240c06":"#080808","#461107":"#080808","#861605":"#0a0a0a","#8f1504":"#0e0e0e","#5a0f03":"#080808","#5c0f06":"#080808","#781107":"#080808","#761006":"#080808","#881207":"#0c0c0c","#9e1506":"#171717","#ae1704":"#1e1e1e","#b71905":"#232323","#aa1505":"#1c1c1c","#b71206":"#232323","#bf1006":"#272727","#b80f06":"#242424","#9e1709":"#181818","#6c1104":"#080808","#c72009":"#2d2d2d","#de2905":"#363636","#c62d08":"#2c2c2c","#941809":"#131313","#7f1307":"#080808","#100604":"#080808","#1b0a06":"#080808","#791304":"#080808","#9a1b06":"#151515","#861706":"#0b0b0b","#7a1006":"#080808","#731004":"#080808","#831104":"#080808","#911304":"#0f0f0f","#991404":"#131313","#8a1506":"#0d0d0d","#961507":"#131313","#751306":"#080808","#961605":"#121212","#b41b07":"#222222","#d42507":"#323232","#f03204":"#3f3f3f","#f33907":"#424242","#e52b09":"#3c3c3c","#df260a":"#393939","#170403":"#080808","#460c03":"#080808","#a31c06":"#191919","#9c1a06":"#161616","#851606":"#0a0a0a","#6f1104":"#080808","#6e0e04":"#080808","#751104":"#080808","#841304":"#090909","#871404":"#0a0a0a","#7d1305":"#080808","#891305":"#0c0c0c","#b21804":"#202020","#a91605":"#1c1c1c","#b91b03":"#232323","#d22303":"#2f2f2f","#e8340a":"#3e3e3e","#f04b14":"#474747","#f04a13":"#464646","#160605":"#080808","#1c0604":"#080808","#2d0804":"#080808","#320904":"#080808","#3d0b05":"#080808","#220805":"#080808","#220906":"#080808","#300802":"#080808","#881706":"#0c0c0c","#951806":"#121212","#891706":"#0c0c0c","#641006":"#080808","#701005":"#080808","#711205":"#080808","#7a1204":"#080808","#9e1404":"#161616","#b51704":"#212121","#b41704":"#212121","#af1604":"#1e1e1e","#c41904":"#292929","#cd1d05":"#2e2e2e","#d62007":"#333333","#d73511":"#393939","#221616":"#080808","#440a04":"#080808","#7e1205":"#080808","#961506":"#131313","#b31906":"#212121","#ca1906":"#2d2d2d","#d11907":"#313131","#cd200d":"#323232","#84180c":"#0d0d0d","#1c0401":"#080808","#3e0a05":"#080808","#4f0c06":"#080808","#470c07":"#080808","#4d0b05":"#080808","#560b04":"#080808","#5a0c04":"#080808","#5e0c03":"#080808","#6a0e03":"#080808","#6f0f03":"#080808","#871204":"#0a0a0a","#a41404":"#191919","#b11604":"#1f1f1f","#ba1804":"#242424","#cb1704":"#2c2c2c","#c91805":"#2c2c2c","#c91804":"#2b2b2b","#0f0403":"#080808","#250805":"#080808","#460c05":"#080808","#7e1406":"#080808","#b91805":"#242424","#d71605":"#333333","#d51605":"#323232","#981203":"#121212","#4f0a02":"#080808","#340905":"#080808","#390905":"#080808","#3a0905":"#080808","#450a05":"#080808","#490a04":"#080808","#510c04":"#080808","#5a0e05":"#080808","#6b1007":"#080808","#7c1407":"#080808","#8d1607":"#0f0f0f","#881507":"#0c0c0c","#8a1406":"#0d0d0d","#8d1306":"#0e0e0e","#0f0504":"#080808","#130704":"#080808","#350e06":"#080808","#991405":"#141414","#d41605":"#313131","#cc1705":"#2d2d2d","#ba1604":"#242424","#991103":"#131313","#730c03":"#080808","#5c0a03":"#080808","#5b0c04":"#080808","#440703":"#080808","#3d0502":"#080808","#510803":"#080808","#620b04":"#080808","#720e05":"#080808","#851205":"#0a0a0a","#921405":"#101010","#8d1405":"#0e0e0e","#8b1405":"#0d0d0d","#891406":"#0c0c0c","#160905":"#080808","#1f0c06":"#080808","#480e07":"#080808","#a21106":"#191919","#c71807":"#2c2c2c","#c41e09":"#2b2b2b","#c5210a":"#2c2c2c","#c2230b":"#2b2b2b","#b6200b":"#252525","#991b0a":"#161616","#81200e":"#0c0c0c","#5e0f07":"#080808","#510501":"#080808","#500803":"#080808","#570a03":"#080808","#4b0a03":"#080808","#150904":"#080808","#2b160b":"#080808","#512110":"#080808","#612612":"#080808","#753418":"#0b0b0b","#773518":"#0c0c0c","#703117":"#080808","#682913":"#080808","#541007":"#080808","#2f0401":"#080808","#100201":"#080808","#090101":"#080808","#040101":"#080808","#1a0806":"#080808","#1a0c09":"#080808","#130907":"#080808","#130a07":"#080808","#110a07":"#080808","#0e0604":"#080808","#0a0403":"#080808","#060202":"#080808","#130d0d":"#080808","#0a0604":"#080808","#120a0a":"#080808","#0b0404":"#080808","#0a0302":"#080808","#1d0605":"#080808","#450e0b":"#080808","#8c1d13":"#141414","#20110f":"#080808","#150604":"#080808","#120503":"#080808","#080202":"#080808","#040100":"#080808","#290401":"#080808","#3f0603":"#080808","#5a0a03":"#080808","#750c04":"#080808","#7a0e05":"#080808","#530b04":"#080808","#270705":"#080808","#200706":"#080808","#0a0404":"#080808","#0a0504":"#080808","#120402":"#080808","#110303":"#080808","#340a05":"#080808","#2c0603":"#080808","#0b0403":"#080808","#171110":"#080808","#420c06":"#080808","#631107":"#080808","#9f1006":"#171717","#6a0d05":"#080808","#1e0704":"#080808","#230805":"#080808","#250906":"#080808","#5c0d05":"#080808","#7d0e06":"#080808","#640d05":"#080808","#180603":"#080808","#190705":"#080808","#1f0d0b":"#080808","#170604":"#080808","#270805":"#080808","#330c05":"#080808","#350e05":"#080808","#590c05":"#080808","#650d06":"#080808","#200703":"#080808","#150601":"#080808","#2e110f":"#080808","#622618":"#080808","#933914":"#181818","#de360a":"#393939","#d62f0b":"#353535","#d22e09":"#323232","#c63108":"#2c2c2c","#bc2e08":"#272727","#ac2106":"#1e1e1e","#791105":"#080808","#350904":"#080808","#55230b":"#080808","#491c0d":"#080808","#2a0b06":"#080808","#9a2a01":"#121212","#d12a01":"#2e2e2e","#e72f04":"#3a3a3a","#f93a03":"#434343","#f93903":"#434343","#ed2b0a":"#404040","#e9240d":"#404040","#de280d":"#3a3a3a","#ce2e0a":"#313131","#cf3008":"#303030","#c12907":"#292929","#8a1606":"#0d0d0d","#862c0f":"#0f0f0f","#9a451e":"#212121","#f67124":"#525252","#ef6b24":"#4e4e4e","#dd440e":"#3a3a3a","#df3704":"#363636","#be4108":"#282828","#d43708":"#333333","#ef2c07":"#404040","#ea2509":"#3e3e3e","#d9210d":"#383838","#dd210e":"#3a3a3a","#e41e0e":"#3e3e3e","#e6210f":"#3f3f3f","#e42611":"#3f3f3f","#d8451d":"#3f3f3f","#dd4d21":"#444444","#ad2309":"#202020","#681206":"#080808","#8e290e":"#131313","#851e0a":"#0c0c0c","#a42d10":"#1f1f1f","#e1561b":"#434343","#ed4b14":"#454545","#e93a09":"#3e3e3e","#bb3010":"#2a2a2a","#d32b11":"#373737","#dd220e":"#3a3a3a","#b91e0b":"#272727","#7f1208":"#080808","#650d07":"#080808","#700f07":"#080808","#8d1809":"#101010","#e62f16":"#434343","#e93111":"#424242","#e13109":"#3a3a3a","#8f1505":"#0f0f0f","#2e0906":"#080808","#992f0d":"#181818","#7e2210":"#0c0c0c","#881909":"#0d0d0d","#a11a08":"#191919","#c11d0a":"#2a2a2a","#d8220c":"#373737","#d0230d":"#333333","#a11a0b":"#1b1b1b","#600d07":"#080808","#4a0806":"#080808","#401109":"#080808","#2a0806":"#080808","#4a1108":"#080808","#7d1a06":"#080808","#882a07":"#0c0c0c","#ac6545":"#3d3d3d","#5e2415":"#080808","#98240c":"#171717","#981d0a":"#161616","#981708":"#151515","#a81708":"#1d1d1d","#8b1408":"#0e0e0e","#4f0f05":"#080808","#582014":"#080808","#9a6942":"#333333","#4c2d18":"#080808","#311b0e":"#080808","#190604":"#080808","#1b0703":"#080808","#4a3019":"#080808","#94350f":"#161616","#7c5f45":"#252525","#46150a":"#080808","#6b1507":"#080808","#8d1d0c":"#111111","#6d1a0e":"#080808","#741309":"#080808","#4a110b":"#080808","#321d0f":"#080808","#190603":"#080808","#1f0905":"#080808","#56391d":"#080808","#ac5b21":"#2b2b2b","#b26f3c":"#3c3c3c","#23130d":"#080808","#a52f08":"#1b1b1b","#241103":"#080808","#170903":"#080808","#240804":"#080808","#5d140a":"#080808","#3c0f09":"#080808","#4a0c08":"#080808","#824826":"#191919","#3d2312":"#080808","#1c0a06":"#080808","#412815":"#080808","#d87b38":"#4d4d4d","#4b2b17":"#080808","#742707":"#080808","#a73209":"#1d1d1d","#5a1b06":"#080808","#250908":"#080808","#370a09":"#080808","#230907":"#080808","#1d0704":"#080808","#33150b":"#080808","#a66631":"#303030","#52341d":"#080808","#2a150a":"#080808","#321d11":"#080808","#a52c08":"#1b1b1b","#6a1d06":"#080808","#190703":"#080808","#1c0705":"#080808","#1c0605":"#080808","#150705":"#080808","#1a0b06":"#080808","#392314":"#080808","#825530":"#1e1e1e","#593a1f":"#080808","#802007":"#080808","#1d0903":"#080808","#150703":"#080808","#160403":"#080808","#1c0504":"#080808","#380705":"#080808","#340906":"#080808","#300906":"#080808","#290b05":"#080808","#150704":"#080808","#160904":"#080808","#372212":"#080808","#5b3b20":"#080808","#5d3a29":"#080808","#211212":"#080808","#bd2b08":"#272727","#2a0b04":"#080808","#571208":"#080808","#6d130c":"#080808","#81180b":"#0b0b0b","#ab6536":"#353535","#502714":"#080808","#2b140a":"#080808","#4e341c":"#080808","#1a0c08":"#080808","#b23e09":"#222222","#be2c08":"#282828","#471205":"#080808","#1e0603":"#080808","#330c04":"#080808","#6d2204":"#080808","#853c1d":"#161616","#98411f":"#202020","#721307":"#080808","#621608":"#080808","#1c0d07":"#080808","#090202":"#080808","#c13309":"#2a2a2a","#ac3309":"#1f1f1f","#882607":"#0c0c0c","#170703":"#080808","#4c0c05":"#080808","#5b1c03":"#080808","#4f1603":"#080808","#571709":"#080808","#a65429":"#2c2c2c","#6a3318":"#080808","#270a04":"#080808","#210704":"#080808","#732507":"#080808","#822807":"#090909","#6e1e06":"#080808","#210805":"#080808","#701105":"#080808","#9d240d":"#1a1a1a","#9e3e17":"#1f1f1f","#401b0c":"#080808","#721504":"#080808","#bf1e03":"#262626","#6b0e04":"#080808","#1e0503":"#080808","#371908":"#080808","#260c05":"#080808","#1b0905":"#080808","#2d0d08":"#080808","#4c1209":"#080808","#58130a":"#080808","#5c130b":"#080808","#410e09":"#080808","#380e08":"#080808","#752617":"#0b0b0b","#9d371d":"#222222","#9d1b09":"#181818","#b71205":"#232323","#c4210c":"#2d2d2d","#a03514":"#1f1f1f","#ab2506":"#1d1d1d","#b41c06":"#222222","#6a0e02":"#080808","#3d0a04":"#080808","#1d0b04":"#080808","#310d09":"#080808","#42180f":"#080808","#56170b":"#080808","#5c1108":"#080808","#641309":"#080808","#71170c":"#080808","#901f10":"#151515","#a12714":"#1f1f1f","#982010":"#191919","#981b0e":"#181818","#c1190b":"#2b2b2b","#e11906":"#383838","#e43613":"#404040","#d4501c":"#3d3d3d","#af3811":"#252525","#da2e0d":"#383838","#690e02":"#080808","#6c0e03":"#080808","#210902":"#080808","#2f0906":"#080808","#380d08":"#080808","#480f07":"#080808","#6d160a":"#080808","#7a190b":"#080808","#a3200e":"#1d1d1d","#a8210f":"#202020","#ae2111":"#242424","#af1f0e":"#232323","#c21b0b":"#2b2b2b","#df1905":"#373737","#f1400d":"#444444","#ea5919":"#464646","#ea702d":"#505050","#b22b0b":"#232323","#1a0803":"#080808","#1f0703":"#080808","#450b06":"#080808","#450c07":"#080808","#4e0f06":"#080808","#63130a":"#080808","#80190a":"#0a0a0a","#8a1c0b":"#0f0f0f","#981f0c":"#171717","#a5210d":"#1e1e1e","#af210d":"#232323","#b3200d":"#252525","#ca230b":"#2f2f2f","#dd2705":"#363636","#ea4912":"#434343","#f0752f":"#545454","#de4112":"#3d3d3d","#5f1305":"#080808","#420b05":"#080808","#140502":"#080808","#390907":"#080808","#490f07":"#080808","#5b1008":"#080808","#68140a":"#080808","#891a0d":"#101010","#9d1e0f":"#1b1b1b","#b2220f":"#252525","#b9250c":"#272727","#bd2908":"#272727","#bb2908":"#262626","#d5360e":"#363636","#ef4d19":"#494949","#b83111":"#292929","#54130b":"#080808","#320a06":"#080808","#1f0807":"#080808","#400c07":"#080808","#480f08":"#080808","#470e08":"#080808","#4c0e09":"#080808","#561009":"#080808","#67150b":"#080808","#79190c":"#080808","#8d1d0d":"#121212","#a32715":"#212121","#a62b14":"#222222","#922310":"#161616","#ae2f15":"#262626","#a22c15":"#202020","#711c10":"#080808","#451109":"#080808","#731409":"#080808","#3f0b07":"#080808","#1b0605":"#080808","#410b06":"#080808","#651209":"#080808","#78170a":"#080808","#8a1c0c":"#101010","#74170b":"#080808","#5b130b":"#080808","#59140b":"#080808","#5a170c":"#080808","#59180d":"#080808","#48130a":"#080808","#46130b":"#080808","#390e09":"#080808","#3b0d07":"#080808","#7b170a":"#080808","#470d08":"#080808","#1f0705":"#080808","#2b0503":"#080808","#380805":"#080808","#825b47":"#292929","#380b08":"#080808","#3a0b07":"#080808","#450c08":"#080808","#69170c":"#080808","#7e1c0e":"#0b0b0b","#8f2311":"#151515","#8d2010":"#131313","#7d1c10":"#0b0b0b","#721a0e":"#080808","#6d1b10":"#080808","#6b1b11":"#080808","#6c1b12":"#080808","#54160e":"#080808","#46120b":"#080808","#4d120b":"#080808","#380a07":"#080808","#2f0806":"#080808","#5d2d1d":"#080808","#814a16":"#101010","#4f1e15":"#080808","#361312":"#080808","#190504":"#080808","#420d09":"#080808","#52130b":"#080808","#5a170d":"#080808","#5b180d":"#080808","#5c170d":"#080808","#5c160d":"#080808","#51150c":"#080808","#44110a":"#080808","#3d0f0a":"#080808","#40100a":"#080808","#4c120a":"#080808","#5a120a":"#080808","#59120a":"#080808","#440e08":"#080808","#7e0b04":"#080808","#990e03":"#131313","#5b2104":"#080808","#672f0c":"#080808","#4d1410":"#080808","#3a0a06":"#080808","#260805":"#080808","#160303":"#080808","#380d07":"#080808","#3a0e08":"#080808","#370d08":"#080808","#390e08":"#080808","#300b07":"#080808","#290806":"#080808","#4e140c":"#080808","#56130b":"#080808","#60150b":"#080808","#5f130a":"#080808","#510c06":"#080808","#9e0f06":"#171717","#d41005":"#313131","#950f04":"#111111","#550a04":"#080808","#240a07":"#080808","#060100":"#080808","#020000":"#080808","#060101":"#080808","#400703":"#080808","#3f0502":"#080808","#1d0200":"#080808","#150201":"#080808","#210402":"#080808","#2a0c06":"#080808","#3e0602":"#080808","#520602":"#080808","#340401":"#080808","#170201":"#080808","#080101":"#080808","#2f0803":"#080808","#5d0d04":"#080808","#870902":"#090909","#330502":"#080808","#1d0302":"#080808","#3e160d":"#080808","#84482a":"#1c1c1c","#44150c":"#080808","#3d0c08":"#080808","#5e1207":"#080808","#821707":"#090909","#ac1604":"#1d1d1d","#5d0a03":"#080808","#360602":"#080808","#230501":"#080808","#110401":"#080808","#180a08":"#080808","#160502":"#080808","#280f0b":"#080808","#39100b":"#080808","#ad724a":"#404040","#71381e":"#0c0c0c","#430e08":"#080808","#711708":"#080808","#941e08":"#131313","#aa1f09":"#1e1e1e","#a11d09":"#1a1a1a","#94180b":"#141414","#941709":"#131313","#811503":"#080808","#5b1002":"#080808","#391002":"#080808","#210f01":"#080808","#250706":"#080808","#30120d":"#080808","#956645":"#323232","#4a2012":"#080808","#3f0e07":"#080808","#7a1806":"#080808","#9d2c1a":"#202020","#783228":"#151515","#825236":"#212121","#572011":"#080808","#531b0c":"#080808","#7e2d0b":"#090909","#ed4c02":"#3c3c3c","#fb5900":"#424242","#6c3806":"#080808","#150303":"#080808","#1f0605":"#080808","#482217":"#080808","#452715":"#080808","#360d06":"#080808","#3a110b":"#080808","#5b3325":"#080808","#7d5231":"#1c1c1c","#b6560d":"#262626","#1c0b01":"#080808","#140301":"#080808","#43140e":"#080808","#8b5436":"#252525","#814f2e":"#1c1c1c","#9f4d0b":"#1a1a1a","#0f0101":"#080808","#5f0701":"#080808","#d11303":"#2f2f2f","#5a1009":"#080808","#51231a":"#080808","#dc8433":"#4c4c4c","#260200":"#080808","#c00e03":"#262626","#e21204":"#383838","#a31405":"#191919","#53110b":"#080808","#99472f":"#292929","#b66f49":"#444444","#975d35":"#2b2b2b","#72421f":"#0d0d0d","#4c2711":"#080808","#331a04":"#080808","#281206":"#080808","#271307":"#080808","#3f2210":"#080808","#904e1e":"#1c1c1c","#963b0d":"#161616","#7c0801":"#080808","#9a1203":"#131313","#c91503":"#2b2b2b","#921003":"#0f0f0f","#4b0a04":"#080808","#4b0e08":"#080808","#61180d":"#080808","#41110c":"#080808","#3b100b":"#080808","#450e09":"#080808","#461108":"#080808","#391108":"#080808","#391a08":"#080808","#572a08":"#080808","#6d3711":"#080808","#6b0c03":"#080808","#8e1104":"#0e0e0e","#831005":"#090909","#540a04":"#080808","#6e1509":"#080808","#721f10":"#080808","#74190e":"#080808","#96170a":"#151515","#de2706":"#373737","#dc1f06":"#363636","#aa1b05":"#1c1c1c","#751f07":"#080808","#742705":"#080808","#b14d02":"#1e1e1e","#100808":"#080808","#590c04":"#080808","#610d06":"#080808","#440b06":"#080808","#2b0906":"#080808","#400c03":"#080808","#541003":"#080808","#590d04":"#080808","#78110b":"#080808","#9b1f08":"#161616","#fb450a":"#474747","#e1230d":"#3c3c3c","#762107":"#080808","#d2520c":"#343434","#e54d12":"#404040","#e74006":"#3b3b3b","#a54c02":"#181818","#8f3a0a":"#111111","#0c0505":"#080808","#390e0b":"#080808","#410e03":"#080808","#460a02":"#080808","#490705":"#080808","#801609":"#090909","#d8220d":"#373737","#600f09":"#080808","#a1370a":"#1a1a1a","#f3430a":"#434343","#8b1b09":"#0f0f0f","#953105":"#121212","#dd681d":"#424242","#f45a18":"#4b4b4b","#ea3d08":"#3e3e3e","#a64b04":"#1a1a1a","#623208":"#080808","#2a0d0a":"#080808","#2a0803":"#080808","#4a1205":"#080808","#531006":"#080808","#bf2308":"#282828","#4d0d08":"#080808","#a22e11":"#1e1e1e","#f8450f":"#484848","#5e0f05":"#080808","#962905":"#121212","#ea3504":"#3c3c3c","#6c1507":"#080808","#913c0b":"#131313","#da5a14":"#3c3c3c","#f64005":"#424242","#da4407":"#353535","#b04d03":"#1e1e1e","#0f0605":"#080808","#481004":"#080808","#461307":"#080808","#962406":"#131313","#da3406":"#353535","#6a140b":"#080808","#730502":"#080808","#d72b04":"#323232","#611106":"#080808","#5d1305":"#080808","#f13602":"#3e3e3e","#761c07":"#080808","#5f250a":"#080808","#d34503":"#303030","#f23a07":"#414141","#e13a07":"#393939","#9e4903":"#151515","#711806":"#080808","#642005":"#080808","#651107":"#080808","#cc3204":"#2d2d2d","#851c07":"#0b0b0b","#7b0403":"#080808","#7a0d0a":"#080808","#3c0a06":"#080808","#d72004":"#323232","#da2a05":"#343434","#5f1705":"#080808","#943107":"#121212","#de3c08":"#383838","#be4a04":"#262626","#984c03":"#121212","#3b0e07":"#080808","#9c2507":"#161616","#722405":"#080808","#831506":"#090909","#7d0805":"#080808","#6a0c09":"#080808","#ab1711":"#232323","#920f0d":"#141414","#8b1413":"#141414","#b80f04":"#232323","#d91b02":"#323232","#db2604":"#343434","#d22804":"#303030","#c13102":"#262626","#c53c04":"#292929","#c85005":"#2b2b2b","#a32207":"#1a1a1a","#a42a0f":"#1e1e1e","#3c0b06":"#080808","#6b0704":"#080808","#850803":"#090909","#730b08":"#080808","#a7201a":"#252525","#a60a05":"#1a1a1a","#9c0804":"#151515","#950f07":"#131313","#c41603":"#282828","#d21903":"#2f2f2f","#c82502":"#2a2a2a","#c93804":"#2b2b2b","#da4304":"#343434","#a85102":"#1a1a1a","#250b0a":"#080808","#360c09":"#080808","#310b06":"#080808","#a11f0d":"#1c1c1c","#821a06":"#090909","#660705":"#080808","#770c0a":"#080808","#7d0705":"#080808","#7a0705":"#080808","#830b06":"#090909","#981404":"#131313","#b61f03":"#212121","#c62c03":"#292929","#682005":"#080808","#3e1e04":"#080808","#9f410c":"#1a1a1a","#220b08":"#080808","#3b0e08":"#080808","#430b06":"#080808","#470d0c":"#080808","#310b0a":"#080808","#370f0d":"#080808","#39110f":"#080808","#3e120f":"#080808","#3d0d0b":"#080808","#460c09":"#080808","#440907":"#080808","#6c0b04":"#080808","#6b1106":"#080808","#381008":"#080808","#3d1b0b":"#080808","#972908":"#141414","#c63205":"#2a2a2a","#973f05":"#131313","#c8480b":"#2e2e2e","#c83709":"#2d2d2d","#190a07":"#080808","#680c04":"#080808","#280905":"#080808","#2a0907":"#080808","#351311":"#080808","#502f2a":"#080808","#8f7162":"#3d3d3d","#ba9674":"#5c5c5c","#9b6e43":"#343434","#603521":"#080808","#3c130f":"#080808","#340f0d":"#080808","#36100d":"#080808","#2d0f0c":"#080808","#402119":"#080808","#db5313":"#3c3c3c","#8b4205":"#0d0d0d","#aa570f":"#212121","#c84c0b":"#2e2e2e","#9e3809":"#181818","#582408":"#080808","#170a07":"#080808","#4f0903":"#080808","#2a0502":"#080808","#371310":"#080808","#5c3429":"#080808","#76523a":"#1d1d1d","#482923":"#080808","#745237":"#1a1a1a","#d76720":"#404040","#9c3104":"#151515","#935314":"#181818","#af470a":"#212121","#813309":"#0a0a0a","#4b2407":"#080808","#321805":"#080808","#180b07":"#080808","#5f0f07":"#080808","#561f14":"#080808","#431510":"#080808","#a9774b":"#3f3f3f","#653e28":"#0b0b0b","#663e23":"#090909","#4d2d1f":"#080808","#6e1a06":"#080808","#6c1d04":"#080808","#783c10":"#090909","#65310a":"#080808","#863011":"#101010","#5a2a08":"#080808","#221004":"#080808","#220c04":"#080808","#250c09":"#080808","#3d1b10":"#080808","#3d120e":"#080808","#47130d":"#080808","#320d0a":"#080808","#290907":"#080808","#450e06":"#080808","#45160e":"#080808","#9e5a37":"#2f2f2f","#3b180e":"#080808","#260e06":"#080808","#330e04":"#080808","#602909":"#080808","#743308":"#080808","#6b240c":"#080808","#421c09":"#080808","#72230d":"#080808","#521f0a":"#080808","#1b0e03":"#080808","#230c04":"#080808","#220a02":"#080808","#1a0b09":"#080808","#4c1309":"#080808","#55110b":"#080808","#5a140d":"#080808","#cb803d":"#494949","#2f0d09":"#080808","#450d08":"#080808","#550e07":"#080808","#572313":"#080808","#724724":"#101010","#8f4d1e":"#1b1b1b","#6d2614":"#080808","#5c1609":"#080808","#8a1706":"#0d0d0d","#5b1104":"#080808","#3e0d03":"#080808","#2d0c03":"#080808","#1d0f03":"#080808","#5b180c":"#080808","#3e1607":"#080808","#271504":"#080808","#1f0d04":"#080808","#1e0b04":"#080808","#2c0a05":"#080808","#220803":"#080808","#170601":"#080808","#1d0b09":"#080808","#5b140b":"#080808","#a01a0a":"#1a1a1a","#841407":"#0a0a0a","#a63417":"#232323","#532817":"#080808","#45130e":"#080808","#59130b":"#080808","#7a1308":"#080808","#751305":"#080808","#631005":"#080808","#651105":"#080808","#781405":"#080808","#8c1505":"#0d0d0d","#9e1305":"#161616","#891204":"#0b0b0b","#360c03":"#080808","#1a0903":"#080808","#160903":"#080808","#180903":"#080808","#200904":"#080808","#290905":"#080808","#170502":"#080808","#81190b":"#0b0b0b","#a51a09":"#1c1c1c","#941607":"#121212","#9e1808":"#181818","#9b5a2f":"#2a2a2a","#451b11":"#080808","#551a11":"#080808","#921d0c":"#141414","#841908":"#0b0b0b","#851304":"#090909","#801404":"#080808","#7e1405":"#080808","#8e1809":"#101010","#911b0f":"#151515","#87160b":"#0e0e0e","#290904":"#080808","#1b0704":"#080808","#1e0804":"#080808","#2e0904":"#080808","#3a0a05":"#080808","#b92514":"#2b2b2b","#b31f0e":"#252525","#c01b07":"#282828","#ac1b08":"#1f1f1f","#93240e":"#151515","#93411e":"#1d1d1d","#9e6332":"#2d2d2d","#5e331d":"#080808","#49110c":"#080808","#8a1809":"#0e0e0e","#971703":"#121212","#821404":"#080808","#811305":"#080808","#951507":"#131313","#b51b09":"#242424","#b81f0c":"#272727","#b41e0d":"#252525","#8d1307":"#0f0f0f","#511109":"#080808","#7c160a":"#080808","#82170b":"#0b0b0b","#320a05":"#080808","#270703":"#080808","#090302":"#080808","#600e06":"#080808","#d4230e":"#363636","#991b0b":"#171717","#93190a":"#131313","#901d0a":"#121212","#d03a11":"#353535","#df2a0b":"#3a3a3a","#b63411":"#282828","#9c3417":"#1e1e1e","#84190c":"#0d0d0d","#a31907":"#1a1a1a","#a51705":"#1a1a1a","#9d1905":"#161616","#9e1905":"#161616","#981506":"#141414","#b21807":"#212121","#bd1909":"#282828","#a61709":"#1c1c1c","#650f06":"#080808","#96250c":"#161616","#b1250c":"#232323","#a41f0b":"#1c1c1c","#7d1509":"#080808","#3c0c05":"#080808","#450d07":"#080808","#8a160b":"#0f0f0f","#d5250c":"#353535","#c82609":"#2d2d2d","#bb2b08":"#262626","#d5370c":"#353535","#ef3811":"#454545","#f1320e":"#444444","#eb2f0f":"#424242","#ed2b07":"#3f3f3f","#d91b08":"#353535","#c71a07":"#2c2c2c","#b41905":"#212121","#ab1b04":"#1c1c1c","#a11506":"#181818","#bc1a07":"#262626","#b81d09":"#252525","#9d1c0a":"#181818","#581c0b":"#080808","#d73513":"#3a3a3a","#ea4018":"#464646","#c43413":"#303030","#a0200c":"#1b1b1b","#551006":"#080808","#5f1106":"#080808","#681309":"#080808","#400c05":"#080808","#300904":"#080808","#1d0703":"#080808","#430806":"#080808","#3d0806":"#080808","#060303":"#080808","#991207":"#151515","#4b0907":"#080808","#280504":"#080808","#2f0704":"#080808","#3e0a06":"#080808","#4a0d07":"#080808","#4e0e07":"#080808","#410d06":"#080808","#310a04":"#080808","#1d0603":"#080808","#1b0805":"#080808","#190b0a":"#080808","#840f06":"#0a0a0a","#2c0503":"#080808","#520c07":"#080808","#5a0e07":"#080808","#660f07":"#080808","#6a1008":"#080808","#6b1109":"#080808","#4e1107":"#080808","#210906":"#080808","#1e0b09":"#080808","#060404":"#080808","#5e0c04":"#080808","#4e0b04":"#080808","#771205":"#080808","#8c1705":"#0d0d0d","#9b1a05":"#151515","#90220c":"#131313","#841807":"#0a0a0a","#791306":"#080808","#721107":"#080808","#671006":"#080808","#651307":"#080808","#5d1308":"#080808","#1e0906":"#080808","#150908":"#080808","#380803":"#080808","#a21a06":"#191919","#b23612":"#272727","#c24d1e":"#353535","#9f3817":"#202020","#7c180a":"#080808","#680e05":"#080808","#550c05":"#080808","#490b05":"#080808","#4a0d06":"#080808","#270905":"#080808","#260401":"#080808","#a81f09":"#1d1d1d","#ac3312":"#242424","#9b1f09":"#171717","#6d0f06":"#080808","#630e06":"#080808","#450b05":"#080808","#3c0b05":"#080808","#2f0804":"#080808","#210605":"#080808","#200302":"#080808","#370503":"#080808","#3d0703":"#080808","#961905":"#121212","#9a1b05":"#141414","#951605":"#121212","#761206":"#080808","#690d06":"#080808","#5c0c05":"#080808","#4c0904":"#080808","#360a05":"#080808","#280605":"#080808","#080303":"#080808","#410803":"#080808","#721105":"#080808","#891605":"#0c0c0c","#761205":"#080808","#610c05":"#080808","#560c04":"#080808","#430a05":"#080808","#320905":"#080808","#2a0805":"#080808","#620d05":"#080808","#7b1205":"#080808","#7c1205":"#080808","#5e0d05":"#080808","#510b04":"#080808","#4e0c04":"#080808","#480b05":"#080808","#090404":"#080808","#3b0604":"#080808","#570b06":"#080808","#6f0e05":"#080808","#7b1105":"#080808","#5b0b05":"#080808","#560b05":"#080808","#400a05":"#080808","#4e0d05":"#080808","#0f0303":"#080808","#170302":"#080808","#120707":"#080808","#610301":"#080808","#540402":"#080808","#520605":"#080808","#5f0906":"#080808","#6f0d06":"#080808","#6e0d06":"#080808","#650c05":"#080808","#610c06":"#080808","#520b05":"#080808","#3f0904":"#080808","#3a0b04":"#080808","#5d0f05":"#080808","#701305":"#080808","#360904":"#080808","#720d05":"#080808","#760f06":"#080808","#6e0e06":"#080808","#550c04":"#080808","#470b04":"#080808","#3c0904":"#080808","#410d05":"#080808","#4f0d05":"#080808","#891804":"#0b0b0b","#6e1305":"#080808","#330805":"#080808","#560b0a":"#080808","#770f06":"#080808","#700e05":"#080808","#5e0d06":"#080808","#430904":"#080808","#280603":"#080808","#270502":"#080808","#2f0703":"#080808","#4f0f04":"#080808","#560e05":"#080808","#050100":"#080808","#65100a":"#080808","#5f0e0a":"#080808","#350705":"#080808","#2a0702":"#080808","#530c05":"#080808","#370902":"#080808","#410c04":"#080808","#6d1405":"#080808","#971b05":"#131313","#881804":"#0b0b0b","#4c0d05":"#080808","#580b08":"#080808","#310a07":"#080808","#1d0401":"#080808","#1c0402":"#080808","#490b04":"#080808","#6d1304":"#080808","#4c0d03":"#080808","#521004":"#080808","#7d1805":"#080808","#841905":"#090909","#961a04":"#121212","#120606":"#080808","#290605":"#080808","#120303":"#080808","#1a0404":"#080808","#641204":"#080808","#ae2304":"#1e1e1e","#5f1203":"#080808","#5d1204":"#080808","#821905":"#080808","#911a05":"#101010","#140404":"#080808","#1d0b0a":"#080808","#100804":"#080808","#400606":"#080808","#2f0807":"#080808","#3b0a08":"#080808","#3e0906":"#080808","#1e0402":"#080808","#3d0604":"#080808","#560d05":"#080808","#b02304":"#1f1f1f","#751703":"#080808","#691404":"#080808","#8e1b05":"#0e0e0e","#8b1805":"#0d0d0d","#3e0904":"#080808","#220504":"#080808","#0c0502":"#080808","#4b2f17":"#080808","#0c0503":"#080808","#27100e":"#080808","#190d04":"#080808","#1f0201":"#080808","#080201":"#080808","#4a2e14":"#080808","#523417":"#080808","#2b160a":"#080808","#450807":"#080808","#090201":"#080808","#2e0808":"#080808","#9a1c04":"#141414","#a12104":"#171717","#831904":"#080808","#941c05":"#111111","#791505":"#080808","#510d05":"#080808","#221207":"#080808","#170807":"#080808","#6f4833":"#161616","#291508":"#080808","#170e0e":"#080808","#2b0303":"#080808","#4d2e15":"#080808","#570d09":"#080808","#781304":"#080808","#b42c09":"#232323","#922105":"#101010","#7f1705":"#080808","#5b0d05":"#080808","#440a05":"#080808","#351a0c":"#080808","#200f0e":"#080808","#855930":"#1f1f1f","#43270d":"#080808","#070202":"#080808","#100101":"#080808","#4c1f0f":"#080808","#470c0a":"#080808","#090303":"#080808","#611207":"#080808","#bb5320":"#323232","#bb3f12":"#2b2b2b","#961d05":"#121212","#570d06":"#080808","#530d06":"#080808","#44250f":"#080808","#502b0f":"#080808","#411d0c":"#080808","#603512":"#080808","#502f11":"#080808","#030101":"#080808","#290505":"#080808","#110a04":"#080808","#321308":"#080808","#410906":"#080808","#0e0404":"#080808","#480d06":"#080808","#ac5121":"#2b2b2b","#e25b1f":"#454545","#ab2205":"#1d1d1d","#5a0d06":"#080808","#1b0804":"#080808","#190b04":"#080808","#160603":"#080808","#010000":"#080808","#3f1b0a":"#080808","#351709":"#080808","#a73310":"#202020","#e45c1f":"#464646","#ad2306":"#1e1e1e","#5f1008":"#080808","#4a0b05":"#080808","#130503":"#080808","#6c1405":"#080808","#b52104":"#212121","#9a1f06":"#151515","#841c08":"#0b0b0b","#641507":"#080808","#440e06":"#080808","#871106":"#0b0b0b","#710e06":"#080808","#3f0706":"#080808","#1c0c05":"#080808","#2b1408":"#080808","#1f0904":"#080808","#1b0705":"#080808","#3e0c06":"#080808","#371308":"#080808","#660d06":"#080808","#680d06":"#080808","#360605":"#080808","#140a0a":"#080808","#430a06":"#080808","#330906":"#080808","#4d0906":"#080808","#540a07":"#080808","#470907":"#080808","#500907":"#080808","#0f0b08":"#080808","#221206":"#080808","#500c06":"#080808","#420a05":"#080808","#4d0a06":"#080808","#590b06":"#080808","#590b07":"#080808","#470909":"#080808","#4f0907":"#080808","#050303":"#080808","#3d240c":"#080808","#380b06":"#080808","#660c08":"#080808","#420a06":"#080808","#3a0605":"#080808","#643016":"#080808","#410f0b":"#080808","#360806":"#080808","#3b0807":"#080808","#420a08":"#080808","#450f07":"#080808","#2f0504":"#080808","#1d0e05":"#080808","#050201":"#080808","#2a1408":"#080808","#590903":"#080808","#740b03":"#080808","#8f0e03":"#0e0e0e","#990f03":"#131313","#8d0c04":"#0d0d0d","#670904":"#080808","#380403":"#080808","#270807":"#080808","#b41106":"#222222","#b01104":"#1f1f1f","#bc2404":"#252525","#642211":"#080808","#7c2210":"#0b0b0b","#870a04":"#0a0a0a","#620202":"#080808","#e02c07":"#383838","#d34418":"#3a3a3a","#cd441a":"#383838","#c21d05":"#282828","#b91905":"#242424","#ac1504":"#1d1d1d","#961004":"#121212","#820c04":"#080808","#660806":"#080808","#570a02":"#080808","#840d02":"#080808","#9c1104":"#151515","#a31004":"#181818","#9a0e03":"#131313","#720a05":"#080808","#440505":"#080808","#630a04":"#080808","#a10c04":"#171717","#df420f":"#3c3c3c","#742513":"#080808","#630803":"#080808","#9a0804":"#141414","#430303":"#080808","#7f1005":"#080808","#953014":"#191919","#810f06":"#080808","#6b0a02":"#080808","#931103":"#101010","#a41204":"#191919","#ac1203":"#1c1c1c","#a80f03":"#1a1a1a","#3e0403":"#080808","#7c0d09":"#080808","#d62308":"#343434","#802115":"#0f0f0f","#1c0303":"#080808","#710901":"#080808","#9e1504":"#161616","#a51002":"#181818","#b51603":"#212121","#6d0904":"#080808","#550804":"#080808","#240201":"#080808","#5f0b09":"#080808","#440b05":"#080808","#7a3f1e":"#111111","#61130d":"#080808","#8a180e":"#111111","#8a0e09":"#0e0e0e","#a01106":"#181818","#850b06":"#0a0a0a","#0f0301":"#080808","#1f0301":"#080808","#7d0a01":"#080808","#a41603":"#181818","#a91002":"#1a1a1a","#be1702":"#252525","#9f0d05":"#171717","#840b04":"#090909","#750b04":"#080808","#560905":"#080808","#410303":"#080808","#bb1804":"#242424","#dc4f1a":"#404040","#c65627":"#3b3b3b","#bd220a":"#282828","#c31c05":"#292929","#230301":"#080808","#7b0b03":"#080808","#a31403":"#181818","#b21203":"#1f1f1f","#bf1302":"#252525","#9e0f05":"#161616","#7c0b04":"#080808","#880c04":"#0b0b0b","#460805":"#080808","#310202":"#080808","#1c0202":"#080808","#8a130a":"#0f0f0f","#4f0805":"#080808","#8a0d04":"#0c0c0c","#a32d11":"#1f1f1f","#870c04":"#0a0a0a","#2b0401":"#080808","#640903":"#080808","#a31402":"#171717","#bd230b":"#292929","#c01c07":"#282828","#a10e04":"#171717","#730b03":"#080808","#8c0d03":"#0c0c0c","#6f0b05":"#080808","#4e0904":"#080808","#5b0906":"#080808","#480402":"#080808","#bb1003":"#242424","#ab1506":"#1d1d1d","#590706":"#080808","#3a0401":"#080808","#5a0802":"#080808","#ab1604":"#1c1c1c","#ca4419":"#363636","#c12b0f":"#2d2d2d","#a70d03":"#1a1a1a","#6c0a04":"#080808","#8b0c03":"#0c0c0c","#780b05":"#080808","#5b0804":"#080808","#390503":"#080808","#200404":"#080808","#4e0604":"#080808","#610501":"#080808","#460502":"#080808","#820f0f":"#0d0d0d","#480401":"#080808","#530802":"#080808","#a61404":"#1a1a1a","#cf4d1e":"#3b3b3b","#c13515":"#303030","#ac0e03":"#1c1c1c","#7b0c05":"#080808","#600803":"#080808","#370603":"#080808","#330402":"#080808","#4a0a07":"#080808","#250202":"#080808","#95180c":"#151515","#b70803":"#222222","#a9180a":"#1e1e1e","#630501":"#080808","#3a0502":"#080808","#7b0d04":"#080808","#da5222":"#434343","#cf5022":"#3d3d3d","#ad0d02":"#1c1c1c","#6d0a04":"#080808","#800c04":"#080808","#7b0b04":"#080808","#490504":"#080808","#120202":"#080808","#280705":"#080808","#6c0f0a":"#080808","#420501":"#080808","#901f0e":"#141414","#580b07":"#080808","#bb0803":"#242424","#8d140a":"#101010","#6a0706":"#080808","#0e0303":"#080808","#7f0602":"#080808","#500802":"#080808","#de4b1f":"#434343","#e0622a":"#4a4a4a","#700a04":"#080808","#730a04":"#080808","#450504":"#080808","#300703":"#080808","#900902":"#0e0e0e","#971309":"#151515","#780c0a":"#080808","#7d0e09":"#080808","#8e0e08":"#101010","#140707":"#080808","#a20703":"#171717","#310502":"#080808","#b41f0b":"#242424","#e4612a":"#4c4c4c","#7b0a04":"#080808","#640904":"#080808","#810c04":"#080808","#750b03":"#080808","#7d0d04":"#080808","#700b06":"#080808","#440301":"#080808","#4b0302":"#080808","#350202":"#080808","#a7120f":"#202020","#980c09":"#151515","#630401":"#080808","#160404":"#080808","#6e0801":"#080808","#d53211":"#383838","#ac1104":"#1d1d1d","#830c03":"#080808","#7b0c03":"#080808","#320703":"#080808","#ab1205":"#1d1d1d","#3f0703":"#080808","#730603":"#080808","#1a0101":"#080808","#350403":"#080808","#880603":"#0a0a0a","#630604":"#080808","#5e0402":"#080808","#940703":"#101010","#4c0501":"#080808","#890f03":"#0b0b0b","#980f04":"#131313","#710a03":"#080808","#ae1204":"#1e1e1e","#190202":"#080808","#5f0a06":"#080808","#8c0803":"#0c0c0c","#790602":"#080808","#970601":"#111111","#670604":"#080808","#550302":"#080808","#5c0503":"#080808","#620a03":"#080808","#900f05":"#0f0f0f","#8c0f05":"#0d0d0d","#4d0703":"#080808","#330504":"#080808","#250403":"#080808","#880d03":"#0a0a0a","#430805":"#080808","#4b0402":"#080808","#77100d":"#080808","#640906":"#080808","#5d1513":"#080808","#660302":"#080808","#1b0a0a":"#080808","#290402":"#080808","#2c0605":"#080808","#2e0302":"#080808","#6a0c03":"#080808","#4c0802":"#080808","#960603":"#111111","#910e0a":"#121212","#761615":"#0a0a0a","#661210":"#080808","#400806":"#080808","#150101":"#080808","#530302":"#080808","#120505":"#080808","#490402":"#080808","#180201":"#080808","#350602":"#080808","#5e100d":"#080808","#bd0905":"#262626","#9d0c05":"#161616","#680806":"#080808","#140101":"#080808","#2b0302":"#080808","#6c0401":"#080808","#130101":"#080808","#750902":"#080808","#170404":"#080808","#5b0e0c":"#080808","#770805":"#080808","#740604":"#080808","#0f0000":"#080808","#9e0401":"#141414","#030000":"#080808","#610702":"#080808","#ca120c":"#303030","#bc0c03":"#242424","#110100":"#080808","#740200":"#080808","#880502":"#0a0a0a","#430503":"#080808","#0e0808":"#080808","#ac0a01":"#1b1b1b","#290201":"#080808","#020101":"#080808","#aa0600":"#1a1a1a","#050000":"#080808","#760903":"#080808","#170606":"#080808","#840603":"#080808","#180202":"#080808","#100c0b":"#080808","#7b0803":"#080808","#d30606":"#313131","#290404":"#080808","#350808":"#080808","#1b0100":"#080808","#210201":"#080808","#260403":"#080808","#260807":"#080808","#160100":"#080808","#5d0707":"#080808","#220a0a":"#080808","#160c0c":"#080808","#19110a":"#080808","#140e09":"#080808","#413021":"#080808","#3c2714":"#080808","#0c0705":"#080808","#180d06":"#080808","#1c1008":"#080808","#130b05":"#080808","#060403":"#080808","#2e1f11":"#080808","#44301d":"#080808","#1c120b":"#080808","#140d09":"#080808","#61462c":"#0b0b0b","#69472a":"#0e0e0e","#1e140b":"#080808","#1e150d":"#080808","#513923":"#080808","#15100c":"#080808","#0b0806":"#080808","#080606":"#080808","#1f1812":"#080808","#640e03":"#080808","#4e0f02":"#080808","#46190c":"#080808","#3d2714":"#080808","#681c06":"#080808","#ee3402":"#3d3d3d","#d32703":"#303030","#301e12":"#080808","#5e3f23":"#080808","#2a170e":"#080808","#803b21":"#151515","#ec3303":"#3c3c3c","#f13502":"#3e3e3e","#9f1d04":"#161616","#130807":"#080808","#340603":"#080808","#540b05":"#080808","#670e05":"#080808","#6c0f06":"#080808","#5a0d05":"#080808","#470702":"#080808","#1a130e":"#080808","#180605":"#080808","#bd220e":"#2a2a2a","#f13c0b":"#434343","#460a05":"#080808","#9e1706":"#171717","#b41e08":"#232323","#ae1f08":"#202020","#b12107":"#212121","#b42606":"#222222","#bc2805":"#252525","#c72405":"#2b2b2b","#bc1006":"#262626","#880805":"#0b0b0b","#771404":"#080808","#c92d12":"#323232","#f13907":"#414141","#971306":"#131313","#370703":"#080808","#a72005":"#1b1b1b","#ce2b04":"#2e2e2e","#d12c04":"#2f2f2f","#db3305":"#353535","#e33504":"#383838","#d63004":"#323232","#c82705":"#2b2b2b","#d22a05":"#303030","#c81a08":"#2d2d2d","#ab0c08":"#1e1e1e","#8f0a05":"#0f0f0f","#621b10":"#080808","#260802":"#080808","#6b1d0d":"#080808","#792313":"#0b0b0b","#b9321b":"#2f2f2f","#e0330c":"#3b3b3b","#e12e05":"#383838","#750e06":"#080808","#3d0904":"#080808","#170504":"#080808","#c52c04":"#292929","#cc2703":"#2c2c2c","#df2f05":"#373737","#ea3306":"#3d3d3d","#f23905":"#404040","#f53904":"#414141","#f13505":"#404040","#ee3107":"#3f3f3f","#e72908":"#3c3c3c","#d01a07":"#303030","#b80d08":"#252525","#940b04":"#111111","#280303":"#080808","#de3408":"#383838","#f23702":"#3f3f3f","#e9430e":"#404040","#d74d1b":"#3e3e3e","#cf300c":"#323232","#cb2507":"#2e2e2e","#bd2306":"#262626","#791109":"#080808","#d62d03":"#313131","#ce2a05":"#2e2e2e","#e02f06":"#383838","#e85b1d":"#474747","#ed4d13":"#454545","#ed3206":"#3e3e3e","#e7260a":"#3d3d3d","#df2809":"#393939","#e42809":"#3b3b3b","#e7280a":"#3d3d3d","#cb1b08":"#2e2e2e","#a40d06":"#1a1a1a","#880c03":"#0a0a0a","#856146":"#2a2a2a","#802c1d":"#131313","#e73204":"#3a3a3a","#b91d05":"#242424","#af1905":"#1f1f1f","#a51a06":"#1a1a1a","#8f1904":"#0e0e0e","#350906":"#080808","#881309":"#0d0d0d","#3a0804":"#080808","#d32a04":"#303030","#c32603":"#282828","#d6350b":"#353535","#e06728":"#494949","#e66326":"#4b4b4b","#ed4a11":"#444444","#e12e0b":"#3b3b3b","#d42008":"#333333","#c61f07":"#2b2b2b","#c42109":"#2b2b2b","#d5230a":"#343434","#c71c0b":"#2e2e2e","#2a0b09":"#080808","#401f1c":"#080808","#b41605":"#212121","#ae1505":"#1e1e1e","#761203":"#080808","#711103":"#080808","#1f0908":"#080808","#750f08":"#080808","#680f06":"#080808","#ca2306":"#2d2d2d","#ba2203":"#232323","#d0340c":"#333333","#e16729":"#4a4a4a","#d35d26":"#414141","#da4114":"#3c3c3c","#ec4312":"#444444","#e0370d":"#3b3b3b","#d52306":"#323232","#bc1d05":"#252525","#a71a07":"#1c1c1c","#b31a0b":"#242424","#770c06":"#080808","#500d0a":"#080808","#290a09":"#080808","#231a1a":"#080808","#57120b":"#080808","#aa1906":"#1d1d1d","#b31606":"#212121","#b11708":"#212121","#8c140a":"#101010","#1e0c0c":"#080808","#2d0703":"#080808","#821308":"#0a0a0a","#bc1a08":"#272727","#c42205":"#292929","#d54f1d":"#3e3e3e","#d74316":"#3b3b3b","#c22609":"#2a2a2a","#d52907":"#333333","#dc390e":"#3a3a3a","#e83a0d":"#3f3f3f","#d62806":"#333333","#ba1905":"#242424","#a41508":"#1b1b1b","#961609":"#141414","#3e0c09":"#080808","#3a0f0f":"#080808","#0c0707":"#080808","#931406":"#111111","#a81c08":"#1d1d1d","#9c170b":"#181818","#9b1e13":"#1c1c1c","#500903":"#080808","#831208":"#0a0a0a","#b41809":"#232323","#991508":"#151515","#af1a06":"#1f1f1f","#c72105":"#2b2b2b","#c01f05":"#272727","#c72005":"#2b2b2b","#b91c04":"#232323","#c72305":"#2b2b2b","#e2350c":"#3c3c3c","#e83c0f":"#404040","#cd280b":"#313131","#af1305":"#1f1f1f","#920f05":"#101010","#921209":"#121212","#650e07":"#080808","#440e0b":"#080808","#700a06":"#080808","#2f0706":"#080808","#070302":"#080808","#7f1206":"#080808","#c52b04":"#292929","#98290c":"#171717","#861507":"#0b0b0b","#8c150a":"#101010","#690c04":"#080808","#500902":"#080808","#180a0a":"#080808","#7b1208":"#080808","#6c0e07":"#080808","#941506":"#121212","#b11b04":"#1f1f1f","#ba1c05":"#242424","#af1805":"#1f1f1f","#ba210a":"#272727","#d8320d":"#373737","#b41d0a":"#242424","#a61105":"#1a1a1a","#8e0e06":"#0f0f0f","#841009":"#0b0b0b","#710d08":"#080808","#4d0d0a":"#080808","#640c09":"#080808","#760804":"#080808","#1a0201":"#080808","#59110d":"#080808","#991d07":"#151515","#cd3d0c":"#313131","#a44418":"#232323","#711609":"#080808","#640b03":"#080808","#4e0802":"#080808","#590c06":"#080808","#700f06":"#080808","#841307":"#0a0a0a","#800f06":"#080808","#8d1304":"#0d0d0d","#921104":"#101010","#b91a05":"#242424","#a01204":"#171717","#b51905":"#222222","#cd2106":"#2e2e2e","#a11005":"#181818","#850d06":"#0a0a0a","#7f0b07":"#080808","#630f08":"#080808","#7f0a06":"#080808","#8f0a04":"#0e0e0e","#5b0806":"#080808","#310606":"#080808","#841105":"#090909","#a82a06":"#1c1c1c","#772610":"#080808","#590b04":"#080808","#530a04":"#080808","#4d0a04":"#080808","#450803":"#080808","#670e07":"#080808","#410d08":"#080808","#440903":"#080808","#610d05":"#080808","#650d05":"#080808","#800e04":"#080808","#9a0e04":"#141414","#950e05":"#121212","#930d05":"#111111","#a91305":"#1c1c1c","#b01405":"#1f1f1f","#a50f06":"#1a1a1a","#9a0f05":"#141414","#830c07":"#0a0a0a","#820a05":"#080808","#480706":"#080808","#6c0c04":"#080808","#650c04":"#080808","#430903":"#080808","#4e0902":"#080808","#380603":"#080808","#590d07":"#080808","#340b06":"#080808","#690c07":"#080808","#6a0c06":"#080808","#8e0c05":"#0e0e0e","#8e0e05":"#0e0e0e","#870d05":"#0b0b0b","#860d06":"#0b0b0b","#880d05":"#0b0b0b","#7e0c05":"#080808","#760d06":"#080808","#930904":"#101010","#920904":"#101010","#440803":"#080808","#630c04":"#080808","#3d0803":"#080808","#4d0902":"#080808","#200502":"#080808","#350a05":"#080808","#570a07":"#080808","#530905":"#080808","#5e0804":"#080808","#5d0a04":"#080808","#730b06":"#080808","#710c05":"#080808","#7b0d06":"#080808","#890d06":"#0c0c0c","#840d05":"#090909","#850c05":"#0a0a0a","#8e0a04":"#0e0e0e","#570b04":"#080808","#400803":"#080808","#510903":"#080808","#350805":"#080808","#3b0c08":"#080808","#490906":"#080808","#450a04":"#080808","#600e04":"#080808","#710d04":"#080808","#821206":"#090909","#8a1405":"#0c0c0c","#801305":"#080808","#821207":"#090909","#830e05":"#090909","#980f06":"#141414","#890b05":"#0c0c0c","#8d0904":"#0d0d0d","#510804":"#080808","#450804":"#080808","#520903":"#080808","#4c0604":"#080808","#781004":"#080808","#7a0e04":"#080808","#b11e04":"#1f1f1f","#c62603":"#292929","#a61706":"#1b1b1b","#8d1106":"#0e0e0e","#8e1006":"#0f0f0f","#910e05":"#101010","#870e07":"#0c0c0c","#520a06":"#080808","#4d0805":"#080808","#410702":"#080808","#0d0605":"#080808","#350402":"#080808","#480603":"#080808","#550904":"#080808","#6f0d04":"#080808","#b41d04":"#212121","#e35015":"#414141","#e1450f":"#3d3d3d","#b81e04":"#232323","#aa1905":"#1c1c1c","#950f06":"#121212","#8b0e08":"#0e0e0e","#740c09":"#080808","#670d08":"#080808","#3c0c0a":"#080808","#160202":"#080808","#320302":"#080808","#580a03":"#080808","#811304":"#080808","#c05923":"#363636","#d66124":"#424242","#ce360c":"#323232","#b92104":"#232323","#971204":"#121212","#951105":"#121212","#940f05":"#111111","#8e0d05":"#0e0e0e","#770d07":"#080808","#680c08":"#080808","#560b09":"#080808","#660e08":"#080808","#540a03":"#080808","#140201":"#080808","#2d0505":"#080808","#350501":"#080808","#630d02":"#080808","#771202":"#080808","#811303":"#080808","#8e260d":"#121212","#ad461c":"#292929","#aa2309":"#1e1e1e","#a21604":"#181818","#991204":"#131313","#8f1004":"#0e0e0e","#810d04":"#080808","#7d0d05":"#080808","#6a0b03":"#080808","#810f07":"#090909","#680c06":"#080808","#620c02":"#080808","#7e1202":"#080808","#891503":"#0b0b0b","#851503":"#090909","#881403":"#0a0a0a","#891403":"#0b0b0b","#7e1003":"#080808","#750d03":"#080808","#690c03":"#080808","#650b03":"#080808","#5f0b02":"#080808","#540703":"#080808","#7d0d06":"#080808","#2e0605":"#080808","#370502":"#080808","#5c0b02":"#080808","#650d02":"#080808","#680e02":"#080808","#670d02":"#080808","#5e0b02":"#080808","#510902":"#080808","#3c0702":"#080808","#2c0402":"#080808","#5b0904":"#080808","#750d07":"#080808","#210403":"#080808","#280402":"#080808","#2a0402":"#080808","#1d0202":"#080808","#250605":"#080808","#260605":"#080808","#0e0301":"#080808","#8c0f07":"#0e0e0e","#1e0403":"#080808","#661700":"#080808","#f81401":"#414141","#d2210d":"#343434","#120a05":"#080808","#c11101":"#262626","#c71303":"#2a2a2a","#cd240f":"#333333","#de1f0c":"#3a3a3a","#2c0701":"#080808","#d01602":"#2e2e2e","#d71502":"#313131","#a7150a":"#1d1d1d","#b82212":"#2a2a2a","#de1c09":"#383838","#b71b08":"#242424","#260f05":"#080808","#a01501":"#151515","#cc1202":"#2c2c2c","#5e0b04":"#080808","#ad140a":"#202020","#c41c0b":"#2c2c2c","#6a120b":"#080808","#5d1c01":"#080808","#c20d02":"#272727","#920b06":"#111111","#ad170d":"#222222","#a3130a":"#1b1b1b","#37100a":"#080808","#930b02":"#0f0f0f","#c21b08":"#2a2a2a","#361602":"#080808","#aa1206":"#1d1d1d","#d22406":"#313131","#b01a06":"#202020","#98150c":"#171717","#bf1103":"#262626","#cb1204":"#2c2c2c","#311207":"#080808","#721d04":"#080808","#be3516":"#2f2f2f","#99180b":"#171717","#a50d04":"#191919","#6a1807":"#080808","#5a1407":"#080808","#5e1009":"#080808","#d71005":"#333333","#d52e10":"#373737","#2e1106":"#080808","#0a0401":"#080808","#1b0c04":"#080808","#281409":"#080808","#891c06":"#0c0c0c","#dd531e":"#424242","#b43e17":"#2a2a2a","#aa160d":"#202020","#b41708":"#232323","#cc1f08":"#2f2f2f","#a51004":"#191919","#d92e0f":"#393939","#ec5f21":"#4b4b4b","#401b11":"#080808","#522212":"#080808","#3f1e0c":"#080808","#321408":"#080808","#401c11":"#080808","#1c0905":"#080808","#290f0a":"#080808","#804229":"#191919","#6c412f":"#121212","#3b190d":"#080808","#e2591f":"#454545","#b4411a":"#2c2c2c","#801812":"#0e0e0e","#5d100b":"#080808","#62110a":"#080808","#89100a":"#0e0e0e","#dc4619":"#3f3f3f","#e3591e":"#454545","#5d3f24":"#080808","#552f11":"#080808","#3a170d":"#080808","#30130b":"#080808","#35100b":"#080808","#7a1107":"#080808","#210a08":"#080808","#b4855f":"#4e4e4e","#af7f53":"#464646","#5f2916":"#080808","#b7481a":"#2d2d2d","#b11c09":"#222222","#501b06":"#080808","#471b06":"#080808","#76150a":"#080808","#ad2f12":"#242424","#421f0a":"#080808","#441f10":"#080808","#2b0d08":"#080808","#3e140c":"#080808","#5f0b05":"#080808","#42180a":"#080808","#48180b":"#080808","#8d190d":"#121212","#4a1005":"#080808","#621907":"#080808","#44210c":"#080808","#49270e":"#080808","#38100a":"#080808","#580f0a":"#080808","#670803":"#080808","#0b0505":"#080808","#800f01":"#080808","#40100b":"#080808","#290c05":"#080808","#671409":"#080808","#7f190e":"#0b0b0b","#80130c":"#0b0b0b","#600f0b":"#080808","#4f0f0c":"#080808","#63100d":"#080808","#730b07":"#080808","#6d0f0b":"#080808","#721713":"#080808","#73120f":"#080808","#5c160a":"#080808","#44220d":"#080808","#532e10":"#080808","#44100a":"#080808","#760d08":"#080808","#9e1103":"#151515","#bd2303":"#252525","#57160e":"#080808","#230d05":"#080808","#270803":"#080808","#82190d":"#0c0c0c","#b4240e":"#262626","#5f0b06":"#080808","#a10f07":"#191919","#c30a07":"#2a2a2a","#650906":"#080808","#620705":"#080808","#60150a":"#080808","#471c0c":"#080808","#461c0d":"#080808","#68110a":"#080808","#8a130b":"#0f0f0f","#c92408":"#2d2d2d","#2a0404":"#080808","#a20b02":"#171717","#d12505":"#303030","#63170f":"#080808","#5d351f":"#080808","#5c0a04":"#080808","#881e12":"#121212","#880d0a":"#0e0e0e","#5e0d0c":"#080808","#8f0d0a":"#111111","#501009":"#080808","#704721":"#0d0d0d","#7b160c":"#080808","#a0230d":"#1b1b1b","#e33206":"#393939","#af0d02":"#1d1d1d","#c23311":"#2e2e2e","#b52309":"#242424","#6a180e":"#080808","#714d2b":"#131313","#38120c":"#080808","#861307":"#0b0b0b","#be250f":"#2b2b2b","#8e160d":"#121212","#4f0704":"#080808","#61100f":"#080808","#4b0b06":"#080808","#6e3c1f":"#0b0b0b","#713e26":"#101010","#871b0a":"#0d0d0d","#d0210c":"#333333","#5f0602":"#080808","#cf1d05":"#2f2f2f","#da6727":"#454545","#c72606":"#2b2b2b","#901d0f":"#141414","#60321d":"#080808","#641f12":"#080808","#75150b":"#080808","#720e09":"#080808","#870e02":"#090909","#ab1606":"#1d1d1d","#940c07":"#121212","#4c0805":"#080808","#4b2012":"#080808","#4b1c14":"#080808","#7f1607":"#080808","#bb1809":"#272727","#b91809":"#262626","#910902":"#0e0e0e","#d8340e":"#383838","#e23d0d":"#3c3c3c","#cb2809":"#2f2f2f","#512116":"#080808","#63120a":"#080808","#cc2005":"#2d2d2d","#cb2005":"#2d2d2d","#ad130b":"#212121","#410c0b":"#080808","#623623":"#080808","#350f0a":"#080808","#51120c":"#080808","#4d0f09":"#080808","#550f08":"#080808","#2e0201":"#080808","#a90c01":"#1a1a1a","#dc4312":"#3c3c3c","#8a2910":"#121212","#5e150c":"#080808","#a12c1a":"#222222","#76301c":"#0e0e0e","#c31e05":"#292929","#a81705":"#1b1b1b","#7a0b07":"#080808","#73471e":"#0d0d0d","#460d06":"#080808","#350e09":"#080808","#690f07":"#080808","#3d0b06":"#080808","#430301":"#080808","#ae1203":"#1d1d1d","#d44111":"#373737","#713c18":"#090909","#411a12":"#080808","#300a06":"#080808","#3d0d06":"#080808","#3d0706":"#080808","#530703":"#080808","#5a2c16":"#080808","#3e0b06":"#080808","#310d0a":"#080808","#3e1d11":"#080808","#6a381a":"#080808","#5d0401":"#080808","#be1d06":"#272727","#d43e0d":"#353535","#673119":"#080808","#37110b":"#080808","#580806":"#080808","#7f0c07":"#080808","#4e0705":"#080808","#5f0303":"#080808","#572c1f":"#080808","#421e16":"#080808","#7f0a02":"#080808","#c52507":"#2b2b2b","#d93e0c":"#373737","#7c1a08":"#080808","#7c6151":"#2b2b2b","#5f432c":"#0a0a0a","#734219":"#0b0b0b","#6d0b05":"#080808","#820d06":"#090909","#c81f05":"#2b2b2b","#c71e05":"#2b2b2b","#690d07":"#080808","#4c0804":"#080808","#a10b02":"#161616","#800c06":"#080808","#ad7955":"#464646","#361b0e":"#080808","#110101":"#080808","#8d0b02":"#0c0c0c","#e53304":"#393939","#ac1704":"#1d1d1d","#7a2d14":"#0c0c0c","#571009":"#080808","#950d05":"#121212","#9f1204":"#161616","#cc2206":"#2e2e2e","#d03d16":"#383838","#a4421e":"#262626","#3f0907":"#080808","#8f0d07":"#101010","#c7190a":"#2d2d2d","#c3190b":"#2c2c2c","#cf9d70":"#646464","#54321a":"#080808","#351309":"#080808","#8f0b02":"#0d0d0d","#bd1a03":"#252525","#e32a03":"#383838","#c31f04":"#282828","#cb2502":"#2b2b2b","#7e1309":"#080808","#492017":"#080808","#78100a":"#080808","#850f09":"#0c0c0c","#bb1908":"#262626","#a51704":"#191919","#801608":"#090909","#91311b":"#1b1b1b","#680e0b":"#080808","#861005":"#0a0a0a","#b32d0e":"#252525","#911910":"#151515","#431f10":"#080808","#3b180d":"#080808","#7d0802":"#080808","#b01504":"#1f1f1f","#cf2703":"#2e2e2e","#be1c02":"#252525","#b01701":"#1d1d1d","#871009":"#0d0d0d","#750c06":"#080808","#3c100c":"#080808","#7b0e0d":"#090909","#4a0705":"#080808","#600605":"#080808","#720e08":"#080808","#530602":"#080808","#9c1303":"#141414","#a51403":"#191919","#af1703":"#1e1e1e","#961003":"#111111","#761612":"#090909","#6a1210":"#080808","#3f0b09":"#080808","#3e0e0a":"#080808","#790707":"#080808","#cb2006":"#2d2d2d","#9e180c":"#1a1a1a","#98190c":"#171717","#941c0e":"#161616","#951d0d":"#161616","#911c0e":"#141414","#850c02":"#080808","#991003":"#131313","#961303":"#111111","#830c04":"#080808","#540804":"#080808","#3c0602":"#080808","#ba1906":"#252525","#a61206":"#1b1b1b","#ac3314":"#252525","#8e2312":"#151515","#610e0c":"#080808","#680603":"#080808","#d01a05":"#2f2f2f","#d12104":"#2f2f2f","#cf2005":"#2f2f2f","#c51c05":"#2a2a2a","#c51e05":"#2a2a2a","#be1c05":"#262626","#b01905":"#1f1f1f","#921406":"#111111","#680a03":"#080808","#910e03":"#0f0f0f","#870f03":"#0a0a0a","#550905":"#080808","#620904":"#080808","#540705":"#080808","#300505":"#080808","#ad1708":"#1f1f1f","#ce2b0a":"#313131","#b51006":"#222222","#6f0803":"#080808","#b01a07":"#202020","#963219":"#1c1c1c","#64100e":"#080808","#440606":"#080808","#d05b26":"#404040","#cf4214":"#363636","#9f1508":"#181818","#9d1205":"#161616","#130404":"#080808","#7f0d03":"#080808","#710c03":"#080808","#680b03":"#080808","#6f0b04":"#080808","#630905":"#080808","#5b0805":"#080808","#2a0202":"#080808","#640b07":"#080808","#6b0f04":"#080808","#6c1917":"#080808","#650f0f":"#080808","#692a17":"#080808","#832b17":"#121212","#180705":"#080808","#240403":"#080808","#660a03":"#080808","#690a04":"#080808","#5e0905":"#080808","#350505":"#080808","#2e0403":"#080808","#740906":"#080808","#8d1912":"#141414","#4a0606":"#080808","#720d03":"#080808","#660b03":"#080808","#850e03":"#090909","#8e0e03":"#0d0d0d","#3d0808":"#080808","#220303":"#080808","#460504":"#080808","#a00c06":"#181818","#950706":"#121212","#4b0703":"#080808","#a51809":"#1c1c1c","#b72812":"#292929","#570606":"#080808","#400404":"#080808","#d40f0b":"#343434","#ca0a04":"#2c2c2c","#c10a04":"#272727","#ac0f02":"#1c1c1c","#a10f04":"#171717","#940f04":"#111111","#8b0f04":"#0c0c0c","#310906":"#080808","#390b05":"#080808","#4f0e08":"#080808","#4c0d07":"#080808","#4c0c07":"#080808","#490b06":"#080808","#470a06":"#080808","#480a06":"#080808","#8e190b":"#111111","#210806":"#080808","#370b06":"#080808","#140603":"#080808","#2d0807":"#080808","#550a08":"#080808","#580a07":"#080808","#5d0f09":"#080808","#a12210":"#1d1d1d","#cd2d15":"#363636","#951e0f":"#171717","#460c04":"#080808","#4a0f06":"#080808","#bd290e":"#2a2a2a","#3a0c06":"#080808","#0f0503":"#080808","#301d0e":"#080808","#1e0705":"#080808","#210807":"#080808","#320906":"#080808","#520e09":"#080808","#6d130b":"#080808","#751409":"#080808","#791509":"#080808","#911a0a":"#121212","#b9210b":"#272727","#ac1f0a":"#202020","#78150a":"#080808","#4b0e04":"#080808","#470d04":"#080808","#a01e0a":"#1a1a1a","#d32609":"#333333","#5c1309":"#080808","#53351b":"#080808","#321d10":"#080808","#180502":"#080808","#370907":"#080808","#470d09":"#080808","#540c07":"#080808","#560c06":"#080808","#570c06":"#080808","#6a1209":"#080808","#76170c":"#080808","#7e1109":"#080808","#700d0a":"#080808","#520f04":"#080808","#430d05":"#080808","#851b0c":"#0d0d0d","#a5230f":"#1f1f1f","#8b562b":"#202020","#2e0806":"#080808","#150706":"#080808","#1c0d0b":"#080808","#460a08":"#080808","#460a07":"#080808","#610a08":"#080808","#7d0c0a":"#080808","#630b09":"#080808","#690c08":"#080808","#5d0c04":"#080808","#690e06":"#080808","#100301":"#080808","#320b06":"#080808","#4c1e09":"#080808","#3b1507":"#080808","#341d0f":"#080808","#160b06":"#080808","#340e08":"#080808","#290a05":"#080808","#560a05":"#080808","#270b08":"#080808","#230602":"#080808","#3b0a03":"#080808","#540d09":"#080808","#5a0f0a":"#080808","#460906":"#080808","#260906":"#080808","#41120b":"#080808","#0c0404":"#080808","#310c05":"#080808","#6b0d04":"#080808","#7a0d04":"#080808","#640c06":"#080808","#480c03":"#080808","#510e04":"#080808","#541613":"#080808","#4f0c09":"#080808","#5c0d09":"#080808","#360906":"#080808","#240a06":"#080808","#260e08":"#080808","#29170f":"#080808","#2e170f":"#080808","#65150d":"#080808","#ce2206":"#2f2f2f","#b11d06":"#202020","#070403":"#080808","#4a0a03":"#080808","#a31104":"#181818","#9a1104":"#141414","#b52203":"#212121","#670d05":"#080808","#2e1f1e":"#080808","#260703":"#080808","#390a04":"#080808","#370a04":"#080808","#2c180d":"#080808","#251a12":"#080808","#8d2817":"#171717","#b4240a":"#242424","#561005":"#080808","#57311a":"#080808","#8d4e29":"#202020","#090504":"#080808","#8e1204":"#0e0e0e","#d52b03":"#313131","#ca2a04":"#2c2c2c","#2a1917":"#080808","#221008":"#080808","#120905":"#080808","#841604":"#090909","#83160a":"#0b0b0b","#941f0f":"#161616","#3d2211":"#080808","#885128":"#1d1d1d","#460905":"#080808","#810e04":"#080808","#ba1305":"#242424","#c21805":"#282828","#7f1304":"#080808","#9a1b04":"#141414","#190b07":"#080808","#0c0402":"#080808","#0d0301":"#080808","#210602":"#080808","#7b1404":"#080808","#901607":"#101010","#8f1d0e":"#131313","#190704":"#080808","#271006":"#080808","#3e1a02":"#080808","#462103":"#080808","#251911":"#080808","#981004":"#131313","#c31604":"#282828","#870f04":"#0a0a0a","#520c04":"#080808","#a41e04":"#191919","#8c1a04":"#0d0d0d","#030100":"#080808","#23150b":"#080808","#080301":"#080808","#060302":"#080808","#090402":"#080808","#650b06":"#080808","#8e0f05":"#0e0e0e","#b41303":"#202020","#a41306":"#1a1a1a","#770e05":"#080808","#500c04":"#080808","#8e1a05":"#0e0e0e","#661205":"#080808","#301914":"#080808","#20160d":"#080808","#580805":"#080808","#6c0a06":"#080808","#9c1108":"#171717","#a0160a":"#1a1a1a","#951208":"#131313","#3e0603":"#080808","#120201":"#080808","#0c0100":"#080808","#290603":"#080808","#750b06":"#080808","#850d08":"#0b0b0b","#3b0804":"#080808","#400603":"#080808","#440a08":"#080808","#4b1c1c":"#080808","#1d0e0c":"#080808","#350804":"#080808","#2e0804":"#080808","#340703":"#080808","#771305":"#080808","#0f0806":"#080808","#170806":"#080808","#1a0a08":"#080808","#c62c08":"#2c2c2c","#771307":"#080808","#590e06":"#080808","#490c06":"#080808","#350502":"#080808","#b52308":"#232323","#e33101":"#373737","#9d4718":"#1f1f1f","#261611":"#080808","#341d11":"#080808","#402715":"#080808","#0f0805":"#080808","#1c0c09":"#080808","#20100a":"#080808","#27150c":"#080808","#f33102":"#3f3f3f","#e52506":"#3a3a3a","#df2409":"#393939","#cc2509":"#2f2f2f","#9b1b09":"#171717","#8d1709":"#101010","#6b1006":"#080808","#971908":"#141414","#a2170a":"#1b1b1b","#df2c03":"#363636","#f33402":"#3f3f3f","#b22405":"#202020","#3d2513":"#080808","#3a2a28":"#080808","#2a1918":"#080808","#44332f":"#080808","#352215":"#080808","#200f09":"#080808","#e82703":"#3a3a3a","#f12d02":"#3e3e3e","#f12c01":"#3e3e3e","#ef2a02":"#3d3d3d","#d32009":"#333333","#ab1507":"#1e1e1e","#981406":"#141414","#c92307":"#2d2d2d","#e52f04":"#393939","#290903":"#080808","#36180c":"#080808","#3b1c0f":"#080808","#311b19":"#080808","#231616":"#080808","#1c0c0b":"#080808","#1c0b09":"#080808","#27130f":"#080808","#3f2915":"#080808","#24110a":"#080808","#cd1b04":"#2d2d2d","#d51b04":"#313131","#d41c03":"#303030","#d01f03":"#2e2e2e","#d21f03":"#2f2f2f","#cd1f03":"#2d2d2d","#ce2106":"#2f2f2f","#8c1506":"#0e0e0e","#b21b08":"#222222","#a91808":"#1d1d1d","#482816":"#080808","#594029":"#080808","#402514":"#080808","#c31904":"#282828","#af1705":"#1f1f1f","#861405":"#0a0a0a","#aa1805":"#1c1c1c","#931404":"#101010","#8c1404":"#0d0d0d","#c42204":"#292929","#a21607":"#191919","#832a13":"#101010","#563618":"#080808","#5a391e":"#080808","#210905":"#080808","#971505":"#131313","#a31c04":"#181818","#dc2e02":"#343434","#841204":"#090909","#732c11":"#080808","#583417":"#080808","#2f130a":"#080808","#4e311d":"#080808","#583924":"#080808","#402414":"#080808","#31150c":"#080808","#290f09":"#080808","#200a07":"#080808","#8c1405":"#0d0d0d","#861306":"#0b0b0b","#801306":"#080808","#691007":"#080808","#2f0501":"#080808","#be2602":"#252525","#d62c02":"#313131","#703b1c":"#0b0b0b","#3c160b":"#080808","#220907":"#080808","#29130e":"#080808","#1d0705":"#080808","#460804":"#080808","#060201":"#080808","#520902":"#080808","#af1f03":"#1e1e1e","#660d02":"#080808","#795b3f":"#212121","#420602":"#080808","#4f0a04":"#080808","#503627":"#080808","#6f4f30":"#141414","#150605":"#080808","#080403":"#080808","#250602":"#080808","#8f1305":"#0f0f0f","#b11e0e":"#242424","#2f0c08":"#080808","#1a0e09":"#080808","#6f5137":"#181818","#1d0d0b":"#080808","#140605":"#080808","#150301":"#080808","#6e0f04":"#080808","#a91807":"#1d1d1d","#040202":"#080808","#1a0906":"#080808","#69482b":"#0f0f0f","#301b10":"#080808","#811005":"#080808","#a91706":"#1c1c1c","#6f1004":"#080808","#030202":"#080808","#0d0503":"#080808","#2b1811":"#080808","#583e27":"#080808","#5f442c":"#0a0a0a","#4d3624":"#080808","#2e1c14":"#080808","#3a0b09":"#080808","#8a1c12":"#131313","#a21407":"#191919","#8f1205":"#0f0f0f","#530b03":"#080808","#100b08":"#080808","#1e1712":"#080808","#2d231d":"#080808","#332721":"#080808","#322524":"#080808","#790e05":"#080808","#5e1d14":"#080808","#b81a08":"#252525","#b81b09":"#252525","#b81c0b":"#262626","#b88670":"#595959","#a16939":"#323232","#4a110c":"#080808","#b91f0c":"#272727","#bd210d":"#2a2a2a","#991506":"#141414","#911907":"#111111","#8b1909":"#0f0f0f","#460e06":"#080808","#390d05":"#080808","#2c0c08":"#080808","#72180d":"#080808","#ad1d0c":"#212121","#a41a08":"#1b1b1b","#b02810":"#252525","#cc624a":"#505050","#c37c62":"#575757","#b97d69":"#565656","#a64a3f":"#373737","#b8200e":"#282828","#9d1705":"#161616","#931705":"#111111","#791305":"#080808","#821205":"#080808","#bf1b09":"#292929","#d42a0e":"#363636","#a31e0a":"#1b1b1b","#a51907":"#1b1b1b","#ca2e10":"#323232","#c2270d":"#2c2c2c","#811909":"#0a0a0a","#531005":"#080808","#621207":"#080808","#521008":"#080808","#360c04":"#080808","#300804":"#080808","#3f120e":"#080808","#991b0c":"#171717","#9e1c0b":"#191919","#951d0a":"#141414","#9d2109":"#181818","#df2c0a":"#393939","#ef2609":"#414141","#de2d0f":"#3b3b3b","#e23613":"#3f3f3f","#d62815":"#3a3a3a","#ce2210":"#343434","#b02615":"#272727","#9e2110":"#1c1c1c","#4b0b04":"#080808","#5f0d04":"#080808","#bf1906":"#272727","#d2290d":"#343434","#b01f09":"#212121","#c8290c":"#2f2f2f","#f66b25":"#525252","#e0461a":"#424242","#a8230c":"#1f1f1f","#741608":"#080808","#6a1308":"#080808","#821608":"#0a0a0a","#611108":"#080808","#3c0e05":"#080808","#2f0702":"#080808","#3f0d07":"#080808","#ba200c":"#282828","#d12609":"#323232","#c92b08":"#2d2d2d","#e43308":"#3b3b3b","#f32f0a":"#434343","#f56723":"#515151","#ed6224":"#4d4d4d","#e52207":"#3b3b3b","#df1807":"#383838","#ce1d07":"#2f2f2f","#c21d04":"#282828","#9c1805":"#151515","#5d1005":"#080808","#610d04":"#080808","#be1804":"#262626","#b31a06":"#212121","#c2230a":"#2b2b2b","#ed6328":"#4f4f4f","#f16e2b":"#535353","#c22b0d":"#2c2c2c","#91190a":"#121212","#851809":"#0c0c0c","#9f1b09":"#191919","#871609":"#0d0d0d","#0d0505":"#080808","#380f0b":"#080808","#cb270e":"#313131","#db220a":"#373737","#f12407":"#414141","#fd310b":"#494949","#f9450f":"#494949","#f57327":"#535353","#e66427":"#4b4b4b","#e0250b":"#3a3a3a","#df1f08":"#383838","#d11c06":"#303030","#c41a04":"#292929","#af1b04":"#1e1e1e","#6d1203":"#080808","#721004":"#080808","#bb1906":"#252525","#d5270b":"#353535","#e82e0e":"#404040","#e33813":"#404040","#d22d0f":"#353535","#a9210b":"#1f1f1f","#9f1e0b":"#1a1a1a","#a81e0a":"#1e1e1e","#b01e09":"#212121","#671208":"#080808","#3c0a05":"#080808","#340803":"#080808","#47120d":"#080808","#bf2710":"#2c2c2c","#db2811":"#3b3b3b","#ee2609":"#404040","#f42f0a":"#444444","#f9430a":"#464646","#fa480c":"#484848","#ed4110":"#434343","#dd2707":"#373737","#de2007":"#373737","#d61a05":"#323232","#c01804":"#272727","#a81904":"#1b1b1b","#771603":"#080808","#711407":"#080808","#971707":"#141414","#c31b08":"#2a2a2a","#d22309":"#323232","#d1250a":"#323232","#c1220a":"#2a2a2a","#b4230b":"#242424","#b5230c":"#252525","#bc230c":"#292929","#b21b09":"#222222","#7b1306":"#080808","#3b0c09":"#080808","#3c0f0a":"#080808","#b0270e":"#242424","#e33215":"#414141","#ee2a0e":"#434343","#ea2a06":"#3d3d3d","#f2380a":"#434343","#f93d0a":"#464646","#f53407":"#434343","#df2805":"#373737","#d61f06":"#333333","#da1504":"#343434","#c41404":"#292929","#a61805":"#1a1a1a","#871a05":"#0b0b0b","#651306":"#080808","#86190c":"#0e0e0e","#b41c0b":"#242424","#cb1e09":"#2f2f2f","#c31c08":"#2a2a2a","#c61e09":"#2c2c2c","#bf1e09":"#292929","#bb1f09":"#272727","#9a1907":"#151515","#641105":"#080808","#500f05":"#080808","#32100b":"#080808","#89200e":"#101010","#dc3013":"#3c3c3c","#eb240b":"#404040","#e02307":"#383838","#df2506":"#373737","#ef2c0a":"#414141","#f42c05":"#414141","#e62405":"#3a3a3a","#d31b03":"#303030","#d41403":"#303030","#ca1304":"#2c2c2c","#ab1904":"#1c1c1c","#901c05":"#0f0f0f","#6e1405":"#080808","#671507":"#080808","#8f1d0d":"#131313","#a41606":"#1a1a1a","#761406":"#080808","#6a1206":"#080808","#370804":"#080808","#3b0904":"#080808","#2e120d":"#080808","#ba2d13":"#2b2b2b","#df2f11":"#3d3d3d","#e11c08":"#393939","#cf1704":"#2e2e2e","#d71907":"#343434","#eb2508":"#3e3e3e","#eb2505":"#3d3d3d","#d71503":"#323232","#d21703":"#2f2f2f","#cc1503":"#2c2c2c","#a41604":"#191919","#951c05":"#121212","#701306":"#080808","#580f06":"#080808","#611209":"#080808","#6d1006":"#080808","#6f1005":"#080808","#6a1005":"#080808","#5b0f06":"#080808","#430a04":"#080808","#380903":"#080808","#460b05":"#080808","#3a0c07":"#080808","#430c01":"#080808","#871d0c":"#0e0e0e","#b92f12":"#2a2a2a","#dd270c":"#393939","#d21a08":"#323232","#c21406":"#292929","#dd1e07":"#373737","#ea2304":"#3c3c3c","#d31603":"#303030","#c71603":"#2a2a2a","#c21603":"#272727","#a41504":"#191919","#921804":"#101010","#6a0f04":"#080808","#701204":"#080808","#811505":"#080808","#721205":"#080808","#701206":"#080808","#651106":"#080808","#510b05":"#080808","#370803":"#080808","#1f0501":"#080808","#1a0401":"#080808","#390c07":"#080808","#210501":"#080808","#5c1008":"#080808","#8a260f":"#111111","#b1270e":"#242424","#be260b":"#292929","#b91a08":"#252525","#c31405":"#292929","#d71703":"#323232","#c51704":"#292929","#aa1503":"#1b1b1b","#7e1103":"#080808","#aa1e05":"#1c1c1c","#b81f04":"#232323","#b51f05":"#222222","#a61b06":"#1b1b1b","#921606":"#111111","#6d1106":"#080808","#5b0e05":"#080808","#2a0a06":"#080808","#4a0804":"#080808","#5b1409":"#080808","#7c1d0a":"#080808","#9c250a":"#181818","#b02308":"#212121","#ae1b05":"#1e1e1e","#bc1504":"#252525","#c81905":"#2b2b2b","#b81805":"#232323","#a41405":"#191919","#a41304":"#191919","#9f1604":"#161616","#931505":"#111111","#b41e05":"#212121","#c22005":"#282828","#c32105":"#292929","#c02105":"#272727","#a61b05":"#1a1a1a","#771106":"#080808","#4c0d04":"#080808","#260803":"#080808","#511006":"#080808","#6b1608":"#080808","#7f1c0b":"#0a0a0a","#932009":"#131313","#a32107":"#1a1a1a","#a71b05":"#1b1b1b","#b11d05":"#202020","#b31c04":"#202020","#9c1205":"#151515","#a11505":"#181818","#9f1505":"#171717","#b81f05":"#232323","#cd2405":"#2e2e2e","#d52604":"#313131","#d92904":"#333333","#ca2405":"#2c2c2c","#bc2005":"#252525","#b01c05":"#1f1f1f","#a31905":"#191919","#941705":"#111111","#6b1206":"#080808","#390904":"#080808","#4c0705":"#080808","#360803":"#080808","#560f05":"#080808","#6f1507":"#080808","#821a08":"#0a0a0a","#921f09":"#121212","#9c1f06":"#161616","#9e1e05":"#161616","#ab1906":"#1d1d1d","#9b1106":"#151515","#b31e05":"#212121","#ed2f04":"#3d3d3d","#ee3103":"#3d3d3d","#ea3003":"#3b3b3b","#e63003":"#393939","#dd2b03":"#353535","#c52204":"#292929","#a81905":"#1b1b1b","#971605":"#131313","#841205":"#090909","#650b05":"#080808","#400b04":"#080808","#671205":"#080808","#7b1606":"#080808","#8f1a06":"#0f0f0f","#951c07":"#131313","#921604":"#101010","#991106":"#141414","#951405":"#121212","#a81a06":"#1c1c1c","#c22305":"#282828","#da2d03":"#333333","#db2804":"#343434","#db2505":"#353535","#dd2803":"#353535","#dd2904":"#353535","#e52d03":"#393939","#cb2204":"#2c2c2c","#af1706":"#1f1f1f","#941207":"#121212","#6b0c06":"#080808","#781306":"#080808","#891508":"#0d0d0d","#5f0f06":"#080808","#220f0a":"#080808","#290b07":"#080808","#420c09":"#080808","#7b1406":"#080808","#921806":"#111111","#8e1605":"#0e0e0e","#831505":"#090909","#871305":"#0b0b0b","#9d1805":"#161616","#ac1c05":"#1d1d1d","#c21f04":"#282828","#ce2405":"#2e2e2e","#cd2305":"#2e2e2e","#d02105":"#2f2f2f","#d32005":"#313131","#d51f04":"#313131","#c61705":"#2a2a2a","#a41107":"#1a1a1a","#660e04":"#080808","#a41907":"#1a1a1a","#c71f09":"#2d2d2d","#290a08":"#080808","#410c06":"#080808","#561109":"#080808","#64160b":"#080808","#701009":"#080808","#7f1207":"#080808","#911606":"#101010","#9f1707":"#181818","#ae1705":"#1e1e1e","#be1904":"#262626","#bd1c05":"#262626","#b91b06":"#242424","#bb1805":"#252525","#be1605":"#262626","#b31206":"#212121","#d42306":"#323232","#f02f02":"#3e3e3e","#180505":"#080808","#2b0b09":"#080808","#50120d":"#080808","#771107":"#080808","#811207":"#090909","#931407":"#121212","#a21504":"#181818","#a51604":"#191919","#9a1404":"#141414","#871506":"#0b0b0b","#280c00":"#080808","#3c0802":"#080808","#290504":"#080808","#260502":"#080808","#350801":"#080808","#7c1207":"#080808","#740f06":"#080808","#711004":"#080808","#760f04":"#080808","#7e1104":"#080808","#871304":"#0a0a0a","#8d1404":"#0d0d0d","#7c1204":"#080808","#2c0900":"#080808","#3e0c00":"#080808","#320700":"#080808","#5b0d00":"#080808","#520b03":"#080808","#680f03":"#080808","#911906":"#101010","#991b06":"#141414","#941706":"#121212","#851506":"#0a0a0a","#751304":"#080808","#711005":"#080808","#6c1105":"#080808","#711105":"#080808","#650e04":"#080808","#6b0e03":"#080808","#170400":"#080808","#5e1104":"#080808","#941a06":"#121212","#a11b06":"#181818","#761407":"#080808","#580b04":"#080808","#560b03":"#080808","#5a0d04":"#080808","#681007":"#080808","#070201":"#080808","#0e0401":"#080808","#3f0905":"#080808","#6d0d05":"#080808","#911405":"#101010","#330400":"#080808","#370602":"#080808","#350803":"#080808","#470803":"#080808","#630802":"#080808","#6e0702":"#080808","#650601":"#080808","#500301":"#080808","#440603":"#080808","#b71004":"#222222","#c31104":"#282828","#c61104":"#2a2a2a","#c11305":"#282828","#b71200":"#202020","#d91205":"#343434","#c71004":"#2a2a2a","#b80d03":"#222222","#ae0d03":"#1d1d1d","#a70e04":"#1a1a1a","#940f03":"#101010","#6f0a02":"#080808","#450402":"#080808","#3c0501":"#080808","#280501":"#080808","#1d0201":"#080808","#410502":"#080808","#a20f05":"#181818","#6b0906":"#080808","#560804":"#080808","#470604":"#080808","#740a02":"#080808","#710803":"#080808","#730802":"#080808","#6a0802":"#080808","#570602":"#080808","#320401":"#080808","#070200":"#080808","#5a0503":"#080808","#6f0704":"#080808","#2f0202":"#080808","#390806":"#080808","#480a05":"#080808","#430703":"#080808","#470903":"#080808","#4a0903":"#080808","#4e0703":"#080808","#550803":"#080808","#520703":"#080808","#4e0602":"#080808","#100803":"#080808","#32130b":"#080808","#d63505":"#323232","#420f0b":"#080808","#ea3002":"#3b3b3b","#6d1c11":"#080808","#c51702":"#282828","#953319":"#1c1c1c","#8d4b25":"#1e1e1e","#170804":"#080808","#560702":"#080808","#110805":"#080808","#170501":"#080808","#330e08":"#080808","#4f2615":"#080808","#240d07":"#080808","#2e0b07":"#080808","#070402":"#080808","#040303":"#080808","#501b12":"#080808","#5f1207":"#080808","#2f0e0b":"#080808","#230704":"#080808","#591906":"#080808","#230b09":"#080808","#6a1c06":"#080808","#050202":"#080808","#090100":"#080808","#2e0604":"#080808","#1d0502":"#080808","#1e0e09":"#080808","#1b0803":"#080808","#180404":"#080808","#460b08":"#080808","#95110b":"#151515","#aa1006":"#1d1d1d","#ab1106":"#1d1d1d","#a61207":"#1b1b1b","#1e0501":"#080808","#210f0e":"#080808","#280a04":"#080808","#5f1108":"#080808","#981408":"#151515","#c41507":"#2a2a2a","#cd1505":"#2e2e2e","#cc1305":"#2d2d2d","#cc1406":"#2e2e2e","#bf1405":"#272727","#9c1106":"#161616","#680c05":"#080808","#130202":"#080808","#190807":"#080808","#1c0907":"#080808","#461105":"#080808","#3e0e05":"#080808","#5a1108":"#080808","#681109":"#080808","#73110b":"#080808","#88110a":"#0e0e0e","#ab130a":"#1f1f1f","#bf1406":"#272727","#c31705":"#292929","#961207":"#131313","#851006":"#0a0a0a","#840f07":"#0a0a0a","#d6310a":"#353535","#b52e0b":"#252525","#160906":"#080808","#210703":"#080808","#731005":"#080808","#971608":"#141414","#a1170a":"#1a1a1a","#b61909":"#242424","#ae1907":"#1f1f1f","#af1806":"#1f1f1f","#a32610":"#1e1e1e","#bd2f0e":"#2a2a2a","#dd3a0e":"#3a3a3a","#b72a0a":"#252525","#6e1d06":"#080808","#210705":"#080808","#2e0703":"#080808","#7b0f06":"#080808","#a91508":"#1d1d1d","#b71a06":"#232323","#c42106":"#2a2a2a","#ce2908":"#303030","#d82e08":"#353535","#dd3108":"#373737","#df330b":"#3a3a3a","#d72d0b":"#363636","#e62d09":"#3c3c3c","#f0370a":"#424242","#e05422":"#464646","#db4515":"#3d3d3d","#dc3b0e":"#3a3a3a","#661406":"#080808","#380e09":"#080808","#701d12":"#080808","#b31b0e":"#252525","#cc180c":"#313131","#d92006":"#343434","#da2307":"#353535","#e22405":"#383838","#e72605":"#3b3b3b","#eb2705":"#3d3d3d","#e52406":"#3a3a3a","#eb2b07":"#3e3e3e","#f02e06":"#404040","#ea4412":"#434343","#e2742f":"#4d4d4d","#df501a":"#414141","#ca320d":"#303030","#2e0b08":"#080808","#3f170e":"#080808","#580b05":"#080808","#711007":"#080808","#841007":"#0a0a0a","#8a1006":"#0d0d0d","#9f130a":"#191919","#a51508":"#1b1b1b","#a81309":"#1d1d1d","#b01308":"#212121","#bb1508":"#262626","#c61505":"#2a2a2a","#d01606":"#303030","#d91905":"#343434","#e0380d":"#3b3b3b","#e2732f":"#4d4d4d","#e2722e":"#4d4d4d","#d83910":"#393939","#490f05":"#080808","#2d1515":"#080808","#340c07":"#080808","#310602":"#080808","#3d0804":"#080808","#6e0d07":"#080808","#7c1007":"#080808","#861007":"#0b0b0b","#910f07":"#111111","#9d1208":"#171717","#aa1308":"#1e1e1e","#b41209":"#232323","#b1120a":"#222222","#b5130a":"#242424","#d0280a":"#323232","#db3e11":"#3b3b3b","#dc3d14":"#3d3d3d","#d73210":"#383838","#2e0807":"#080808","#5a0c07":"#080808","#660c07":"#080808","#6f0e07":"#080808","#780f07":"#080808","#841107":"#0a0a0a","#891007":"#0d0d0d","#921107":"#111111","#b21308":"#222222","#bb1206":"#252525","#bb1e09":"#272727","#ad1309":"#202020","#320908":"#080808","#3b0806":"#080808","#620a07":"#080808","#7f0e07":"#080808","#931006":"#111111","#971207":"#141414","#a31207":"#1a1a1a","#a41206":"#1a1a1a","#a11206":"#181818","#9c1107":"#161616","#840e06":"#0a0a0a","#750a08":"#080808","#570505":"#080808","#350302":"#080808","#2e0705":"#080808","#560a06":"#080808","#680c07":"#080808","#7b0e07":"#080808","#7f0f07":"#080808","#831006":"#090909","#820f06":"#090909","#740d07":"#080808","#6a0d08":"#080808","#650b08":"#080808","#7a0a07":"#080808","#5c0505":"#080808","#5d0c05":"#080808","#500f08":"#080808","#590e08":"#080808","#62100a":"#080808","#600e09":"#080808","#670f08":"#080808","#6b0f07":"#080808","#480a07":"#080808","#4c0b08":"#080808","#670807":"#080808","#6c0705":"#080808","#2a0504":"#080808","#480900":"#080808","#510b01":"#080808","#891306":"#0c0c0c","#8a1307":"#0d0d0d","#100200":"#080808","#1b0301":"#080808","#200301":"#080808","#1c0301":"#080808","#330602":"#080808","#1a0303":"#080808","#2a0600":"#080808","#b21b05":"#202020","#9b1906":"#151515","#7c140a":"#080808","#470b09":"#080808","#0b0502":"#080808","#470705":"#080808","#8a0e03":"#0b0b0b","#890f04":"#0b0b0b","#8d0e03":"#0d0d0d","#9b1304":"#141414","#070303":"#080808","#c71e0b":"#2e2e2e","#c31f05":"#292929","#b72006":"#232323","#a8290f":"#202020","#b33512":"#272727","#0f0100":"#080808","#5f2012":"#080808","#7f4427":"#181818","#43140b":"#080808","#a91607":"#1d1d1d","#440804":"#080808","#1b0501":"#080808","#080401":"#080808","#510f03":"#080808","#aa3714":"#242424","#d93a0c":"#373737","#3c100b":"#080808","#43130d":"#080808","#ae1508":"#202020","#d6180b":"#353535","#c41e0d":"#2d2d2d","#a2190c":"#1c1c1c","#8e160a":"#111111","#7f1308":"#080808","#641203":"#080808","#571103":"#080808","#2a0f01":"#080808","#371e07":"#080808","#582a12":"#080808","#512a11":"#080808","#1e0f02":"#080808","#1e0902":"#080808","#530701":"#080808","#d82b0c":"#373737","#d74213":"#3a3a3a","#dc390c":"#393939","#3b110f":"#080808","#3b1611":"#080808","#8e1607":"#0f0f0f","#a73126":"#2b2b2b","#8c453e":"#2a2a2a","#804e38":"#212121","#572411":"#080808","#53200a":"#080808","#6d2b08":"#080808","#783406":"#080808","#612509":"#080808","#c5310c":"#2d2d2d","#ce320d":"#323232","#b02008":"#212121","#8c1105":"#0d0d0d","#310b09":"#080808","#4b2418":"#080808","#47150d":"#080808","#74473c":"#1d1d1d","#872c07":"#0c0c0c","#c5380e":"#2e2e2e","#af1e07":"#202020","#8b300a":"#0f0f0f","#ac1805":"#1d1d1d","#8b1708":"#0e0e0e","#58170b":"#080808","#780b02":"#080808","#8f3308":"#101010","#a02004":"#171717","#8b1104":"#0c0c0c","#9a5d2f":"#292929","#330401":"#080808","#c51003":"#292929","#331b04":"#080808","#291506":"#080808","#993c0d":"#181818","#cc3203":"#2c2c2c","#563015":"#080808","#8a0a02":"#0b0b0b","#9b1203":"#141414","#531008":"#080808","#471308":"#080808","#3a1908":"#080808","#79230d":"#080808","#8d1a09":"#101010","#790f04":"#080808","#de2806":"#373737","#dc2006":"#363636","#aa1f05":"#1c1c1c","#752407":"#080808","#763305":"#080808","#633408":"#080808","#581814":"#080808","#7f1b0b":"#0a0a0a","#610e05":"#080808","#991a05":"#141414","#fc3b03":"#444444","#e1240d":"#3c3c3c","#772507":"#080808","#d04a03":"#2e2e2e","#e54608":"#3b3b3b","#e75106":"#3b3b3b","#812809":"#0a0a0a","#221104":"#080808","#410f0a":"#080808","#4e1712":"#080808","#780601":"#080808","#d71305":"#333333","#9c2b03":"#141414","#f43903":"#404040","#8b1d09":"#0f0f0f","#943304":"#111111","#d94704":"#333333","#f54606":"#424242","#eb4d08":"#3e3e3e","#5f2108":"#080808","#9a2508":"#161616","#230b03":"#080808","#3c1410":"#080808","#961001":"#101010","#f93204":"#434343","#952704":"#111111","#6c1607":"#080808","#8c3505":"#0d0d0d","#d74603":"#323232","#f64805":"#424242","#da5407":"#353535","#bd5d05":"#262626","#731f07":"#080808","#a42e09":"#1b1b1b","#240906":"#080808","#962306":"#131313","#da3306":"#353535","#f13702":"#3e3e3e","#761e07":"#080808","#5d2307":"#080808","#d34903":"#303030","#f24407":"#414141","#e14b07":"#393939","#331405":"#080808","#a42508":"#1b1b1b","#d72104":"#323232","#da2b05":"#343434","#601a05":"#080808","#953707":"#131313","#df4608":"#383838","#bf5a04":"#262626","#3c2006":"#080808","#2b1404":"#080808","#7f1a07":"#080808","#3c0e07":"#080808","#b81004":"#232323","#d91c02":"#323232","#d22f04":"#303030","#c13c02":"#262626","#c64f04":"#2a2a2a","#ca6705":"#2c2c2c","#422007":"#080808","#4a1f05":"#080808","#bd2608":"#272727","#230807":"#080808","#360c08":"#080808","#c41703":"#282828","#d21b03":"#2f2f2f","#c92b02":"#2a2a2a","#c94204":"#2b2b2b","#da5304":"#343434","#411e08":"#080808","#b23609":"#222222","#be2808":"#282828","#46110d":"#080808","#981604":"#131313","#b62103":"#212121","#c63003":"#292929","#6a2a05":"#080808","#9d340c":"#191919","#c02d09":"#292929","#ab2e09":"#1f1f1f","#240c08":"#080808","#48120b":"#080808","#6b1306":"#080808","#381508":"#080808","#3f220b":"#080808","#993508":"#151515","#c74305":"#2b2b2b","#c7380b":"#2e2e2e","#c82e09":"#2d2d2d","#732007":"#080808","#812507":"#090909","#1b0b08":"#080808","#4f130b":"#080808","#36110d":"#080808","#2d110c":"#080808","#412419":"#080808","#dc6113":"#3c3c3c","#a8470f":"#202020","#c73e0b":"#2e2e2e","#9d2d09":"#181818","#571c08":"#080808","#371508":"#080808","#250a05":"#080808","#1a0a09":"#080808","#482a23":"#080808","#d76f20":"#404040","#9d3c04":"#151515","#ae3c0a":"#212121","#802909":"#090909","#4a1c07":"#080808","#311405":"#080808","#1d0804":"#080808","#631007":"#080808","#4e311f":"#080808","#6e2106":"#080808","#6d2404":"#080808","#783e10":"#090909","#64300a":"#080808","#852b11":"#101010","#5a2508":"#080808","#210c04":"#080808","#220904":"#080808","#240904":"#080808","#1f0702":"#080808","#9e5b37":"#2f2f2f","#3c1a0e":"#080808","#261206":"#080808","#341104":"#080808","#612b09":"#080808","#743608":"#080808","#6b250c":"#080808","#70210d":"#080808","#4c1b09":"#080808","#1a0b03":"#080808","#220a04":"#080808","#1b0b09":"#080808","#51120a":"#080808","#55140c":"#080808","#5c1709":"#080808","#8a1806":"#0d0d0d","#3e0e03":"#080808","#2d0f03":"#080808","#1e1003":"#080808","#321304":"#080808","#581305":"#080808","#4d0f03":"#080808","#2d0a04":"#080808","#1f0602":"#080808","#160501":"#080808","#41100a":"#080808","#6d1509":"#080808","#7f1407":"#080808","#a63317":"#232323","#8c1605":"#0d0d0d","#9e1405":"#161616","#891304":"#0b0b0b","#1a0a03":"#080808","#891606":"#0c0c0c","#751508":"#080808","#340b05":"#080808","#1e0602":"#080808","#200603":"#080808","#721a0f":"#080808","#6e1408":"#080808","#b51b08":"#232323","#b61e0d":"#262626","#a54321":"#282828","#87170b":"#0e0e0e","#871709":"#0d0d0d","#671309":"#080808","#280505":"#080808","#ab150e":"#212121","#c61609":"#2c2c2c","#e4551a":"#444444","#cd541e":"#3a3a3a","#bb2106":"#252525","#b31a04":"#202020","#a61405":"#1a1a1a","#910f08":"#111111","#880903":"#0a0a0a","#890a04":"#0b0b0b","#950904":"#111111","#ab0a04":"#1c1c1c","#ac1008":"#1f1f1f","#890e07":"#0d0d0d","#c61605":"#2a2a2a","#510301":"#080808","#0c0200":"#080808","#300403":"#080808","#780b08":"#080808","#b7130b":"#262626","#cf1c03":"#2e2e2e","#d14415":"#383838","#b73211":"#292929","#a91a06":"#1c1c1c","#aa0e03":"#1b1b1b","#991007":"#151515","#810805":"#080808","#800903":"#080808","#740904":"#080808","#710804":"#080808","#ac0b04":"#1d1d1d","#970d08":"#141414","#750d09":"#080808","#c51705":"#2a2a2a","#650401":"#080808","#2a0403":"#080808","#9c0d08":"#171717","#b91207":"#252525","#c62007":"#2b2b2b","#b73c19":"#2d2d2d","#ad200a":"#202020","#b01304":"#1f1f1f","#a10d04":"#171717","#930c05":"#111111","#810903":"#080808","#780b03":"#080808","#a90b05":"#1c1c1c","#9c0b04":"#151515","#4a0905":"#080808","#2a0503":"#080808","#bb1405":"#252525","#850501":"#080808","#500805":"#080808","#850a08":"#0b0b0b","#a80f06":"#1c1c1c","#a51303":"#191919","#971604":"#121212","#ab1703":"#1c1c1c","#b91103":"#232323","#9e0a03":"#151515","#800d03":"#080808","#9e0c04":"#161616","#8d0a04":"#0d0d0d","#920a04":"#101010","#230302":"#080808","#b31205":"#212121","#970802":"#111111","#4d0905":"#080808","#400605":"#080808","#6f0a06":"#080808","#970b04":"#121212","#8f0c04":"#0e0e0e","#7e0e05":"#080808","#8f0e04":"#0e0e0e","#970a03":"#121212","#9c0b03":"#141414","#aa0e04":"#1c1c1c","#820905":"#080808","#650902":"#080808","#230202":"#080808","#9f1004":"#161616","#a50b03":"#191919","#480704":"#080808","#8a0b05":"#0c0c0c","#7a0b03":"#080808","#5d0804":"#080808","#a70d05":"#1b1b1b","#b21104":"#202020","#980e04":"#131313","#560903":"#080808","#7d0b03":"#080808","#bc1004":"#252525","#1f0403":"#080808","#af1204":"#1e1e1e","#6f0b03":"#080808","#130801":"#080808","#1e0202":"#080808","#c41305":"#292929","#3b0602":"#080808","#3d0908":"#080808","#360403":"#080808","#720a03":"#080808","#b41505":"#212121","#4b0803":"#080808","#360402":"#080808","#bc1306":"#262626","#3d0504":"#080808","#4c0605":"#080808","#220101":"#080808","#360301":"#080808","#870e03":"#0a0a0a","#7f0802":"#080808","#6a0702":"#080808","#410604":"#080808","#2b0403":"#080808","#9b1004":"#141414","#aa1405":"#1c1c1c","#2a0706":"#080808","#3c0604":"#080808","#a41005":"#191919","#4f0803":"#080808","#660905":"#080808","#630a05":"#080808","#380502":"#080808","#4b0401":"#080808","#820b04":"#080808","#9b0b02":"#131313","#8c0902":"#0c0c0c","#2f0503":"#080808","#7b0f04":"#080808","#530401":"#080808","#5d0b07":"#080808","#3d0503":"#080808","#0f0501":"#080808","#660702":"#080808","#9c0c02":"#141414","#a21105":"#181818","#64110a":"#080808","#c7230b":"#2e2e2e","#410903":"#080808","#5f0f05":"#080808","#600d05":"#080808","#730803":"#080808","#5c0400":"#080808","#4d0806":"#080808","#460807":"#080808","#570c0a":"#080808","#110602":"#080808","#0b0401":"#080808","#0d0501":"#080808","#100601":"#080808","#2e0601":"#080808","#790801":"#080808","#af3919":"#292929","#752911":"#080808","#630f05":"#080808","#c72c10":"#303030","#570f04":"#080808","#6e0302":"#080808","#800902":"#080808","#640f0e":"#080808","#590e0c":"#080808","#190505":"#080808","#0c0501":"#080808","#0f0601":"#080808","#210701":"#080808","#8d1e0b":"#111111","#6e2d15":"#080808","#8c1b0a":"#101010","#a5240d":"#1e1e1e","#b82106":"#242424","#1b0707":"#080808","#6e0601":"#080808","#7c0502":"#080808","#750a06":"#080808","#670f0c":"#080808","#5c0c09":"#080808","#560601":"#080808","#450502":"#080808","#a5230c":"#1d1d1d","#691307":"#080808","#8a1704":"#0c0c0c","#590b05":"#080808","#2d0402":"#080808","#4d0a07":"#080808","#5d0d0c":"#080808","#4e0c08":"#080808","#3d0605":"#080808","#1f0302":"#080808","#1e0303":"#080808","#400503":"#080808","#b21d08":"#222222","#420a03":"#080808","#221005":"#080808","#1c0f04":"#080808","#1d0702":"#080808","#2d0b0a":"#080808","#220402":"#080808","#1c0804":"#080808","#1d0e06":"#080808","#120501":"#080808","#320503":"#080808","#b31605":"#212121","#2f1c0a":"#080808","#1a0601":"#080808","#240e05":"#080808","#2d1a0b":"#080808","#120401":"#080808","#180401":"#080808","#991305":"#141414","#200f04":"#080808","#130601":"#080808","#470603":"#080808","#4d0603":"#080808","#5a0804":"#080808","#460602":"#080808","#410602":"#080808","#320505":"#080808","#331b09":"#080808","#301b0a":"#080808","#0f0404":"#080808","#110601":"#080808","#5f0a04":"#080808","#600802":"#080808","#740905":"#080808","#410501":"#080808","#480a03":"#080808","#270301":"#080808","#3b1609":"#080808","#30190e":"#080808","#360802":"#080808","#291808":"#080808","#6b0903":"#080808","#710a06":"#080808","#5a0805":"#080808","#5f1310":"#080808","#3f1412":"#080808","#160b02":"#080808","#370501":"#080808","#720903":"#080808","#750a03":"#080808","#540908":"#080808","#2e0404":"#080808","#5c0d0d":"#080808","#520702":"#080808","#800a03":"#080808","#560907":"#080808","#520a09":"#080808","#240404":"#080808","#650903":"#080808","#920e04":"#101010","#5b0a08":"#080808","#4d0a09":"#080808","#2e0303":"#080808","#8b120a":"#0f0f0f","#3d0702":"#080808","#bd3e18":"#2f2f2f","#ad4119":"#282828","#5f0b07":"#080808","#530b0b":"#080808","#230404":"#080808","#300404":"#080808","#7b0e06":"#080808","#2f0502":"#080808","#d8551e":"#404040","#ca4617":"#353535","#5b0a09":"#080808","#450706":"#080808","#3b0503":"#080808","#aa2209":"#1e1e1e","#b12608":"#212121","#460908":"#080808","#430807":"#080808","#380503":"#080808","#300504":"#080808","#6c0c06":"#080808","#2a0703":"#080808","#6b3e1c":"#080808","#845428":"#1b1b1b","#431a0d":"#080808","#470904":"#080808","#490904":"#080808","#2b0703":"#080808","#2a1409":"#080808","#280202":"#080808","#5e3517":"#080808","#4b2e14":"#080808","#270a05":"#080808","#b61204":"#222222","#270a08":"#080808","#890f07":"#0d0d0d","#f05a1c":"#4b4b4b","#cb4016":"#353535","#9f0d04":"#161616","#b31203":"#202020","#3e0706":"#080808","#850b03":"#090909","#1d0504":"#080808","#670e06":"#080808","#9f170b":"#1a1a1a","#8e0d03":"#0d0d0d","#450805":"#080808","#a70e03":"#1a1a1a","#420b08":"#080808","#a91006":"#1c1c1c","#da4a1d":"#404040","#79140f":"#090909","#530702":"#080808","#9b0c03":"#141414","#300302":"#080808","#5d0b09":"#080808","#5e0e0a":"#080808","#8c100b":"#101010","#87110a":"#0d0d0d","#290501":"#080808","#870c03":"#0a0a0a","#580401":"#080808","#7f110f":"#0c0c0c","#a50f03":"#191919","#e33707":"#3a3a3a","#990c06":"#141414","#7f0701":"#080808","#480806":"#080808","#800a04":"#080808","#be2102":"#252525","#710602":"#080808","#3c0603":"#080808","#560805":"#080808","#aa1104":"#1c1c1c","#580505":"#080808","#220301":"#080808","#a81005":"#1b1b1b","#180606":"#080808","#4f0504":"#080808","#7f0c04":"#080808","#411816":"#080808","#3b0704":"#080808","#670703":"#080808","#a74522":"#292929","#bd200f":"#2b2b2b","#b74320":"#303030","#79130c":"#080808","#320602":"#080808","#4b110f":"#080808","#1a0908":"#080808","#560705":"#080808","#bd1309":"#282828","#972c16":"#1b1b1b","#600f0a":"#080808","#180807":"#080808","#940b05":"#111111","#7d0f09":"#080808","#af0e09":"#212121","#5e0d07":"#080808","#3b0504":"#080808","#b53d23":"#313131","#a7351d":"#272727","#190201":"#080808","#8c0e07":"#0e0e0e","#640805":"#080808","#090000":"#080808","#a00e04":"#171717","#600705":"#080808","#210302":"#080808","#5c0803":"#080808","#500402":"#080808","#870f0b":"#0e0e0e","#630805":"#080808","#4c0502":"#080808","#3e0502":"#080808","#3e0302":"#080808","#680705":"#080808","#5f0703":"#080808","#840903":"#080808","#a50a03":"#191919","#b50c03":"#212121","#38130b":"#080808","#3b160c":"#080808","#510602":"#080808","#731c0c":"#080808","#5a2410":"#080808","#430502":"#080808","#0f0200":"#080808","#35271a":"#080808","#442221":"#080808","#37140c":"#080808","#270c08":"#080808","#1f0a08":"#080808","#180707":"#080808","#140606":"#080808","#110705":"#080808","#0d0604":"#080808","#1c150f":"#080808","#2f110a":"#080808","#36130c":"#080808","#561104":"#080808","#430c03":"#080808","#140a07":"#080808","#150d09":"#080808","#231b14":"#080808","#0d0a09":"#080808","#251c14":"#080808","#35100a":"#080808","#610a04":"#080808","#841c04":"#090909","#861802":"#090909","#6d0501":"#080808","#570301":"#080808","#510300":"#080808","#240301":"#080808","#261813":"#080808","#3b2a1f":"#080808","#100b09":"#080808","#0c0808":"#080808","#18120e":"#080808","#3c0a07":"#080808","#8a1002":"#0b0b0b","#db3103":"#343434","#bd2703":"#252525","#900f03":"#0e0e0e","#980902":"#121212","#970a02":"#111111","#830601":"#080808","#5e0501":"#080808","#100606":"#080808","#725441":"#1e1e1e","#941107":"#121212","#c82003":"#2a2a2a","#f43302":"#404040","#e62d03":"#393939","#d52303":"#313131","#a90b03":"#1b1b1b","#690501":"#080808","#22140e":"#080808","#130d0c":"#080808","#70130b":"#080808","#bb2308":"#262626","#e02907":"#383838","#e72505":"#3b3b3b","#ea3007":"#3d3d3d","#ee3c0c":"#424242","#e7290a":"#3d3d3d","#d71706":"#333333","#c41205":"#292929","#af0d03":"#1e1e1e","#990902":"#121212","#6f0401":"#080808","#422d1b":"#080808","#312218":"#080808","#70533f":"#1c1c1c","#971f06":"#131313","#c62608":"#2c2c2c","#d92108":"#353535","#d51708":"#333333","#e9360f":"#414141","#f25d1f":"#4d4d4d","#f4501b":"#4c4c4c","#ee290b":"#414141","#da1a04":"#343434","#c51204":"#292929","#af0e03":"#1e1e1e","#980802":"#121212","#6d0502":"#080808","#210303":"#080808","#251810":"#080808","#38271a":"#080808","#b21a05":"#202020","#c31c09":"#2b2b2b","#cd1c0b":"#313131","#cf1908":"#303030","#e74a1a":"#454545","#ee551b":"#494949","#ee551d":"#4a4a4a","#ee3f13":"#454545","#e92306":"#3c3c3c","#cd1504":"#2d2d2d","#bb1103":"#242424","#960802":"#111111","#720702":"#080808","#76120a":"#080808","#6d0e07":"#080808","#c71a0a":"#2d2d2d","#cd1909":"#303030","#e6682a":"#4d4d4d","#f35f1d":"#4d4d4d","#f53e08":"#434343","#eb4413":"#444444","#e73311":"#414141","#e02108":"#393939","#bc1105":"#252525","#8a0703":"#0b0b0b","#5e0704":"#080808","#553a27":"#080808","#302116":"#080808","#0a0603":"#080808","#5e3924":"#080808","#8a1a0e":"#111111","#a31408":"#1a1a1a","#d21908":"#323232","#ea380e":"#414141","#f7651c":"#4e4e4e","#f83b04":"#434343","#ed380c":"#414141","#e54016":"#424242","#e72e10":"#404040","#c31605":"#292929","#9d0803":"#151515","#760702":"#080808","#250d09":"#080808","#751d11":"#080808","#58180d":"#080808","#8b2a14":"#141414","#5c2214":"#080808","#d01708":"#313131","#df2408":"#383838","#f55c19":"#4c4c4c","#ec4311":"#434343","#ee3004":"#3e3e3e","#ee380b":"#414141","#e63e15":"#424242","#e0260b":"#3a3a3a","#b01205":"#1f1f1f","#b41104":"#212121","#b50d04":"#212121","#930902":"#0f0f0f","#450503":"#080808","#513a24":"#080808","#2a0401":"#080808","#b70e04":"#222222","#bb0d03":"#242424","#ac1d0c":"#212121","#5b321a":"#080808","#5e2f1a":"#080808","#5b0a05":"#080808","#c81508":"#2d2d2d","#d51e07":"#333333","#e7340d":"#3f3f3f","#e34e1e":"#454545","#eb2b03":"#3c3c3c","#e8330d":"#3f3f3f","#e33714":"#404040","#c91905":"#2c2c2c","#a50e04":"#191919","#b90f04":"#232323","#a10b03":"#171717","#5f0603":"#080808","#270909":"#080808","#391c13":"#080808","#5b0907":"#080808","#af0901":"#1d1d1d","#b40901":"#1f1f1f","#a81609":"#1d1d1d","#572d15":"#080808","#bb1507":"#262626","#c31507":"#2a2a2a","#dd2908":"#373737","#e44518":"#434343","#da290d":"#383838","#dd2604":"#353535","#e62404":"#3a3a3a","#e43011":"#3f3f3f","#dd2a0e":"#3a3a3a","#ae1105":"#1e1e1e","#a90e04":"#1b1b1b","#790803":"#080808","#310908":"#080808","#3d1911":"#080808","#765232":"#191919","#34160e":"#080808","#300908":"#080808","#800702":"#080808","#a00901":"#151515","#721007":"#080808","#61381e":"#080808","#b21106":"#212121","#ca1e08":"#2e2e2e","#e2300b":"#3b3b3b","#c81d05":"#2b2b2b","#d52004":"#313131","#e32f10":"#3e3e3e","#c41807":"#2a2a2a","#a30f04":"#181818","#a50c04":"#191919","#8c0a03":"#0c0c0c","#470704":"#080808","#260d09":"#080808","#651404":"#080808","#a10902":"#161616","#7f0a03":"#080808","#775536":"#1b1b1b","#411a0c":"#080808","#3e0a07":"#080808","#510805":"#080808","#960f07":"#131313","#cb2109":"#2f2f2f","#d22109":"#323232","#c91e06":"#2c2c2c","#be1b05":"#262626","#d31e0b":"#343434","#d4200b":"#343434","#aa0e05":"#1c1c1c","#580603":"#080808","#9d1403":"#151515","#a51b02":"#181818","#790c03":"#080808","#b30a02":"#1f1f1f","#900a03":"#0e0e0e","#770c04":"#080808","#4f0c04":"#080808","#39160b":"#080808","#3a120c":"#080808","#5f0904":"#080808","#b41406":"#222222","#be1907":"#272727","#c51c07":"#2b2b2b","#c31a06":"#292929","#c51806":"#2a2a2a","#cb1d09":"#2f2f2f","#b91305":"#242424","#b40f04":"#212121","#900a04":"#0f0f0f","#8e1005":"#0e0e0e","#330a03":"#080808","#730b02":"#080808","#980d02":"#121212","#b90f02":"#222222","#ba0b01":"#222222","#ad0a01":"#1c1c1c","#770a04":"#080808","#5c0e05":"#080808","#6f0c05":"#080808","#900e04":"#0f0f0f","#9c1004":"#151515","#ae1306":"#1f1f1f","#ba1807":"#252525","#b81907":"#242424","#bb1707":"#262626","#c21806":"#292929","#be1406":"#272727","#b30f05":"#212121","#970d05":"#131313","#960f05":"#121212","#890a05":"#0c0c0c","#660805":"#080808","#320403":"#080808","#290805":"#080808","#4e0c05":"#080808","#8a1904":"#0c0c0c","#911303":"#0f0f0f","#5a0703":"#080808","#260602":"#080808","#790d04":"#080808","#991005":"#141414","#ae1606":"#1f1f1f","#b61506":"#232323","#a30e06":"#191919","#970f06":"#131313","#930a05":"#111111","#681004":"#080808","#700c04":"#080808","#8f0f05":"#0f0f0f","#8f0f06":"#0f0f0f","#a61205":"#1a1a1a","#a41106":"#1a1a1a","#8f0b04":"#0e0e0e","#4b0904":"#080808","#410705":"#080808","#540903":"#080808","#760b03":"#080808","#6b0703":"#080808","#550903":"#080808","#500502":"#080808","#690902":"#080808","#8c1207":"#0e0e0e","#8c1106":"#0e0e0e","#911106":"#101010","#921105":"#101010","#860a05":"#0a0a0a","#970904":"#121212","#840a03":"#080808","#590805":"#080808","#4f0604":"#080808","#5e0a04":"#080808","#6e0d03":"#080808","#600903":"#080808","#2f0605":"#080808","#4e0402":"#080808","#820702":"#080808","#a61307":"#1b1b1b","#a61808":"#1c1c1c","#a31807":"#1a1a1a","#9a1306":"#151515","#820d05":"#080808","#870b04":"#0a0a0a","#960a04":"#121212","#6e0903":"#080808","#4e0905":"#080808","#7a0803":"#080808","#520704":"#080808","#820b03":"#080808","#260201":"#080808","#470403":"#080808","#7f0906":"#080808","#ae0b07":"#1f1f1f","#b30f07":"#222222","#bf2208":"#282828","#b91e08":"#252525","#a91806":"#1c1c1c","#a11605":"#181818","#901104":"#0f0f0f","#990903":"#131313","#980a04":"#131313","#690704":"#080808","#8b0804":"#0c0c0c","#9d0903":"#151515","#670a06":"#080808","#970f03":"#121212","#2f0201":"#080808","#710905":"#080808","#af150d":"#232323","#c41307":"#2a2a2a","#e26221":"#464646","#c5340f":"#2f2f2f","#b11c05":"#202020","#ba1904":"#242424","#9c1605":"#151515","#901006":"#101010","#9b0a03":"#141414","#9d0905":"#161616","#b00b05":"#1f1f1f","#7e0d06":"#080808","#a51104":"#191919","#370201":"#080808","#9a2500":"#121212","#fb3001":"#434343","#df2f14":"#3e3e3e","#bc2103":"#242424","#d82206":"#343434","#d32a12":"#373737","#ec2a10":"#434343","#e3250f":"#3e3e3e","#3e0901":"#080808","#b42804":"#212121","#e52905":"#3a3a3a","#e1200a":"#3a3a3a","#c1210a":"#2a2a2a","#b32d04":"#202020","#dc2105":"#353535","#c71e0c":"#2e2e2e","#77160d":"#080808","#773a0a":"#080808","#d81e06":"#343434","#a6140a":"#1d1d1d","#3f2819":"#080808","#bb2108":"#262626","#140908":"#080808","#462319":"#080808","#2e0d06":"#080808","#b91a09":"#262626","#1e0901":"#080808","#571406":"#080808","#67150a":"#080808","#7a180f":"#090909","#290f06":"#080808","#391e0c":"#080808","#7b2e08":"#080808","#bd3515":"#2e2e2e","#330d01":"#080808","#200501":"#080808","#310902":"#080808","#711b06":"#080808","#b1240d":"#242424","#300a07":"#080808","#39190b":"#080808","#371e0c":"#080808","#831b05":"#090909","#da4f1c":"#404040","#3a170e":"#080808","#38170e":"#080808","#421b0d":"#080808","#3e1d0c":"#080808","#2c110a":"#080808","#2b0601":"#080808","#8e3612":"#151515","#c3300b":"#2c2c2c","#87180b":"#0e0e0e","#3d150f":"#080808","#601b0e":"#080808","#642714":"#080808","#613a29":"#0a0a0a","#30150a":"#080808","#df531d":"#434343","#96110b":"#151515","#e46525":"#494949","#5c260e":"#080808","#49270d":"#080808","#3b170d":"#080808","#31130b":"#080808","#7a1c07":"#080808","#e75c1d":"#474747","#711b0a":"#080808","#411710":"#080808","#3f1610":"#080808","#af805a":"#494949","#a77549":"#3d3d3d","#43190c":"#080808","#b34318":"#2a2a2a","#79150a":"#080808","#ab3915":"#252525","#43200a":"#080808","#3b1a0d":"#080808","#0e0706":"#080808","#330601":"#080808","#c14615":"#303030","#f15618":"#494949","#bc260a":"#282828","#40130c":"#080808","#3f150f":"#080808","#43170a":"#080808","#521c0d":"#080808","#4a280e":"#080808","#350f09":"#080808","#530e02":"#080808","#cc5a21":"#3b3b3b","#ec4e16":"#464646","#7e220b":"#090909","#48130d":"#080808","#432305":"#080808","#260b05":"#080808","#861c10":"#101010","#84130c":"#0d0d0d","#7a120d":"#080808","#741511":"#080808","#45220d":"#080808","#420e08":"#080808","#5e1103":"#080808","#d56626":"#424242","#e33611":"#3f3f3f","#9e200a":"#191919","#af2806":"#1f1f1f","#552f0c":"#080808","#120602":"#080808","#8b1d10":"#121212","#4b1f0e":"#080808","#5c0d08":"#080808","#6b1405":"#080808","#d3350b":"#343434","#eb2809":"#3f3f3f","#d42605":"#313131","#492715":"#080808","#531109":"#080808","#68401d":"#080808","#6d1209":"#080808","#480b02":"#080808","#c32e07":"#2a2a2a","#df2a08":"#383838","#cc2907":"#2e2e2e","#78532f":"#181818","#36110b":"#080808","#811106":"#080808","#6f3d20":"#0c0c0c","#6b3923":"#0c0c0c","#801808":"#090909","#b22907":"#212121","#ca2c07":"#2d2d2d","#ca2707":"#2d2d2d","#b61905":"#222222","#5e301c":"#080808","#52150c":"#080808","#7f160a":"#090909","#451912":"#080808","#941f06":"#121212","#c22807":"#292929","#bf2808":"#282828","#b8210b":"#262626","#481b12":"#080808","#620e07":"#080808","#b3120a":"#232323","#5e3321":"#080808","#59120b":"#080808","#82311e":"#151515","#60190f":"#080808","#813a23":"#171717","#680e06":"#080808","#81120a":"#0a0a0a","#680804":"#080808","#7c0a07":"#080808","#3f0b05":"#080808","#320d08":"#080808","#7e1206":"#080808","#7f562f":"#1c1c1c","#6b3f30":"#121212","#340b07":"#080808","#79100c":"#080808","#542814":"#080808","#5a0903":"#080808","#613018":"#080808","#532216":"#080808","#2d0b07":"#080808","#720b05":"#080808","#780a04":"#080808","#7f542c":"#1a1a1a","#4d251b":"#080808","#1d0301":"#080808","#601207":"#080808","#7b604f":"#2a2a2a","#720a04":"#080808","#a01207":"#181818","#861008":"#0c0c0c","#9e0a02":"#151515","#7f0c06":"#080808","#6f2612":"#080808","#940d05":"#111111","#940c06":"#121212","#d12404":"#2f2f2f","#9a1004":"#141414","#560a09":"#080808","#b71307":"#242424","#ac1707":"#1e1e1e","#c71f0d":"#2f2f2f","#a6361c":"#262626","#801709":"#090909","#800d09":"#090909","#b41607":"#222222","#440a09":"#080808","#6c0f0e":"#080808","#bb471c":"#303030","#9c321c":"#212121","#683322":"#0a0a0a","#592c1e":"#080808","#562f1b":"#080808","#492314":"#080808","#330b07":"#080808","#641007":"#080808","#780e05":"#080808","#74100a":"#080808","#71150d":"#080808","#591b11":"#080808","#4b1812":"#080808","#40140d":"#080808","#3c120d":"#080808","#5b0e09":"#080808","#450a08":"#080808","#3c0d09":"#080808","#650e05":"#080808","#8b0805":"#0d0d0d","#c62217":"#333333","#b82013":"#2a2a2a","#9d190c":"#191919","#981a0c":"#171717","#110402":"#080808","#410d09":"#080808","#440d0b":"#080808","#9b0c04":"#141414","#c22a0f":"#2d2d2d","#ae2c13":"#252525","#a11203":"#171717","#771210":"#080808","#d6451b":"#3d3d3d","#d94c1a":"#3e3e3e","#671007":"#080808","#4b0c08":"#080808","#2e0706":"#080808","#ba2510":"#2a2a2a","#720e06":"#080808","#ae1404":"#1e1e1e","#8b1b0e":"#111111","#70120f":"#080808","#c93813":"#333333","#cf4516":"#373737","#530e07":"#080808","#6b1817":"#080808","#540b08":"#080808","#76120b":"#080808","#560a03":"#080808","#3d0906":"#080808","#b21204":"#202020","#300807":"#080808","#d61d12":"#393939","#cd1f0e":"#323232","#3b0a05":"#080808","#4a0e05":"#080808","#541106":"#080808","#480b07":"#080808","#8b1204":"#0c0c0c","#9e1804":"#161616","#270e08":"#080808","#674321":"#090909","#5b3b1c":"#080808","#190905":"#080808","#5a1003":"#080808","#551005":"#080808","#400c06":"#080808","#611105":"#080808","#691708":"#080808","#240e08":"#080808","#71401d":"#0c0c0c","#702710":"#080808","#491c0c":"#080808","#230e08":"#080808","#130703":"#080808","#300907":"#080808","#310e09":"#080808","#450a07":"#080808","#5d0e06":"#080808","#9c1003":"#141414","#770f05":"#080808","#300f08":"#080808","#230b06":"#080808","#2c0f08":"#080808","#3c0504":"#080808","#a21104":"#181818","#94160b":"#141414","#36180f":"#080808","#2e150d":"#080808","#8e5833":"#252525","#390c05":"#080808","#420903":"#080808","#881304":"#0b0b0b","#740e04":"#080808","#320c08":"#080808","#310c0a":"#080808","#2b100b":"#080808","#59341f":"#080808","#8b5237":"#262626","#26110a":"#080808","#720e04":"#080808","#9c1604":"#151515","#a71905":"#1b1b1b","#ac1a06":"#1e1e1e","#ae1a05":"#1e1e1e","#ab1905":"#1d1d1d","#991706":"#141414","#400c08":"#080808","#32140c":"#080808","#4c2618":"#080808","#5d391c":"#080808","#200e08":"#080808","#690e04":"#080808","#7d1204":"#080808","#861404":"#0a0a0a","#881404":"#0b0b0b","#8a1504":"#0c0c0c","#941a04":"#111111","#a01a04":"#171717","#a42c15":"#212121","#991e0c":"#171717","#530d04":"#080808","#5c0d04":"#080808","#610f04":"#080808","#651005":"#080808","#6c1005":"#080808","#801503":"#080808","#8b1a03":"#0c0c0c","#8b2e14":"#141414","#943e1f":"#1e1e1e","#811a05":"#080808","#a41d04":"#191919","#921705":"#101010","#6a1103":"#080808","#380904":"#080808","#620e05":"#080808","#721005":"#080808","#7b1005":"#080808","#841505":"#090909","#a11905":"#181818","#b81d04":"#232323","#be1d04":"#262626","#952710":"#171717","#833b1c":"#141414","#691d09":"#080808","#8a270b":"#0f0f0f","#d03509":"#313131","#a92807":"#1d1d1d","#7d1806":"#080808","#600c04":"#080808","#2b0803":"#080808","#741004":"#080808","#8a1404":"#0c0c0c","#931604":"#101010","#921504":"#101010","#811205":"#080808","#841005":"#090909","#61190d":"#080808","#674326":"#0b0b0b","#775538":"#1c1c1c","#684833":"#121212","#652f1b":"#080808","#b84616":"#2c2c2c","#e5420f":"#3f3f3f","#981d03":"#121212","#6e1407":"#080808","#1c0805":"#080808","#841504":"#090909","#9f1904":"#161616","#a41903":"#181818","#9c1804":"#151515","#540d04":"#080808","#533120":"#080808","#33130b":"#080808","#b03a16":"#282828","#91441c":"#1b1b1b","#97421c":"#1e1e1e","#b92d0c":"#272727","#6c0e05":"#080808","#411e11":"#080808","#2f1a12":"#080808","#663e19":"#080808","#3c1407":"#080808","#751203":"#080808","#662c14":"#080808","#6a4020":"#0a0a0a","#a2562b":"#2b2b2b","#86230e":"#0f0f0f","#3a0803":"#080808","#150401":"#080808","#570b05":"#080808","#58341d":"#080808","#351d14":"#080808","#38180f":"#080808","#3a1707":"#080808","#470c04":"#080808","#441b0e":"#080808","#833c21":"#171717","#520b04":"#080808","#5a0e04":"#080808","#510d04":"#080808","#78563c":"#1f1f1f","#6c1308":"#080808","#482116":"#080808","#411f0a":"#080808","#674120":"#080808","#582011":"#080808","#3f0903":"#080808","#2e0803":"#080808","#460b03":"#080808","#390703":"#080808","#39130a":"#080808","#623a27":"#090909","#821509":"#0a0a0a","#681208":"#080808","#4d2217":"#080808","#4c290c":"#080808","#441a0d":"#080808","#7d5431":"#1c1c1c","#47120a":"#080808","#3b0903":"#080808","#611003":"#080808","#461c0e":"#080808","#50291c":"#080808","#64150b":"#080808","#4d2419":"#080808","#4f230b":"#080808","#492115":"#080808","#4b0c03":"#080808","#661003":"#080808","#491a0d":"#080808","#853c26":"#1a1a1a","#60100a":"#080808","#65120d":"#080808","#62170d":"#080808","#452016":"#080808","#481d0a":"#080808","#895029":"#1e1e1e","#6a452a":"#0f0f0f","#461f11":"#080808","#701303":"#080808","#4d0c04":"#080808","#694322":"#0a0a0a","#cb986b":"#606060","#b41b0b":"#242424","#721309":"#080808","#4f140c":"#080808","#36140e":"#080808","#65351c":"#080808","#39100c":"#080808","#3e180b":"#080808","#420e05":"#080808","#7f1302":"#080808","#2d1208":"#080808","#170a05":"#080808","#561b0e":"#080808","#471b12":"#080808","#250903":"#080808","#411308":"#080808","#560d06":"#080808","#543019":"#080808","#411d14":"#080808","#3c1409":"#080808","#3b0c05":"#080808","#5e0e03":"#080808","#230603":"#080808","#3a0805":"#080808","#aa200c":"#202020","#861407":"#0b0b0b","#1c0e07":"#080808","#e55427":"#4b4b4b","#9d210f":"#1b1b1b","#381003":"#080808","#361105":"#080808","#401108":"#080808","#632d17":"#080808","#3f1c14":"#080808","#3a1209":"#080808","#3f1108":"#080808","#390b04":"#080808","#400a03":"#080808","#4d0d04":"#080808","#350903":"#080808","#b61304":"#222222","#cc1506":"#2e2e2e","#680d03":"#080808","#29180c":"#080808","#e5441f":"#474747","#c73317":"#343434","#7c1408":"#080808","#3b0d05":"#080808","#531508":"#080808","#6d4622":"#0c0c0c","#55301e":"#080808","#572f0e":"#080808","#451a0c":"#080808","#490c03":"#080808","#490b03":"#080808","#620e04":"#080808","#490a02":"#080808","#6b0f03":"#080808","#9c1103":"#141414","#e21002":"#373737","#b70601":"#212121","#2a0602":"#080808","#170b06":"#080808","#c91c08":"#2d2d2d","#761007":"#080808","#65170b":"#080808","#541d0d":"#080808","#431e0c":"#080808","#361006":"#080808","#4a0b03":"#080808","#901002":"#0e0e0e","#4d0a02":"#080808","#7f1002":"#080808","#911202":"#0e0e0e","#470a03":"#080808","#680d04":"#080808","#6e0701":"#080808","#7e0401":"#080808","#291408":"#080808","#201006":"#080808","#211006":"#080808","#2a1508":"#080808","#c41a05":"#292929","#c61a05":"#2a2a2a","#881204":"#0b0b0b","#560a04":"#080808","#901307":"#101010","#9d1607":"#171717","#472b18":"#080808","#351608":"#080808","#58320d":"#080808","#410902":"#080808","#6c0f02":"#080808","#b31302":"#1f1f1f","#630a03":"#080808","#610a02":"#080808","#360200":"#080808","#080402":"#080808","#a01506":"#181818","#b61908":"#242424","#ab1808":"#1e1e1e","#a81707":"#1c1c1c","#bb1909":"#272727","#d61e0b":"#353535","#64130a":"#080808","#4b2c1e":"#080808","#331c0e":"#080808","#3f2113":"#080808","#4f341e":"#080808","#3e1e08":"#080808","#1c0502":"#080808","#600b02":"#080808","#a81602":"#1a1a1a","#8e1102":"#0d0d0d","#bc1303":"#242424","#820e04":"#080808","#b11104":"#1f1f1f","#870802":"#090909","#4b0602":"#080808","#070404":"#080808","#630d05":"#080808","#8d1206":"#0e0e0e","#8f1306":"#0f0f0f","#8e1306":"#0f0f0f","#911306":"#101010","#991507":"#151515","#be1d0a":"#292929","#981508":"#151515","#472f1c":"#080808","#22120c":"#080808","#160804":"#080808","#1e0100":"#080808","#7e0300":"#080808","#580300":"#080808","#800400":"#080808","#ad0501":"#1c1c1c","#2e0501":"#080808","#500702":"#080808","#b00902":"#1e1e1e","#9f0401":"#151515","#480602":"#080808","#714422":"#0e0e0e","#2b100a":"#080808","#0a0707":"#080808","#8a1003":"#0b0b0b","#840f03":"#080808","#200d09":"#080808","#0a0503":"#080808","#1e120e":"#080808","#100806":"#080808","#190303":"#080808","#280302":"#080808","#480601":"#080808","#5c0501":"#080808","#4d0300":"#080808","#980401":"#111111","#840200":"#080808","#820100":"#080808","#a71e02":"#191919","#781602":"#080808","#3b0b03":"#080808","#390201":"#080808","#520201":"#080808","#522f1e":"#080808","#420c04":"#080808","#241307":"#080808","#2c0f06":"#080808","#291107":"#080808","#301908":"#080808","#271407":"#080808","#241209":"#080808","#231610":"#080808","#8c2c20":"#1b1b1b","#e33c1e":"#454545","#e72f07":"#3c3c3c","#bd330c":"#292929","#d4340a":"#343434","#ef2b0a":"#414141","#f1310d":"#444444","#eb2e0f":"#424242","#bc1907":"#262626","#b71907":"#242424","#9a1506":"#151515","#581b0b":"#080808","#db5926":"#454545","#eb642b":"#505050","#c64019":"#343434","#b1210d":"#242424","#e13615":"#404040","#f93d0b":"#474747","#f54b15":"#4a4a4a","#f83b0e":"#484848","#f43207":"#424242","#f83d04":"#434343","#e7581f":"#484848","#e23f19":"#424242","#dc1907":"#363636","#bd1b04":"#252525","#ab1c05":"#1d1d1d","#c61e0b":"#2d2d2d","#c73212":"#313131","#e8451a":"#464646","#ee5321":"#4c4c4c","#df481b":"#424242","#b8270d":"#272727","#8d200e":"#121212","#881e0d":"#0f0f0f","#931e0c":"#141414","#d5280f":"#373737","#f64415":"#4a4a4a","#f84c13":"#4a4a4a","#fa3507":"#454545","#fb3a01":"#434343","#f45e1e":"#4e4e4e","#e3652b":"#4c4c4c","#e45825":"#494949","#db1e07":"#363636","#cc1a05":"#2d2d2d","#7c1504":"#080808","#681105":"#080808","#a11808":"#191919","#d41d0a":"#343434","#db1f0a":"#373737","#d92e0d":"#383838","#c2290e":"#2d2d2d","#c42c0d":"#2d2d2d","#b22910":"#262626","#b43415":"#292929","#c1230c":"#2b2b2b","#811c0a":"#0a0a0a","#e23314":"#404040","#f13310":"#454545","#f93f0c":"#474747","#fa3505":"#444444","#fa3405":"#444444","#f4601e":"#4e4e4e","#e94e1a":"#464646","#da2506":"#353535","#de1d05":"#363636","#cc1804":"#2d2d2d","#a81404":"#1b1b1b","#8d1504":"#0d0d0d","#6d1204":"#080808","#540e05":"#080808","#9b1507":"#161616","#b51807":"#232323","#c82008":"#2d2d2d","#cc260a":"#303030","#d43110":"#373737","#c7290f":"#303030","#cc2009":"#2f2f2f","#1c0806":"#080808","#831f0d":"#0d0d0d","#e22e11":"#3e3e3e","#eb270c":"#404040","#ed3007":"#3f3f3f","#f8380c":"#474747","#f63407":"#434343","#f46724":"#515151","#ed370b":"#414141","#db1804":"#343434","#9e1304":"#161616","#520f05":"#080808","#911706":"#101010","#a71908":"#1c1c1c","#b81c08":"#252525","#c01d07":"#282828","#bb1d08":"#262626","#330807":"#080808","#400f07":"#080808","#7a1a08":"#080808","#d33013":"#383838","#e7270d":"#3f3f3f","#e42a0a":"#3c3c3c","#ef3a0f":"#444444","#f36625":"#515151","#f32f07":"#424242","#d91d04":"#333333","#d31703":"#303030","#c61604":"#2a2a2a","#7d1203":"#080808","#500c03":"#080808","#871707":"#0c0c0c","#8f1608":"#101010","#981a09":"#151515","#9b1b08":"#161616","#9e1e0a":"#191919","#9a1e0a":"#171717","#72160a":"#080808","#5f1208":"#080808","#210803":"#080808","#270804":"#080808","#3b0a07":"#080808","#3d0b07":"#080808","#681515":"#080808","#c22b11":"#2e2e2e","#dd290d":"#3a3a3a","#c81d04":"#2b2b2b","#e73a0f":"#404040","#ee591f":"#4b4b4b","#f13105":"#404040","#da1803":"#333333","#ce1704":"#2e2e2e","#b21404":"#202020","#991304":"#131313","#791003":"#080808","#571005":"#080808","#6e1607":"#080808","#731707":"#080808","#711608":"#080808","#711607":"#080808","#5b1007":"#080808","#390a06":"#080808","#a6280f":"#1f1f1f","#c7280d":"#2f2f2f","#cf2209":"#313131","#be2106":"#272727","#de2d09":"#383838","#e84513":"#424242","#d92705":"#343434","#d31803":"#303030","#c01704":"#272727","#9c1204":"#151515","#851204":"#090909","#710f04":"#080808","#5b0b03":"#080808","#561004":"#080808","#721406":"#080808","#6d1406":"#080808","#621205":"#080808","#350a04":"#080808","#370806":"#080808","#2b0907":"#080808","#831e0e":"#0d0d0d","#a3230e":"#1d1d1d","#bb250d":"#292929","#bb2208":"#262626","#d82c08":"#353535","#da4013":"#3b3b3b","#c81803":"#2a2a2a","#a81604":"#1b1b1b","#7f1104":"#080808","#790e04":"#080808","#5d0c03":"#080808","#360a04":"#080808","#3c0a04":"#080808","#350a03":"#080808","#3e0c04":"#080808","#3b0b07":"#080808","#410904":"#080808","#490a05":"#080808","#6d170c":"#080808","#981e0c":"#171717","#a6240b":"#1d1d1d","#bd230c":"#292929","#d12909":"#323232","#c42b0a":"#2c2c2c","#b41805":"#212121","#730e03":"#080808","#3b0a04":"#080808","#3d0c04":"#080808","#390c04":"#080808","#691205":"#080808","#631206":"#080808","#4c0e06":"#080808","#4c0a05":"#080808","#600c05":"#080808","#461009":"#080808","#891d0b":"#0f0f0f","#9d1e0a":"#181818","#b2250d":"#242424","#c62909":"#2c2c2c","#b6270d":"#262626","#af1c07":"#202020","#8d1706":"#0e0e0e","#901506":"#101010","#a61a04":"#1a1a1a","#b01e05":"#1f1f1f","#921a05":"#101010","#731104":"#080808","#440502":"#080808","#260804":"#080808","#440d05":"#080808","#601106":"#080808","#701307":"#080808","#6b1307":"#080808","#480c06":"#080808","#460904":"#080808","#220a08":"#080808","#5e150d":"#080808","#921b0a":"#131313","#a3210e":"#1d1d1d","#af220b":"#222222","#901706":"#101010","#921607":"#111111","#a71904":"#1a1a1a","#c12104":"#272727","#c02104":"#272727","#a41b06":"#1a1a1a","#8e1705":"#0e0e0e","#5c0e04":"#080808","#370e0b":"#080808","#701a0f":"#080808","#951e0e":"#161616","#a7230f":"#202020","#a8220b":"#1e1e1e","#931908":"#121212","#8f1606":"#0f0f0f","#9f1706":"#171717","#bd1f06":"#262626","#e43506":"#3a3a3a","#cd2807":"#2f2f2f","#b01f06":"#202020","#a61c06":"#1b1b1b","#671911":"#080808","#781b12":"#0a0a0a","#941f0d":"#151515","#81150a":"#0a0a0a","#981706":"#141414","#b71d06":"#232323","#d12506":"#303030","#f64f0f":"#474747","#f85614":"#4b4b4b","#d12606":"#303030","#b91f05":"#242424","#4f0804":"#080808","#4e0a04":"#080808","#500a04":"#080808","#60170f":"#080808","#6e1a13":"#080808","#741b10":"#080808","#871508":"#0c0c0c","#c41f06":"#2a2a2a","#df2c06":"#373737","#f84609":"#454545","#f55515":"#4a4a4a","#df370a":"#393939","#c42005":"#292929","#550b04":"#080808","#6f140a":"#080808","#641510":"#080808","#71180e":"#080808","#8d180b":"#111111","#aa1b06":"#1d1d1d","#c92106":"#2c2c2c","#dc2906":"#363636","#e02a05":"#373737","#f2490d":"#444444","#e0380b":"#3a3a3a","#c62708":"#2c2c2c","#9a1904":"#141414","#570e04":"#080808","#150606":"#080808","#2a0904":"#080808","#7a1508":"#080808","#69130c":"#080808","#66140e":"#080808","#a71906":"#1b1b1b","#c51d05":"#2a2a2a","#d62406":"#333333","#d52406":"#323232","#e43b0b":"#3c3c3c","#dc3409":"#373737","#c52708":"#2b2b2b","#5a0f05":"#080808","#410a04":"#080808","#2d0803":"#080808","#8e1805":"#0e0e0e","#74130a":"#080808","#69120c":"#080808","#85140a":"#0c0c0c","#c01c06":"#282828","#ca1d06":"#2d2d2d","#ce2105":"#2e2e2e","#d62c08":"#343434","#d42905":"#313131","#c62005":"#2a2a2a","#741404":"#080808","#681006":"#080808","#520d05":"#080808","#440c05":"#080808","#561808":"#080808","#881807":"#0c0c0c","#66120a":"#080808","#6c120b":"#080808","#a31705":"#191919","#b11905":"#202020","#bc1807":"#262626","#c81a07":"#2c2c2c","#c41d08":"#2b2b2b","#cb1f07":"#2e2e2e","#c41b05":"#292929","#901406":"#101010","#931605":"#111111","#ba1d07":"#252525","#cd2308":"#2f2f2f","#dd2a05":"#363636","#c52c08":"#2b2b2b","#931809":"#131313","#7d1307":"#080808","#6d1008":"#080808","#610f07":"#080808","#761308":"#080808","#76170b":"#080808","#540c04":"#080808","#651208":"#080808","#5b110b":"#080808","#801207":"#080808","#ad1705":"#1e1e1e","#c11506":"#282828","#c31b07":"#2a2a2a","#b31706":"#212121","#d32604":"#303030","#ea400d":"#404040","#f2450e":"#454545","#e52e0b":"#3d3d3d","#df2509":"#393939","#9e1c09":"#181818","#640e05":"#080808","#5d0e05":"#080808","#ca1c0c":"#303030","#e8602c":"#4f4f4f","#440f0b":"#080808","#560f0b":"#080808","#6b1209":"#080808","#931405":"#111111","#ac1305":"#1d1d1d","#b61305":"#222222","#8b1406":"#0d0d0d","#a11705":"#181818","#b81b04":"#232323","#bb1d04":"#242424","#c52003":"#292929","#d84c19":"#3d3d3d","#e95c21":"#4a4a4a","#f05c1e":"#4c4c4c","#f05218":"#494949","#ef4412":"#454545","#de2b07":"#373737","#c41f05":"#292929","#a61d06":"#1b1b1b","#671105":"#080808","#e01c08":"#393939","#7e1407":"#080808","#961105":"#121212","#981204":"#131313","#8e1404":"#0e0e0e","#af1704":"#1e1e1e","#b11804":"#1f1f1f","#b01804":"#1f1f1f","#c41903":"#282828","#cd1c04":"#2d2d2d","#d41b04":"#313131","#d01f05":"#2f2f2f","#ca2909":"#2e2e2e","#c52005":"#2a2a2a","#ba1c03":"#232323","#b81d03":"#222222","#a11a04":"#171717","#6a1104":"#080808","#690f04":"#080808","#b21706":"#212121","#1f0502":"#080808","#801004":"#080808","#7e1004":"#080808","#871203":"#0a0a0a","#901204":"#0f0f0f","#9c1404":"#151515","#9f1504":"#161616","#a61505":"#1a1a1a","#a71504":"#1a1a1a","#a61604":"#1a1a1a","#781206":"#080808","#791005":"#080808","#0c0301":"#080808","#7d1c09":"#080808","#81270f":"#0d0d0d","#5f1f0d":"#080808","#3c180c":"#080808","#2b0f07":"#080808","#600d04":"#080808","#6a0e04":"#080808","#7d1105":"#080808","#8c1406":"#0e0e0e","#821306":"#090909","#831206":"#090909","#7c1005":"#080808","#790f03":"#080808","#300702":"#080808","#6b0f05":"#080808","#911305":"#101010","#740f04":"#080808","#8e1203":"#0d0d0d","#8f1103":"#0e0e0e","#861505":"#0a0a0a","#6f1a0a":"#080808","#7b1f0c":"#080808","#91250f":"#151515","#89230d":"#101010","#6e1809":"#080808","#541308":"#080808","#370903":"#080808","#670e04":"#080808","#8a1004":"#0c0c0c","#740d04":"#080808","#340502":"#080808","#4f0702":"#080808","#820d03":"#080808","#760e04":"#080808","#250c05":"#080808","#3a1009":"#080808","#511c0f":"#080808","#632c14":"#080808","#6e2912":"#080808","#72220f":"#080808","#220201":"#080808","#100805":"#080808","#080302":"#080808","#040201":"#080808","#4f0e02":"#080808","#a61b02":"#191919","#3e0c03":"#080808","#7d1902":"#080808","#ae2503":"#1d1d1d","#af2703":"#1e1e1e","#8a1d03":"#0b0b0b","#420c02":"#080808","#550f02":"#080808","#4c0c02":"#080808","#350802":"#080808","#8a1206":"#0d0d0d","#400903":"#080808","#110504":"#080808","#3d120d":"#080808","#a51d0b":"#1d1d1d","#7e1305":"#080808","#230703":"#080808","#bc1e04":"#252525","#811306":"#080808","#060200":"#080808","#931805":"#111111","#ba1e04":"#242424","#b01c04":"#1f1f1f","#5e1107":"#080808","#4e0a02":"#080808","#580b03":"#080808","#4d0904":"#080808","#ae1d04":"#1e1e1e","#781106":"#080808","#210c0a":"#080808","#100605":"#080808","#0e0504":"#080808","#801203":"#080808","#750e02":"#080808","#6f0d02":"#080808","#661004":"#080808","#500e05":"#080808","#771607":"#080808","#791407":"#080808","#7b1407":"#080808","#6c1508":"#080808","#5d1004":"#080808","#5b1506":"#080808","#921e06":"#111111","#571507":"#080808","#2d1d15":"#080808","#23150a":"#080808","#130906":"#080808","#a01d04":"#171717","#ab1f05":"#1d1d1d","#b31e04":"#202020","#b81f03":"#222222","#c42004":"#292929","#cb2504":"#2c2c2c","#ce2404":"#2e2e2e","#d02a06":"#303030","#ee3206":"#3f3f3f","#df2e06":"#373737","#c82807":"#2c2c2c","#a22007":"#191919","#951908":"#131313","#971a07":"#141414","#ce2706":"#2f2f2f","#6b1806":"#080808","#38261b":"#080808","#29190b":"#080808","#170c07":"#080808","#140905":"#080808","#a61904":"#1a1a1a","#b11802":"#1e1e1e","#bd1802":"#242424","#c81c02":"#2a2a2a","#d42002":"#303030","#db2603":"#343434","#e24e17":"#414141","#e46022":"#484848","#de6d2a":"#494949","#db6224":"#444444","#bc340f":"#2a2a2a","#901c07":"#101010","#8b1807":"#0e0e0e","#a41c06":"#1a1a1a","#c72908":"#2c2c2c","#791806":"#080808","#5d1507":"#080808","#280b06":"#080808","#21150d":"#080808","#190f09":"#080808","#0c0604":"#080808","#a91601":"#1a1a1a","#bb1a01":"#232323","#c91e02":"#2a2a2a","#cf1f02":"#2d2d2d","#d32103":"#303030","#d01e03":"#2e2e2e","#c81c03":"#2a2a2a","#c23312":"#2f2f2f","#c94b1c":"#373737","#b8300c":"#272727","#8d1d0a":"#101010","#7d1a09":"#080808","#871b08":"#0c0c0c","#8a1807":"#0d0d0d","#c72706":"#2b2b2b","#a91f06":"#1c1c1c","#7e1805":"#080808","#1e110c":"#080808","#1b0f0f":"#080808","#140c0a":"#080808","#0e0605":"#080808","#100907":"#080808","#a81704":"#1b1b1b","#af1802":"#1d1d1d","#b61602":"#212121","#bb1502":"#232323","#bd1101":"#242424","#a70f03":"#1a1a1a","#990d03":"#131313","#950e04":"#111111","#941004":"#111111","#6e1a0d":"#080808","#6e180a":"#080808","#761809":"#080808","#7a1607":"#080808","#831203":"#080808","#110404":"#080808","#382316":"#080808","#643621":"#080808","#150c0b":"#080808","#841004":"#090909","#830e03":"#080808","#910c02":"#0e0e0e","#900d02":"#0e0e0e","#6e0a02":"#080808","#451a12":"#080808","#5a1610":"#080808","#61180b":"#080808","#6a190a":"#080808","#731609":"#080808","#6b1207":"#080808","#4b1105":"#080808","#805731":"#1d1d1d","#85674a":"#2c2c2c","#3a261a":"#080808","#540b04":"#080808","#420702":"#080808","#150f0d":"#080808","#55170d":"#080808","#6d190a":"#080808","#7e1b0b":"#090909","#7f1909":"#090909","#7a1708":"#080808","#4e0e05":"#080808","#0b0604":"#080808","#1b0a08":"#080808","#4f140b":"#080808","#752e1c":"#0d0d0d","#702717":"#080808","#53130c":"#080808","#2b0b07":"#080808","#6c3f19":"#080808","#33200e":"#080808","#140c06":"#080808","#1b0a03":"#080808","#220f0b":"#080808","#401911":"#080808","#543725":"#080808","#1d100b":"#080808","#120806":"#080808","#160b07":"#080808","#2a1a10":"#080808","#1c110a":"#080808","#280606":"#080808","#271413":"#080808","#4c3828":"#080808","#150d08":"#080808","#1b1008":"#080808","#1b0808":"#080808","#1f1514":"#080808","#5c4e41":"#131313","#523e2c":"#080808","#0f0704":"#080808","#130c07":"#080808","#2b1d19":"#080808","#2e1f16":"#080808","#100602":"#080808","#130705":"#080808","#26160e":"#080808","#2c1a0e":"#080808","#340c04":"#080808","#692004":"#080808","#9d1404":"#151515","#821104":"#080808","#631607":"#080808","#3e0d05":"#080808","#190d08":"#080808","#46301c":"#080808","#903c15":"#171717","#c63918":"#343434","#9c270d":"#191919","#801e09":"#090909","#691908":"#080808","#1d0f09":"#080808","#130804":"#080808","#b12710":"#252525","#c0471f":"#343434","#c75a24":"#3a3a3a","#a72e0e":"#1f1f1f","#601606":"#080808","#150905":"#080808","#4a1209":"#080808","#55120a":"#080808","#3d0d08":"#080808","#370d07":"#080808","#631911":"#080808","#a9180c":"#1f1f1f","#d01f0b":"#323232","#d95f28":"#454545","#d56327":"#434343","#8e2c0f":"#131313","#40180f":"#080808","#491409":"#080808","#550f06":"#080808","#7b0f07":"#080808","#921408":"#121212","#9f180b":"#1a1a1a","#ad170c":"#212121","#bd170b":"#292929","#c51f0b":"#2d2d2d","#c52a0f":"#2f2f2f","#cf3913":"#363636","#7c1f0c":"#090909","#390e07":"#080808","#5d0a05":"#080808","#91110a":"#121212","#a61309":"#1c1c1c","#a2160a":"#1b1b1b","#a31709":"#1b1b1b","#a52109":"#1c1c1c","#3f0a05":"#080808","#510b08":"#080808","#4a0c07":"#080808","#5e0e07":"#080808","#670f07":"#080808","#691106":"#080808","#5a0f07":"#080808","#5d0d06":"#080808","#640f07":"#080808","#791308":"#080808","#5a0f06":"#080808","#1f0706":"#080808","#440a06":"#080808","#500d06":"#080808","#791206":"#080808","#851307":"#0b0b0b","#6d1007":"#080808","#2a1110":"#080808","#500b06":"#080808","#620f08":"#080808","#6c0f08":"#080808","#7c1109":"#080808","#83150a":"#0b0b0b","#690f0a":"#080808","#2b1110":"#080808","#270904":"#080808","#430d06":"#080808","#510e09":"#080808","#71140b":"#080808","#751309":"#080808","#310d0c":"#080808","#270b0b":"#080808","#260b07":"#080808","#280b0a":"#080808","#350a08":"#080808","#4e0e08":"#080808","#440c07":"#080808","#3d1208":"#080808","#4f2b15":"#080808","#3f2512":"#080808","#1e0301":"#080808","#490b07":"#080808","#6e1006":"#080808","#a11604":"#171717","#ab1704":"#1c1c1c","#5e0d04":"#080808","#3f0a04":"#080808","#180602":"#080808","#210200":"#080808","#410a03":"#080808","#4a0c03":"#080808","#590d03":"#080808","#670f04":"#080808","#650f04":"#080808","#410b03":"#080808","#560e03":"#080808","#520e04":"#080808","#691503":"#080808","#ad2103":"#1d1d1d","#cd2003":"#2d2d2d","#c61b04":"#2a2a2a","#bf1b04":"#262626","#9b1604":"#141414","#761103":"#080808","#690e03":"#080808","#280808":"#080808","#701205":"#080808","#46130a":"#080808","#551608":"#080808","#b42006":"#222222","#dd2a03":"#353535","#d92803":"#333333","#cb1b04":"#2c2c2c","#bc1a04":"#252525","#8a1303":"#0b0b0b","#6e1103":"#080808","#530e04":"#080808","#2b0c03":"#080808","#6f1003":"#080808","#731205":"#080808","#622f1e":"#080808","#6d351d":"#0a0a0a","#a01508":"#191919","#ba1809":"#262626","#c92507":"#2d2d2d","#7d1304":"#080808","#841803":"#080808","#671303":"#080808","#551304":"#080808","#331504":"#080808","#4a260e":"#080808","#401c06":"#080808","#1b0b01":"#080808","#2f0802":"#080808","#460702":"#080808","#865539":"#242424","#932a21":"#1f1f1f","#89433c":"#272727","#521e10":"#080808","#541907":"#080808","#4d1b04":"#080808","#472104":"#080808","#612103":"#080808","#6d1b03":"#080808","#761904":"#080808","#761204":"#080808","#751102":"#080808","#701103":"#080808","#622515":"#080808","#46140d":"#080808","#73473c":"#1c1c1c","#743103":"#080808","#732303":"#080808","#731902":"#080808","#7f1702":"#080808","#8b1604":"#0c0c0c","#570d03":"#080808","#9c1b04":"#151515","#722f05":"#080808","#852606":"#0a0a0a","#9a2103":"#131313","#a11c03":"#171717","#5d0d03":"#080808","#ce1403":"#2d2d2d","#6e3a07":"#080808","#6f2607":"#080808","#751802":"#080808","#901101":"#0d0d0d","#750c03":"#080808","#502704":"#080808","#681a04":"#080808","#590b03":"#080808","#603009":"#080808","#611b05":"#080808","#771203":"#080808","#6c0d04":"#080808","#5c1104":"#080808","#2c0703":"#080808","#7f0d05":"#080808","#d04603":"#2e2e2e","#e43d08":"#3b3b3b","#8a3909":"#0e0e0e","#3e1205":"#080808","#120605":"#080808","#471510":"#080808","#4d0c05":"#080808","#f43803":"#404040","#943004":"#111111","#d94104":"#333333","#f53d06":"#424242","#a32f08":"#1a1a1a","#281103":"#080808","#110605":"#080808","#3b1310":"#080808","#8c3305":"#0d0d0d","#d74003":"#323232","#f63f05":"#424242","#a63209":"#1c1c1c","#160706":"#080808","#5c2007":"#080808","#d34403":"#303030","#200806":"#080808","#290d0b":"#080808","#160907":"#080808","#6c1207":"#080808","#160a06":"#080808","#621007":"#080808","#211311":"#080808","#491209":"#080808","#1e0a08":"#080808","#210a06":"#080808","#160704":"#080808","#b62414":"#2a2a2a","#ab1907":"#1e1e1e","#911e0b":"#131313","#d0220e":"#343434","#8f1b09":"#111111","#ce2d0a":"#313131","#df280a":"#393939","#96260c":"#161616","#b42d10":"#272727","#a5210c":"#1d1d1d"} },
+    // Alpha Dragon acid look (owner 2026-07-14) — worn via WORLD.ALPHA_LOOKS
+    1003: { base: 34, map: {"#43690f":"#758500","#2a4f02":"#4a5a00","#345505":"#596400","#315705":"#556600","#203e00":"#384500","#030e00":"#081000","#223603":"#393f00","#1b2013":"#282b0e","#162304":"#262b00","#234308":"#3f5300","#668c1e":"#b4bd00","#72961d":"#c7c600","#7ca11e":"#d4d000","#84a928":"#e8e500","#779a24":"#d3d200","#739428":"#d0d100","#648324":"#b4b900","#51721d":"#919f00","#41620c":"#707a00","#1e3a00":"#354000","#4e7414":"#889700","#38550d":"#626d00","#3d6708":"#6a7b00","#3d6b07":"#6a7f00","#3e610a":"#6b7700","#254a01":"#425300","#294d03":"#485900","#122400":"#202800","#272a22":"#323321","#122a00":"#222f00","#314509":"#545700","#324509":"#555700","#37460c":"#5b5700","#67841c":"#b2ae00","#7b9d28":"#dbd900","#688a23":"#bac000","#6d8e2a":"#c6cc00","#577c22":"#9caf00","#4a6b16":"#838f00","#2c4800":"#495000","#2c450b":"#4d5900","#567a16":"#96a000","#282c23":"#333622","#386205":"#617200","#46740b":"#7a8d00","#4b7211":"#839100","#4d6c15":"#878f00","#39580a":"#626d00","#1b3600":"#303c00","#000b00":"#050f00","#061500":"#0e1700","#0e0f0c":"#12120c","#181c0f":"#262609","#4f6218":"#878200","#6e8d26":"#c6c700","#678424":"#baba00","#608326":"#adbc00","#55771e":"#98a500","#355406":"#5a6400","#1f3204":"#353c00","#5b8118":"#9faa00","#272f1b":"#3b3f13","#385a09":"#616e00","#4b770e":"#829400","#6b8f23":"#bfc600","#5d7e1d":"#a5ac00","#567823":"#9bac00","#284600":"#444e00","#050602":"#0f0f00","#202a0b":"#3a3b00","#5d781e":"#a7a600","#5f8223":"#abb700","#5e7e24":"#aab400","#466513":"#7b8500","#263d04":"#414800","#577c16":"#98a200","#2a311a":"#434310","#486e11":"#7e8d00","#5c811a":"#a2ac00","#779b28":"#d6d800","#82a52f":"#ebeb00","#5b8321":"#a2b600","#49671d":"#839300","#122d00":"#233200","#022300":"#0e2700","#000000":"#080808","#1d001d":"#170020","#1f2509":"#332f00","#5c7c21":"#a5ae00","#5e7f22":"#a9b300","#4f7016":"#8b9500","#2b4206":"#495000","#567a17":"#97a100","#252f15":"#3e4309","#4b7312":"#839400","#658a1f":"#b3bc00","#799d2a":"#dadd00","#8db434":"#feff03","#5d8321":"#a6b600","#517223":"#92a500","#284303":"#444e00","#001a00":"#091d00","#492728":"#641831","#040004":"#0b000f","#020000":"#0f0005","#030302":"#0b0905","#4b631c":"#888d00","#52701c":"#939b00","#54771a":"#95a100","#2b4409":"#4b5500","#577d17":"#98a400","#19200e":"#2a2e06","#4f800e":"#899e00","#658d1f":"#b3bf00","#779b29":"#d6da00","#88ae2f":"#f5f500","#698f24":"#bcc700","#486a1a":"#809300","#254202":"#404b00","#163400":"#2a3a00","#001400":"#071600","#472f21":"#641510","#c19063":"#f26f52","#2c1e12":"#3f0f06","#c09062":"#f16f51","#040100":"#0f0001","#0a0c04":"#121100","#455f18":"#7b8400","#4e6b1a":"#8b9400","#2a420a":"#4a5400","#598119":"#9cab00","#12150f":"#181b0d","#4d7412":"#869500","#60851b":"#a9b200","#789d29":"#d8dc00","#89b030":"#f7f900","#7ba332":"#e0ec00","#54781f":"#96a800","#345309":"#5a6600","#1f3d00":"#374400","#0a2500":"#172900","#060006":"#0b000f","#c49364":"#f67253","#180b02":"#1d0300","#c89668":"#f97558","#120600":"#140100","#050200":"#0f0200","#1e0008":"#210013","#010101":"#080808","#324612":"#596200","#3a570f":"#667100","#30490b":"#545d00","#557a1b":"#97a500","#0d0d0b":"#100e0b","#325c05":"#586c00","#517712":"#8c9800","#709427":"#c9d000","#89b32e":"#f6fa00","#709d29":"#c8dc00","#567e1f":"#99ae00","#375b09":"#606f00","#2c4e02":"#4c5900","#001800":"#081b00","#031400":"#0a1600","#694e2f":"#953214","#936e4a":"#cc492a","#64462c":"#8e2612","#c39264":"#f47153","#805e40":"#b23b24","#0c1105":"#161800","#1e3705":"#354300","#426213":"#748200","#4b671e":"#879400","#0d0f0b":"#11130a","#345809":"#5b6c00","#4e7411":"#879400","#61831e":"#acb300","#80a72a":"#e5e800","#5b811c":"#a1ae00","#527c18":"#91a400","#396108":"#637500","#3a5c06":"#626d00","#1b3b00":"#324100","#081e00":"#132100","#021500":"#091700","#000200":"#050f00","#0c3200":"#1e3800","#bc8e60":"#ed6e4e","#654529":"#91220c","#040503":"#0a0b04","#172903":"#283100","#55761b":"#97a100","#293614":"#494f03","#386405":"#627500","#466e0f":"#7a8b00","#5a781a":"#9fa200","#729924":"#cbd200","#5b801a":"#a0ab00","#4b7511":"#839500","#43690a":"#738000","#3a6008":"#647300","#295000":"#485900","#112b00":"#213000","#0a1e00":"#152100","#6d9f1a":"#becd00","#1b5100":"#395a00","#1b0600":"#1e0002","#050604":"#090b05","#203808":"#394700","#5a7d1f":"#a1ad00","#131a0d":"#1d2407","#3f620a":"#6c7800","#335408":"#586600","#496812":"#7f8700","#486612":"#7e8500","#4f7314":"#8a9600","#4b6f13":"#839000","#476b10":"#7b8900","#426710":"#748400","#294a02":"#475400","#153400":"#293a00","#3e6509":"#6b7a00","#65981c":"#b2c800","#030600":"#0c0f00","#0b0b0b":"#0c0c0c","#39540f":"#646e00","#435f18":"#788400","#0e100c":"#12140b","#496811":"#7f8600","#2c4704":"#4b5300","#425e10":"#737a00","#1a2e00":"#2c3300","#0d2000":"#192400","#000f00":"#051100","#314c06":"#535b00","#3d5c0b":"#697200","#355308":"#5b6500","#0e1f00":"#1a2200","#5c8d1a":"#a2b900","#346000":"#5a6b00","#161811":"#1f1e0f","#5e7921":"#aaab00","#1f290e":"#383c01","#587d18":"#9aa500","#35550b":"#5c6b00","#31410d":"#565700","#0d1d00":"#182000","#041200":"#0a1400","#172b04":"#293400","#000e00":"#051000","#213800":"#373e00","#385308":"#5f6500","#081b00":"#121e00","#0c2300":"#192700","#5b8f17":"#a0b800","#0f110a":"#171707","#0e0f0d":"#11120d","#49552d":"#75751c","#3c5410":"#696f00","#496f0e":"#7e8b00","#426c0a":"#728300","#3c5212":"#6a6f00","#102000":"#1c2400","#071500":"#0f1700","#000900":"#050f00","#243800":"#3b3e00","#294900":"#465100","#152c00":"#263100","#124200":"#2a4900","#1e2212":"#2f2d0b","#323c1e":"#515311","#222a20":"#29341e","#507413":"#8b9600","#3b6002":"#636d00","#436011":"#757d00","#1d2f03":"#313800","#011100":"#071300","#1b3200":"#2f3800","#3a6a04":"#657a00","#002000":"#0b2400","#1c3700":"#313d00","#3c412c":"#545125","#2d3226":"#3b3e24","#7ca32a":"#dee400","#305400":"#515d00","#425f10":"#737b00","#253606":"#3f4300","#031300":"#0a1500","#102500":"#1e2900","#1f3b00":"#364100","#4d563a":"#6e6f31","#2b2e2a":"#31352c","#79a72b":"#d9e900","#587c1b":"#9ca800","#41610b":"#6f7800","#263706":"#414400","#061700":"#0e1a00","#122500":"#202900","#12130f":"#17170e","#537a15":"#919f00","#779f2a":"#d6df00","#2d4407":"#4d5300","#0f1e00":"#1b2100","#0d1c00":"#181f00","#000400":"#050f00","#000500":"#050f00","#709b20":"#c5d000","#6c9227":"#c2cd00","#39570f":"#647100","#152202":"#242800","#071900":"#101c00","#547c14":"#92a000","#698e21":"#bbc200","#456214":"#7a8300","#2a4303":"#474e00","#101f00":"#1c2200","#111a01":"#1c1e00","#45640f":"#778000","#6d922a":"#c5d100","#3d6109":"#697600","#213402":"#373c00","#020f00":"#071100","#2d3f0b":"#4e5200","#54701d":"#979d00","#425d0f":"#727800","#061100":"#0c1300","#151d02":"#222200","#557214":"#939500","#638e22":"#b0c300","#44650c":"#757d00","#162b01":"#273100","#010300":"#0a0f00","#325709":"#586b00","#507417":"#8d9a00","#43630c":"#737b00","#2b3e09":"#4a4f00","#020e00":"#071000","#49680d":"#7d8200","#61911c":"#abc000","#476910":"#7b8600","#183601":"#2d3d00","#081600":"#101800","#000600":"#050f00","#031600":"#0b1800","#5f951a":"#a7c200","#558117":"#95a900","#415f0c":"#6f7700","#163900":"#2b3f00","#000800":"#050f00","#172e00":"#293300","#375813":"#627700","#487d0f":"#7f9b00","#547a17":"#93a100","#3d5b09":"#686f00","#4a6317":"#838700","#050900":"#0d0f00","#343d25":"#4d511c","#47780a":"#7b9000","#3c6b03":"#687a00","#3d6506":"#687700","#55770e":"#909400","#284603":"#455100","#355001":"#565a00","#000300":"#050f00","#4a750c":"#808f00","#366802":"#5f7600","#3b6404":"#657300","#365706":"#5c6700","#1e3700":"#343d00","#000c00":"#050f00","#121f01":"#1f2400","#1c3c00":"#334300","#132d00":"#243200","#0f2300":"#1c2700","#091700":"#121a00","#060e03":"#0b1300","#040801":"#0b0f00","#1c2315":"#282f10","#101f03":"#1d2600","#56801d":"#99ae00","#385213":"#637000","#2a430a":"#4a5500","#5d821e":"#a5b200","#729727":"#ccd300","#82a731":"#edf000","#83aa31":"#eef300","#8db035":"#fefa00","#7faa2f":"#e5f100","#5f921a":"#a7bf00","#1c2d0a":"#323d00","#3d4b19":"#6f6d00","#4c6c0d":"#818600","#141907":"#242300","#0e1502":"#181a00","#5b8114":"#9da500","#577b15":"#97a000","#699223":"#bbc900","#557d16":"#95a300","#192a04":"#2c3300","#57801b":"#9aac00","#2b400d":"#4c5500","#3c5711":"#6a7300","#6a9024":"#bdc800","#7aa12c":"#dce400","#85aa2f":"#f1f100","#90b23c":"#fefb0a","#6c8e25":"#c2c700","#152704":"#263000","#0f1a01":"#1a1e00","#101804":"#1c1f00","#445716":"#797800","#1e2706":"#323100","#202319":"#2c2c16","#293c07":"#464a00","#628318":"#abac00","#5d8419":"#a3ae00","#729c2a":"#cddc00","#668c22":"#b6c100","#112203":"#1f2900","#537c19":"#93a500","#2f470f":"#535f00","#446215":"#788400","#658a21":"#b4be00","#83a82f":"#edef00","#8fb43b":"#feff0a","#476d14":"#7d8f00","#0d1204":"#171800","#32352d":"#3e3f2e","#070f00":"#0d1100","#354807":"#585700","#131511":"#181a11","#0e1702":"#181c00","#4c6b13":"#858c00","#577616":"#989b00","#8eb131":"#fbf400","#6c9325":"#c1cc00","#60861f":"#abb700","#091501":"#111800","#517717":"#8f9e00","#3a5715":"#677800","#486716":"#7f8b00","#648921":"#b2bd00","#88ab30":"#f3ef00","#55771b":"#97a200","#0b1104":"#141700","#2b3612":"#4f5000","#10130b":"#181a08","#36510c":"#5e6700","#608019":"#a8aa00","#4b7111":"#829000","#4f7216":"#8b9700","#5d7e1f":"#a6ae00","#577c18":"#99a400","#1f2a17":"#2d390f","#426313":"#748300","#4a6c1a":"#849500","#496a17":"#818f00","#618520":"#adb700","#6d9120":"#c1c400","#0d1403":"#171a00","#262920":"#32331f","#363834":"#3f4038","#233308":"#3d4100","#7a9f27":"#dadc00","#678c19":"#b3b700","#597b1a":"#9da500","#8ab02e":"#f6f500","#81a42c":"#e7e500","#4e7113":"#889300","#2d3427":"#3a4124","#2d420b":"#4e5500","#597f1e":"#9eae00","#4a6617":"#838b00","#57791b":"#9aa400","#263909":"#424900","#567618":"#979e00","#80a62a":"#e5e700","#68891b":"#b6b600","#64881e":"#b1b800","#a1c23b":"#fff21a","#8ab12f":"#f9f900","#5a7f1d":"#a0ad00","#162208":"#272f00","#6a8f2d":"#c0d100","#476217":"#7e8600","#415f11":"#727c00","#101c04":"#1c2400","#10120c":"#17170a","#4a6417":"#838900","#6c911d":"#bdc100","#63841a":"#adaf00","#577819":"#99a100","#809f2a":"#dfd700","#7ca025":"#dbd900","#4e7d11":"#889e00","#0f140a":"#171c06","#5f8126":"#acb900","#53701d":"#959d00","#243d09":"#404e00","#1a1e15":"#232612","#3e5411":"#6d7000","#66881b":"#b3b500","#537319":"#939b00","#779a22":"#d1cf00","#799c23":"#d4d200","#638d20":"#b0c000","#13160f":"#1a1c0d","#3d5217":"#6e7500","#587723":"#9fab00","#132205":"#222b00","#1a1c15":"#232313","#263b07":"#424900","#587915":"#999e00","#67871a":"#b3b200","#4b6916":"#848d00","#84a82c":"#ebe900","#749722":"#cdcd00","#5a8118":"#9eaa00","#232d0e":"#404100","#627b2a":"#b4b502","#0a1203":"#121700","#282b24":"#323424","#152801":"#252e00","#304d07":"#535d00","#537414":"#909700","#426014":"#758100","#799c2c":"#dbde00","#83aa29":"#eaea00","#5c8715":"#a0ad00","#0a0e07":"#0f1304","#5c7427":"#a9ab01","#142005":"#232900","#081200":"#0f1400","#223b03":"#3b4500","#325007":"#566100","#35510b":"#5c6600","#5e821e":"#a7b200","#8bac43":"#edf019","#11140f":"#16190e","#3d4b1e":"#6b6c08","#203206":"#373e00","#0f1e01":"#1b2200","#243e03":"#3e4800","#2f4b06":"#505a00","#7ba02a":"#dde000","#88a73a":"#f6f204","#121509":"#1e1d03","#414d24":"#6c6c11","#132501":"#222a00","#1e3602":"#343e00","#2e4608":"#4f5700","#799d2d":"#dbe000","#709a1f":"#c5cd00","#141610":"#1b1c0e","#242b16":"#3a3b0d","#15150e":"#1b170c","#152702":"#252e00","#1c3302":"#313b00","#58771a":"#9ca100","#78a02a":"#d7e000","#0d0e0a":"#121109","#1d1f15":"#282612","#1b260d":"#303801","#213109":"#3a4000","#416210":"#727f00","#0f0f09":"#141007","#15190d":"#222208","#243307":"#3e4000","#78a729":"#d6e700","#0d1009":"#141606","#537b18":"#92a300","#1e211e":"#222620","#172602":"#272c00","#3e6b03":"#6a7a00","#5e9315":"#a4ba00","#52860a":"#8da000","#396007":"#637200","#609615":"#a7be00","#2d5500":"#4e5e00","#44720b":"#768b00","#58900f":"#99b000","#071300":"#0e1500","#65991a":"#b1c700","#2e5d00":"#526700","#052800":"#132c00","#1c3d00":"#334400","#4e840b":"#889f00","#47790a":"#7c9100","#001200":"#061400","#0b1600":"#141800","#3e6a08":"#6c7f00","#072000":"#122400","#091600":"#111800","#163c00":"#2c4300","#4d830b":"#869e00","#589015":"#9bb700","#1d3902":"#344100","#041700":"#0c1a00","#2d4f00":"#4c5800","#5a9213":"#9db700","#4b7a0f":"#839800","#061b00":"#101e00","#2e3d1f":"#475412","#142d00":"#253200","#4e7c15":"#89a100","#3a6d01":"#657a00","#4f8314":"#8ba800","#2a4a09":"#4a5c00","#0f1f02":"#1b2500","#041300":"#0b1500","#041600":"#0c1800","#3c6d0a":"#6a8400","#53760b":"#8b8f00","#4e7813":"#889a00","#041800":"#0c1b00","#14200c":"#212f02","#275005":"#475e00","#42680e":"#738300","#112a00":"#212f00","#230500":"#270006","#122300":"#202700","#c99768":"#fa7658","#160100":"#180006","#250400":"#290008","#371400":"#3d0400","#391b00":"#3f0b00","#ddb677":"#ffa57a","#3e200b":"#510900","#503700":"#592200","#2f1600":"#340900","#3f2a16":"#5d1302","#6f4d0e":"#8b3000","#001600":"#071800","#001700":"#081a00","#c38e5f":"#f6694b","#321000":"#380100","#1c2416":"#273011","#66a722":"#b5df00","#346601":"#5c7200","#1a3e07":"#314d00","#110500":"#130000","#1a3d00":"#314400","#011f00":"#0b2200","#498204":"#7e9500","#305203":"#525e00","#214c00":"#3e5400","#294702":"#465100","#356006":"#5d7100","#355606":"#5b6600","#061d00":"#102000","#3c6b08":"#698000","#4e830e":"#88a100","#254f00":"#435800","#496322":"#849202","#46780b":"#7a9100","#487b0b":"#7e9500","#1f3800":"#353e00","#55930d":"#95b200","#40770e":"#739400","#72903e":"#c1cd17","#65911c":"#b1c000","#3f6d0a":"#6e8400","#1f4100":"#384800","#081800":"#111b00","#0b2500":"#192900","#081c00":"#121f00","#010900":"#060f00","#000d00":"#050f00","#081108":"#0a1804","#496010":"#7c7b00","#1a3400":"#2e3a00","#274800":"#435000","#244600":"#3f4e00","#1d3700":"#333d00","#0f2400":"#1d2800","#4b6027":"#828a0c","#3c5b0b":"#677100","#000700":"#050f00","#192414":"#23310d","#4e7b10":"#889a00","#2f5104":"#515e00","#2e4b06":"#4f5a00","#203a00":"#374000","#254500":"#404d00","#2c4f02":"#4c5a00","#2f5205":"#526100","#163300":"#293900","#122700":"#212b00","#4f771b":"#8ca200","#87be35":"#e7ff0f","#689b24":"#b9d400","#6a9c28":"#bdda00","#629621":"#aecb00","#6ca727":"#c0e500","#547822":"#97ab00","#1e3207":"#353f00","#0f1803":"#1a1e00","#223d02":"#3b4600","#345d02":"#5a6900","#152f00":"#273400","#183100":"#2b3600","#0e2100":"#1b2500","#021200":"#081400","#58811d":"#9caf00","#6d972a":"#c4d600","#465d18":"#7e8200","#31460b":"#555a00","#243805":"#3d4400","#1d3000":"#303500","#1f3000":"#323500","#45551b":"#7c7900","#516725":"#929704","#558021":"#97b300","#5f9321":"#a9c800","#598724":"#9fbe00","#0e1601":"#171a00","#010400":"#080f00","#2c5100":"#4c5a00","#213e00":"#394500","#0b2100":"#172500","#0b1e00":"#162100","#2c4a07":"#4d5a00","#4e7416":"#899900","#6c9727":"#c1d300","#648b24":"#b3c200","#52711c":"#929d00","#3b580f":"#677200","#213b01":"#394300","#183200":"#2b3800","#253e01":"#3e4600","#3c5512":"#6a7200","#3b5000":"#595500","#153200":"#283800","#3e4e15":"#6e6c00","#476818":"#7e8e00","#6fa22d":"#c7e600","#192a00":"#2a2f00","#305603":"#536300","#3a6106":"#647200","#62931a":"#acc000","#61901d":"#abc000","#658e22":"#b4c300","#51701a":"#909900","#436113":"#768100","#284705":"#465400","#1b3800":"#313e00","#1d3900":"#333f00","#143200":"#273800","#3d5b0e":"#6a7500","#3d6010":"#6b7c00","#446206":"#707300","#526f18":"#919600","#425e11":"#737b00","#394e13":"#666c00","#2f410e":"#535800","#1b2c00":"#2d3100","#3d5213":"#6c7000","#6c9c2f":"#c2e100","#4c6f1d":"#889b00","#000100":"#050f00","#284405":"#455100","#223901":"#394000","#274104":"#434d00","#2c4706":"#4c5500","#1e3500":"#333b00","#102400":"#1e2800","#243d00":"#3c4400","#3a5a0e":"#657300","#214200":"#3b4900","#44630f":"#767f00","#4a6e13":"#828f00","#3f5f0b":"#6c7600","#3e5e06":"#686f00","#567425":"#9caa00","#4e701b":"#8b9a00","#567822":"#9bab00","#4d6e21":"#8a9f00","#466517":"#7c8a00","#557521":"#99a700","#45621b":"#7c8b00","#152700":"#242b00","#1f3600":"#343c00","#5e8a25":"#a8c200","#5d8f21":"#a5c300","#0a1000":"#101200","#244201":"#3e4a00","#456d0c":"#778600","#58871a":"#9bb300","#548111":"#92a200","#588218":"#9aab00","#467009":"#788600","#304f00":"#505800","#61861b":"#abb300","#5b8521":"#a2b800","#688925":"#bbc100","#587c18":"#9aa400","#46690e":"#798400","#476511":"#7b8300","#597b24":"#a0b000","#5a7f23":"#a1b400","#547922":"#96ac00","#587c28":"#9fb600","#58772a":"#9daf04","#5b7827":"#a6b000","#5b7a22":"#a4ad00","#294304":"#464f00","#2f5004":"#515d00","#5d9623":"#a5cd00","#426117":"#758500","#0b1100":"#121300","#294800":"#455000","#49710e":"#7e8d00","#648b1a":"#afb700","#65851d":"#b2b400","#80a130":"#e8e600","#8aad36":"#fcfa00","#81a536":"#edf300","#42650b":"#717c00","#547710":"#909600","#547a15":"#939f00","#6e931f":"#c2c600","#698f1f":"#bac100","#5c8218":"#a1ab00","#46690c":"#788200","#405f10":"#707b00","#678b2b":"#bbca00","#688a29":"#bdc700","#5e7e29":"#abb900","#5c7b2a":"#a7b502","#567421":"#9ba500","#4b6a16":"#848e00","#365307":"#5c6400","#1f4b03":"#3c5700","#44830f":"#7ba200","#375510":"#617000","#040600":"#0f0f00","#43680b":"#738000","#315605":"#556500","#152300":"#232700","#1c2b00":"#2d3000","#2c4105":"#4a4e00","#182900":"#282e00","#3a520a":"#636600","#4e6918":"#8a8f00","#416100":"#686c00","#61851a":"#aab000","#7ca220":"#d7d600","#749b21":"#cdd100","#68901e":"#b7c100","#578015":"#98a500","#3e6406":"#697600","#415d10":"#717900","#7fa72e":"#e5ec00","#81a924":"#e3e400","#6a9027":"#bfcb00","#628527":"#b1bf00","#5c7b29":"#a8b600","#52701f":"#949f00","#496d14":"#808f00","#344d07":"#585d00","#203902":"#374100","#499610":"#86b800","#283d0c":"#475100","#051300":"#0c1500","#447109":"#758700","#244100":"#3e4800","#274604":"#445200","#224600":"#3d4e00","#1a3600":"#2f3c00","#173000":"#2a3500","#1c3104":"#313b00","#47680c":"#798100","#708f18":"#b9b200","#7ea221":"#d8d400","#729820":"#c9cc00","#678e1f":"#b6c000","#658818":"#afb200","#2d5a03":"#516700","#628126":"#b2b900","#8eb429":"#f5ef00","#7da428":"#dfe200","#719628":"#cbd300","#6d912b":"#c6d100","#54761f":"#96a500","#4b6d1a":"#859600","#456914":"#7a8b00","#274500":"#424d00","#233c04":"#3d4700","#4e7f14":"#89a300","#1b2c06":"#2f3800","#466d0e":"#798900","#325904":"#576700","#3a6206":"#647300","#274502":"#434f00","#1f3e00":"#374500","#1c3800":"#323e00","#213900":"#383f00","#5d7b15":"#a09f00","#4f6a14":"#8a8c00","#516b16":"#8e8f00","#60851c":"#a9b300","#60821c":"#aaaf00","#557a09":"#8d9100","#3c5b12":"#6a7900","#92b72e":"#fef700","#86ab29":"#ebe800","#81a628":"#e5e300","#7d9f2a":"#dfdd00","#6a8d25":"#bec600","#537518":"#929d00","#4b6e18":"#859500","#3d5f0b":"#697600","#244200":"#3e4900","#4c7016":"#869500","#131c06":"#222600","#40650d":"#6f7f00","#204100":"#394800","#3a6107":"#647300","#304f07":"#535f00","#1e3c00":"#354300","#122900":"#222e00","#122800":"#212c00","#091300":"#101500","#283a03":"#424400","#080b00":"#0f0f00","#1c2013":"#2b2b0e","#1f280f":"#373a03","#32490c":"#575e00","#466111":"#7a7f00","#1a4002":"#324900","#84aa2b":"#ecec00","#8bb32c":"#f8f700","#82a524":"#dfd900","#7da225":"#dddc00","#7a9d29":"#dbdc00","#678822":"#b8bd00","#54751a":"#959f00","#365b01":"#5b6600","#304709":"#525900","#588518":"#9bae00","#1c2e08":"#323c00","#1a2312":"#28300b","#212b15":"#343c0b","#222c1a":"#313b13","#081f00":"#132200","#011000":"#061200","#1e3f00":"#364600","#072600":"#142a00","#002a00":"#0e2f00","#394b01":"#545000","#94a961":"#d3d254","#4f6300":"#6e6300","#568200":"#8b9000","#0a1b00":"#141e00","#78a724":"#d4e100","#466d00":"#727900","#16270a":"#273600","#072b00":"#163000","#65773d":"#a3a424","#657a41":"#9ea729","#466218":"#7d8700","#1a2b09":"#2e3a00","#4d6702":"#757000","#1d4700":"#384f00","#5f7a2d":"#a9b207","#445d1f":"#7b8a00","#1b3400":"#2f3a00","#1f3202":"#343a00","#2a3e00":"#434500","#455538":"#5e6e2e","#353a31":"#404531","#678e24":"#b8c600","#5c880e":"#9ca700","#739837":"#cddf07","#587925":"#9faf00","#6a8837":"#b7c410","#475c0f":"#777400","#6b9f24":"#bed800","#306400":"#576f00","#38432d":"#4d5726","#4d5e2c":"#808415","#425803":"#656100","#3a5700":"#5d6100","#344908":"#585a00","#709134":"#c9d506","#63842d":"#b3c302","#487610":"#7e9500","#386802":"#627600","#274b00":"#445300","#060e12":"#001a1b","#809643":"#d5ce1c","#4a6a04":"#787a00","#1d3200":"#313800","#042400":"#102800","#1a3702":"#303f00","#658720":"#b4b900","#3e5d12":"#6d7b00","#1d3b00":"#344100","#162c00":"#273100","#6c8d36":"#bdcd0c","#62842b":"#b2c200","#112700":"#202b00","#111d06":"#1e2700","#0e1d05":"#192600","#2a3c12":"#4b5700","#3d5d09":"#687100","#5f782d":"#a9af08","#56771d":"#99a400","#142e00":"#263300","#638330":"#b0bf07","#497112":"#809100","#315110":"#576c00","#0e1a00":"#181d00","#476011":"#7b7d00","#657e34":"#afb511","#4d7013":"#869100","#1a3a00":"#304000","#254800":"#415000","#000a00":"#050f00","#3f5a20":"#6f8403","#375305":"#5c6200","#243f04":"#3f4a00","#6a8a22":"#bdbf00","#001f00":"#0a2200","#5b8815":"#9eae00","#244109":"#405200","#214300":"#3b4a00","#889288":"#99a594","#203012":"#364603","#5d8911":"#a0ab00","#386707":"#637a00","#0c2100":"#182500","#3a5d11":"#667a00","#001500":"#071700","#1a2d16":"#243f0c","#69910f":"#b0b200","#123300":"#253900","#0d1b00":"#171e00","#4f6f00":"#7b7a00","#638a21":"#b0be00","#254d00":"#435500","#234500":"#3e4d00","#123100":"#243600","#162503":"#262c00","#1b3601":"#303d00","#759620":"#cac600","#87a24f":"#d5d932","#3e6a0b":"#6d8200","#284d00":"#465500","#0e2800":"#1d2c00","#64831e":"#b1b300","#435f0b":"#727600","#729336":"#cbd708","#41680f":"#728400","#244800":"#405000","#274a00":"#445200","#1f4400":"#394b00","#183d00":"#2f4400","#021300":"#091500","#103503":"#233e00","#567d18":"#97a500","#456508":"#747900","#597621":"#a1a800","#48650e":"#7b8000","#436a11":"#768900","#2d4f02":"#4d5a00","#274600":"#434e00","#233f00":"#3c4600","#516722":"#959800","#161e11":"#1f290c","#263d03":"#404700","#54731d":"#96a000","#689224":"#b9ca00","#5d8024":"#a7b600","#4f6b1b":"#8d9500","#425e00":"#686800","#1e2a14":"#2f3b0a","#436310":"#758000","#62831f":"#aeb400","#81a530":"#ebec00","#527814":"#8f9b00","#5f7b18":"#a3a000","#050a00":"#0c0f00","#12190d":"#1b2208","#243f03":"#3e4900","#4e6b16":"#898f00","#698a20":"#bbbd00","#6a9622":"#bccc00","#57791d":"#9ba700","#1f2d08":"#363b00","#061200":"#0d1400","#16220c":"#263201","#426c0b":"#738400","#315008":"#556200","#5a741c":"#a09f00","#6e9422":"#c3ca00","#345504":"#586300","#010100":"#0f0b00","#1a2c08":"#2e3a00","#517613":"#8d9800","#638e1b":"#aebc00","#84af3f":"#e4f810","#83aa41":"#e2f213","#3c5e02":"#636b00","#171d14":"#1e2511","#0b1405":"#131c00","#2c4d03":"#4c5900","#567818":"#97a000","#688920":"#b9bc00","#416009":"#6e7500","#172b05":"#293500","#508017":"#8da800","#7aab32":"#dcf500","#668630":"#b7c406","#3d5416":"#6d7600","#2d410e":"#505800","#3f5f15":"#708100","#56851d":"#99b400","#87c539":"#deff1b","#7eb42f":"#e1fc00","#72a425":"#cadf00","#4d7211":"#869100","#1d3f01":"#354700","#011a00":"#0a1d00","#3a5e0c":"#657600","#243b01":"#3c4300","#4e6c11":"#878b00","#3e6e11":"#6f8d00","#588d1c":"#9cbc00","#425e14":"#757f00","#233701":"#3a3e00","#212f01":"#353500","#1b2d00":"#2d3200","#0e2200":"#1b2600","#1b2e00":"#2d3300","#273f00":"#404600","#4e671c":"#8d9100","#425b18":"#768000","#567b1d":"#99a900","#5d881e":"#a5b800","#6fa128":"#c6df00","#80b431":"#e6fe00","#7faf2e":"#e4f500","#507619":"#8d9f00","#5b8a16":"#9fb200","#619718":"#aac200","#376006":"#607100","#223b00":"#394100","#476010":"#7b7c00","#0d1503":"#171b00","#437911":"#789900","#5f8c2a":"#aaca00","#293f05":"#454b00","#1e2d03":"#323500","#253c03":"#3f4600","#274103":"#424b00","#254401":"#404d00","#254700":"#414f00","#234800":"#3f5000","#243c03":"#3d4600","#1c3000":"#2f3500","#254100":"#3f4800","#2e4704":"#4d5300","#253e00":"#3e4500","#2b4301":"#474b00","#28440a":"#475700","#2c420a":"#4d5400","#142900":"#242e00","#203d00":"#384400","#325207":"#566300","#223b02":"#3a4400","#658528":"#b8c000","#2b4d02":"#4a5800","#050800":"#0e0f00","#4d8d16":"#8ab500","#406211":"#708000","#203600":"#363c00","#293a09":"#474a00","#2a4805":"#495500","#345408":"#5a6600","#345407":"#596500","#395b0b":"#637100","#395e0a":"#637300","#3f630e":"#6e7d00","#3e5a14":"#6e7a00","#253a0a":"#414b00","#3b6106":"#657200","#43640a":"#727a00","#4b6f11":"#828e00","#47681c":"#7f9300","#39540c":"#636b00","#435a11":"#757700","#4e711a":"#8b9a00","#325608":"#576800","#2e5206":"#516200","#294602":"#465000","#284301":"#434b00","#527217":"#909800","#325404":"#556200","#020400":"#0c0f00","#436f15":"#779300","#669229":"#b7d000","#173f02":"#2e4800","#2d3d0b":"#4e5000","#345608":"#5a6800","#436a10":"#758700","#476e13":"#7d8f00","#476d15":"#7d9000","#446c0e":"#768700","#3c5612":"#6a7300","#394b1e":"#626c08","#3c6002":"#646d00","#517810":"#8c9700","#5e8418":"#a4ad00","#6f9323":"#c6ca00","#79a423":"#d6dd00","#495f17":"#828300","#5d7a30":"#a1b00c","#7cab3c":"#dcfa06","#718b20":"#beb300","#4e6517":"#8a8900","#568917":"#97b200","#1f3900":"#353f00","#41640f":"#718000","#416311":"#728100","#365a08":"#5e6d00","#1d231c":"#222b1b","#1d3105":"#333c00","#71a629":"#c9e600","#284d05":"#485b00","#2c4107":"#4b5000","#36590b":"#5e6f00","#466d11":"#7b8c00","#517b17":"#8fa200","#568417":"#97ac00","#507913":"#8c9b00","#49740b":"#7e8d00","#3e5a12":"#6d7800","#314118":"#575f04","#4d6f02":"#7c7d00","#4c720e":"#838e00","#638c1d":"#afbc00","#779e29":"#d6dd00","#779c29":"#d6db00","#6e8729":"#c3bd00","#3b540f":"#676e00","#4a7004":"#7a8100","#223708":"#3c4600","#0d1207":"#161a02","#162b00":"#273000","#163100":"#293600","#487212":"#7e9300","#4a7113":"#829300","#010401":"#050f00","#7fb334":"#e3ff01","#678d29":"#baca00","#1a3a02":"#314300","#395c0b":"#637200","#568117":"#97a900","#5c8314":"#9fa800","#5d8816":"#a2af00","#4f7909":"#859000","#4f790e":"#889600","#384619":"#666703","#445e13":"#787d00","#4b7008":"#7e8500","#678c1d":"#b5bc00","#769c2f":"#d6e100","#709228":"#cace00","#77982f":"#dadd00","#617b2c":"#afb405","#284604":"#455200","#3f5e0b":"#6c7500","#315804":"#556600","#568016":"#96a700","#577e18":"#99a700","#2a470d":"#4b5d00","#7dae31":"#e1f800","#283e08":"#454e00","#344f0b":"#5a6400","#4c7716":"#869d00","#5b831c":"#a1b000","#658b20":"#b3be00","#65921b":"#b1c000","#719824":"#c9d100","#6b971e":"#bcc900","#4c6d15":"#859000","#3a4a1e":"#646b09","#5b7c18":"#9fa400","#648b1b":"#afb800","#7b9e34":"#e2e900","#5d7925":"#aaaf00","#384917":"#666b00","#25320b":"#414400","#253809":"#414800","#0c1d00":"#172000","#091100":"#101300","#335606":"#586600","#45680d":"#778200","#789929":"#d7d600","#466911":"#7a8700","#557a1a":"#96a400","#659227":"#b5cd00","#182f02":"#2b3600","#476815":"#7d8b00","#5d841e":"#a5b400","#769b29":"#d4da00","#769f2a":"#d4df00","#7ba02f":"#dfe600","#89ad37":"#fcfd00","#719d24":"#c9d600","#435a18":"#787f00","#3e4f21":"#6a710b","#6e961d":"#c1c700","#5e7b1e":"#a8aa00","#252e10":"#444401","#191d10":"#27270b","#0e1704":"#191e00","#171d0b":"#292a02","#507510":"#8a9400","#4c7311":"#849300","#6b9020":"#bdc300","#172900":"#272e00","#627e1c":"#aba800","#709234":"#c9d606","#131d00":"#1f2000","#223800":"#383e00","#345b01":"#596600","#3c6105":"#667100","#2e5101":"#4f5b00","#305e01":"#556900","#49790b":"#7f9300","#5e891e":"#a6b900","#5b881c":"#a1b600","#58851e":"#9cb500","#5d8820":"#a5ba00","#508012":"#8ca200","#2c5502":"#4e6100","#1a3700":"#2f3d00","#325801":"#556300","#385d01":"#5e6800","#2f4e08":"#525f00","#091b00":"#131e00","#042000":"#0f2400","#bd8d5f":"#ef6b4d","#230b00":"#270100","#2c4a00":"#495200","#6a8d27":"#bfc800","#2d3e0a":"#4e5000","#1e3400":"#333a00","#325200":"#535b00","#2c5200":"#4c5b00","#345700":"#576100","#2f4500":"#4b4d00","#48750a":"#7c8d00","#507612":"#8b9700","#6f942a":"#c9d300","#6d9429":"#c4d200","#698a27":"#bec400","#628d21":"#aec100","#49760f":"#7f9400","#223f00":"#3b4600","#284e00":"#465700","#3c6802":"#667600","#200000":"#24000b","#b57c1d":"#e94c00","#240900":"#280002","#3e5803":"#646500","#456310":"#788000","#172100":"#252500","#2b4800":"#485000","#2b4900":"#485100","#365603":"#5a6300","#293600":"#3c3800","#415c05":"#6b6c00","#517112":"#8c9100","#5e801d":"#a7ae00","#6d8f25":"#c4c800","#799a2e":"#ddde00","#708b29":"#c8c300","#6e8f29":"#c7cc00","#5a851c":"#9fb300","#447411":"#789400","#132800":"#222c00","#315303":"#545f00","#010200":"#0c0f00","#100000":"#120005","#3c1f0e":"#520600","#537812":"#909900","#263503":"#3e3e00","#091a00":"#131d00","#243f00":"#3d4600","#2b4100":"#454800","#363700":"#3d2c00","#49640b":"#7b7b00","#5a7818":"#9ea000","#628620":"#afb800","#6a8927":"#c0c300","#6e8324":"#b9ab00","#71912b":"#ced100","#5d851c":"#a4b300","#3f6b0c":"#6f8400","#142400":"#222800","#0b1e01":"#162200","#669620":"#b4ca00","#0b1200":"#121400","#130900":"#150400","#414a00":"#524300","#3f540b":"#696800","#5b7a1c":"#a2a700","#5c801c":"#a3ad00","#5f7d1b":"#a8a900","#5c801a":"#a2ab00","#507d12":"#8c9f00","#3a6109":"#657600","#011200":"#071400","#121906":"#202200","#020200":"#0f0b00","#0f0a00":"#110600","#2f3900":"#3f3700","#48610f":"#7c7c00","#42690c":"#728200","#3d6807":"#6a7b00","#42670c":"#728000","#314d09":"#555f00","#7a9e38":"#dce806","#0f1300":"#151300","#294100":"#434800","#3d6307":"#687600","#456e0a":"#778500","#365004":"#595d00","#1e3d01":"#364500","#1f0300":"#220007","#1d0300":"#200006","#270b00":"#2b0001","#7ca23c":"#dcec0a","#080d02":"#0e1100","#0e0000":"#100005","#110100":"#130005","#0f0100":"#110004","#253c00":"#3d4300","#3e5c05":"#676c00","#354801":"#514e00","#314d01":"#515700","#2c4801":"#495100","#284f00":"#475800","#d8ad6e":"#ff966b","#200300":"#240007","#7aa03b":"#d9ea09","#1e310b":"#354300","#0a0000":"#0f0005","#a45b13":"#cb2800","#160a00":"#180400","#284000":"#424700","#304100":"#484500","#304300":"#4a4900","#2f3f00":"#464300","#385003":"#5b5c00","#476a0b":"#798200","#3a5605":"#606500","#042f00":"#143400","#6b4a0d":"#852e00","#341a09":"#440600","#749735":"#d2de04","#2c4810":"#4e6200","#2c2500":"#311a00","#050000":"#0f0005","#1b1d00":"#201900","#344600":"#4e4a00","#365101":"#585b00","#3b5404":"#606200","#446809":"#747d00","#4d780c":"#849300","#528211":"#8fa300","#4d7d0f":"#869b00","#508509":"#8a9e00","#67a420":"#b6da00","#3e2900":"#451900","#290e00":"#2e0200","#648128":"#b7bc00","#557a26":"#99b200","#1b1800":"#1e1200","#a1521e":"#d41500","#2f4503":"#4d5000","#2d4e02":"#4d5900","#3b6307":"#667600","#426f0a":"#738600","#375d05":"#5e6d00","#366901":"#5f7600","#c18c5d":"#f56649","#bf895a":"#f36145","#bc8556":"#f15c3f","#160300":"#180004","#4a691a":"#849100","#759b38":"#d1e307","#071200":"#0e1400","#d2954a":"#ff6d3c","#030000":"#0f0005","#070000":"#0f0005","#060000":"#0f0005","#254a09":"#435c00","#2a520a":"#4c6600","#355500":"#575e00","#356100":"#5b6c00","#311700":"#360900","#381a00":"#3e0a00","#4f741c":"#8da000","#567c29":"#9ab700","#382301":"#3f1400","#180000":"#1b0008","#130000":"#150006","#1b0800":"#1e0000","#c59464":"#f77353","#3e2915":"#5c1201","#729c34":"#cfe700","#123503":"#253e00","#45340c":"#5a2400","#300f00":"#350100","#a1744a":"#df4826","#010000":"#0f0005","#7ea93c":"#e1f806","#082800":"#162c00","#001000":"#051200","#c88c2e":"#ff5c12","#1b0200":"#1e0007","#371705":"#430400","#88b33f":"#eafa13","#001c00":"#091f00","#122b10":"#193f03","#220500":"#260006","#1d0400":"#200005","#82ac39":"#eefe00","#001d00":"#0a2000","#1a3019":"#21420f","#749c36":"#d1e603","#597c28":"#a1b600","#64862f":"#b3c504","#011300":"#071500","#26440e":"#445b00","#001100":"#061300","#173f00":"#2f4600","#152b00":"#263000","#112000":"#1e2400","#263700":"#3c3d00","#2d4d00":"#4c5500","#213c00":"#394300","#304203":"#4d4b00","#212900":"#2e2900","#376301":"#5e6f00","#375d02":"#5d6900","#548015":"#93a500","#5d8b13":"#a1af00","#56840f":"#94a300","#538010":"#90a000","#47750b":"#7b8e00","#3e6908":"#6b7d00","#3a6108":"#647500","#325607":"#576700","#294700":"#454f00","#3b5b07":"#646d00","#283c02":"#424500","#6ca41e":"#bed700","#234000":"#3c4700","#112400":"#1f2800","#020800":"#080f00","#264703":"#435200","#3c5707":"#646800","#2f4e01":"#4f5800","#1a2b00":"#2b3000","#293700":"#3d3a00","#322d00":"#382100","#253700":"#3b3d00","#234401":"#3e4d00","#365e04":"#5d6d00","#4a7411":"#819400","#446d0f":"#778a00","#426f0b":"#738700","#416b0c":"#718400","#3a600a":"#657600","#386108":"#627500","#325a05":"#576900","#254803":"#425300","#2d4706":"#4d5500","#203000":"#343500","#010800":"#070f00","#507812":"#8b9900","#0f2900":"#1e2e00","#355706":"#5b6700","#3f6707":"#6c7a00","#2e4b00":"#4c5300","#202900":"#2e2a00","#242b00":"#302900","#030c00":"#080f00","#1e2e00":"#313300","#254801":"#415100","#366104":"#5e7000","#3b6406":"#667600","#386008":"#627300","#345a05":"#5a6900","#284d04":"#475a00","#204300":"#3a4a00","#274900":"#445100","#2d4705":"#4c5400","#1e3000":"#313500","#142100":"#212500","#5b9414":"#9fba00","#183400":"#2c3a00","#3d610f":"#6b7c00","#355e00":"#5a6800","#102800":"#1f2c00","#2c3900":"#3f3b00","#211f00":"#251700","#132600":"#222a00","#192d00":"#2b3200","#214100":"#3a4800","#284900":"#455100","#2c5203":"#4d5e00","#2f5605":"#536500","#305304":"#536100","#364f05":"#5a5d00","#293d00":"#424400","#1b1e00":"#211b00","#253801":"#3c3f00","#2e4801":"#4c5100","#183800":"#2d3e00","#001300":"#061500","#3a6905":"#657a00","#365607":"#5c6700","#2b4600":"#474e00","#3c5f00":"#626900","#3c650f":"#6a8100","#3a6c04":"#667c00","#2a5400":"#4b5d00","#0e0b00":"#100800","#150e00":"#170900","#0b0f09":"#0f1407","#171100":"#1a0b00","#1f2700":"#2b2700","#3a5702":"#5f6300","#3b5c04":"#636b00","#325500":"#545e00","#365405":"#5b6300","#2c4500":"#484d00","#2d4501":"#4a4e00","#0f1100":"#130f00","#141e00":"#202100","#385406":"#5e6400","#273f01":"#414700","#2b4400":"#464b00","#143600":"#283c00","#3d5d06":"#666e00","#64941f":"#b1c700","#386c03":"#637b00","#3f7205":"#6e8400","#183b00":"#2e4100","#232c00":"#312c00","#1f1600":"#220e00","#0f1200":"#141100","#1b1100":"#1e0a00","#251f00":"#291600","#1e1e00":"#211700","#2b2c00":"#312300","#252d00":"#322c00","#0b0c00":"#0f0c00","#101500":"#171600","#3c5709":"#666b00","#4f6c16":"#8b9000","#222a00":"#2f2a00","#3d550c":"#696c00","#2a4a00":"#475200","#385c02":"#5e6800","#152900":"#252e00","#131400":"#161100","#070400":"#0f0400","#060f00":"#0c1100","#202000":"#241900","#212800":"#2c2700","#344303":"#4e4900","#293b02":"#434400","#0c1000":"#121100","#141700":"#1a1500","#475610":"#716800","#5a721f":"#a19f00","#454e14":"#6d5d00","#2c3c01":"#444200","#495b12":"#797300","#143000":"#263500","#061300":"#0d1500","#1d2e00":"#303300","#172300":"#252700","#060900":"#0f0f00","#272800":"#2c2000","#224200":"#3c4900","#223001":"#363600","#182202":"#272800","#49611c":"#848b00","#394310":"#5c5300","#384704":"#534d00","#505e16":"#817300","#425a13":"#747900","#031700":"#0b1a00","#061600":"#0e1800","#030500":"#0e0f00","#1a2a00":"#2b2f00","#1c3400":"#303a00","#344a1a":"#5c6d02","#3c5c0e":"#697600","#0e2300":"#1b2700","#2f3c08":"#4b4800","#394f07":"#5f5f00","#819a32":"#e2d500","#343c03":"#463b00","#2b4506":"#4a5300","#111f00":"#1d2200","#1a2c00":"#2c3100","#162100":"#232500","#4f6715":"#8a8900","#7a9024":"#c8b500","#3f4301":"#4b3900","#1f3200":"#333800","#233700":"#393d00","#020900":"#080f00","#79a22e":"#dbe700","#52680f":"#847d00","#2f4101":"#494800","#455f14":"#7a8000","#546d20":"#999d00","#1c2e00":"#2e3300","#1a3502":"#2f3d00","#4b6d0f":"#818a00","#2c4400":"#474b00","#354b02":"#555500","#506d25":"#91a101","#67862b":"#bcc400","#48620f":"#7c7d00","#1a2500":"#292900","#041400":"#0b1600","#2d4f01":"#4d5900","#385801":"#5c6300","#3c5704":"#626500","#5f8023":"#abb500","#6a922f":"#c0d600","#5f8422":"#aab800","#617e22":"#afb200","#272700":"#2b1e00","#252e00":"#332e00","#709634":"#cadd03","#719a35":"#cbe303","#6d9731":"#c5de00","#699221":"#bac700","#628722":"#afbc00","#353b0b":"#4e4000","#352d00":"#3b2000","#354600":"#4e4900","#4a6521":"#869500","#8ab83b":"#efff0f","#78a43b":"#d5f007","#5c8612":"#9ea900","#638a1b":"#aeb700","#3d501a":"#707600","#382c07":"#462000","#515d11":"#7a6900","#2e3c00":"#433e00","#627d30":"#adb50b","#7dae23":"#dce800","#658d18":"#afb700","#5a8116":"#9da800","#485e22":"#818a04","#393c0a":"#4e3b00","#5f601c":"#8a6200","#475b09":"#6f6900","#2b4200":"#464900","#060e00":"#0b1000","#6c9528":"#c2d200","#6c960e":"#b4b600","#5a791d":"#a0a700","#3e4b23":"#676911","#313600":"#3c3000","#5b621e":"#8e7200","#50631a":"#8b8500","#2c4100":"#464800","#516918":"#8f8f00","#344d03":"#555900","#679117":"#b2ba00","#567220":"#9ba200","#364514":"#626300","#364300":"#4a4200","#5d6b1b":"#958200","#5e7a28":"#acb400","#46600a":"#757600","#212d00":"#323000","#7a9e32":"#dfe700","#395512":"#657200","#3d5415":"#6d7500","#344a03":"#555500","#445e04":"#6d6c00","#658227":"#b8bc00","#628030":"#adba09","#587d17":"#9aa400","#384905":"#575200","#1f2b00":"#302f00","#88b33e":"#ecfb10","#234200":"#3d4900","#436a04":"#707a00","#51791c":"#90a500","#709536":"#c7da07","#799c3d":"#d3e20f","#6e943e":"#b9d415","#618223":"#aeb700","#5e7a18":"#a2a000","#2e3d00":"#444000","#273900":"#3e3f00","#83b438":"#e7ff07","#0c1800":"#151b00","#7c983a":"#dddc0c","#7ea33a":"#e3ef06","#80a144":"#dbe618","#95b847":"#f0f229","#84a73d":"#edf409","#76933c":"#cdd312","#708f30":"#ced301","#4e6e0a":"#838500","#272d00":"#322a00","#527d11":"#8e9e00","#739c2f":"#d0e100","#97b93c":"#fff811","#aac941":"#fff028","#95b93b":"#fffc10","#94b848":"#edf22a","#7ea046":"#d4e31c","#778f35":"#d1ca09","#5e7716":"#9d9600","#343f01":"#473e00","#162d00":"#273200","#87b743":"#def71f","#587d28":"#9eb700","#3a5400":"#5c5d00","#b0ce3f":"#ffec2c","#9fc42e":"#fff20e","#81a82b":"#e7ea00","#7ba241":"#d4ea12","#6f8b34":"#c6cb09","#68851e":"#b5b200","#485e09":"#726e00","#162500":"#252900","#426508":"#707900","#6b8e2d":"#c3d000","#031a00":"#0c1d00","#98af3e":"#f9e30e","#a5c637":"#ffef1a","#87af2d":"#f2f400","#729735":"#cdde04","#749337":"#cfd60a","#648d1c":"#b0bc00","#4a6e09":"#7d8400","#152800":"#252c00","#7d9e38":"#e3e806","#0c2301":"#192800","#041602":"#0b1b00","#1c2000":"#241d00","#283e00":"#414500","#acc94a":"#fff032","#95b938":"#fffa0d","#779e37":"#d7e904","#70982e":"#cbdc00","#68911b":"#b6bf00","#5b7d14":"#9da100","#3b4b06":"#5a5400","#101d00":"#1b2000","#719132":"#ced603","#1c3e06":"#344b00","#222a06":"#353100","#050700":"#0f0f00","#aec65d":"#fbee48","#90b732":"#fffd04","#709c35":"#c9e602","#69901e":"#b9c100","#587b18":"#9aa300","#2d3700":"#3d3600","#131a00":"#1d1c00","#54741f":"#97a300","#4e7420":"#8ba400","#1a2008":"#2c2a00","#030900":"#0a0f00","#0e1c00":"#191f00","#96b14c":"#e8e231","#8aaf3a":"#fbff04","#5b8518":"#9fae00","#648f1d":"#b0bf00","#6f9820":"#c4cc00","#576c10":"#8a8000","#0c1500":"#141700","#62872a":"#b1c400","#4f7721":"#8da900","#020d00":"#070f00","#020a00":"#080f00","#557324":"#9aa800","#96bc55":"#e5f13e","#7cab2f":"#dff200","#628513":"#a8a900","#5d7215":"#968b00","#536109":"#766500","#303400":"#3a2d00","#171d00":"#201d00","#273d00":"#404400","#8aba4a":"#daf32d","#456e1b":"#7b9800","#1a4200":"#334900","#3f6609":"#6d7b00","#3b520f":"#676c00","#3f5910":"#6e7500","#243c00":"#3c4300","#132c00":"#243100","#213b00":"#384100","#102100":"#1d2500","#395a0c":"#637100","#72a13b":"#c7eb09","#7bb03d":"#d5fb0c","#0a1f00":"#152200","#081008":"#0a1604","#031500":"#0a1700","#164900":"#315100","#1f5100":"#3d5a00","#477001":"#757d00","#55781c":"#97a400","#577e21":"#9bb000","#5b8324":"#a3b900","#6b982c":"#c0da00","#649328":"#b3d000","#386407":"#627700","#202820":"#24311f","#37482b":"#4e6020","#010700":"#070f00","#041b00":"#0d1e00","#021100":"#081300","#131b00":"#1e1e00","#264101":"#404900","#669128":"#b7cd00","#335609":"#596900","#586130":"#877a1a","#3b432f":"#515529","#0e1c06":"#192600","#4a6e16":"#839300","#435206":"#625800","#391300":"#3f0200","#7b0b00":"#89001d","#2f0c00":"#340002","#060100":"#0f0002","#040000":"#0f0005","#0e1404":"#191b00","#011600":"#081800","#386005":"#607000","#445800":"#625b00","#711a00":"#7d0009","#da5807":"#fa1500","#4d4800":"#553600","#160400":"#180003","#576922":"#9a9300","#8bb543":"#e7f61e","#759a41":"#c5dc17","#24370f":"#404e00","#305b02":"#546700","#74b314":"#c8dd00","#3a6000":"#606b00","#4b5601":"#615000","#8d9412":"#b88b00","#7a7c09":"#946a00","#476b00":"#727700","#477d06":"#7b9100","#6cab0e":"#b9cd00","#456904":"#727900","#002800":"#0d2c00","#395110":"#646c00","#65740c":"#8e7800","#5c7a07":"#8f8a00","#548109":"#8e9900","#3f7404":"#6e8500","#58891b":"#9cb600","#2a5405":"#4c6300","#1c3b00":"#334100","#214400":"#3b4b00","#366d00":"#607900","#356f00":"#607b00","#478506":"#7d9a00","#639a12":"#abbf00","#565f0a":"#755e00","#4a3500":"#522200","#a94d02":"#be1c00","#f96910":"#ff3927","#9e8d13":"#c47200","#786907":"#8d5000","#63800f":"#9f9800","#57831c":"#9ab000","#5a7732":"#98aa11","#3f6408":"#6c7800","#5da111":"#a4c600","#599e09":"#9bb900","#487708":"#7c8d00","#427704":"#738900","#3c6f04":"#698000","#416906":"#6e7b00","#364101":"#494000","#713d02":"#801e00","#944407":"#ac1700","#fe5204":"#ff221f","#c66407":"#e42b00","#7d630a":"#964700","#6a4b05":"#7b3000","#314800":"#4e5000","#1e3402":"#343c00","#1f3802":"#364000","#1e3504":"#353f00","#062000":"#112400","#133100":"#253600","#182c01":"#2a3200","#041100":"#0a1300","#1d2800":"#2c2b00","#764102":"#852000","#833f06":"#981800","#5c2c00":"#661200","#401300":"#470000","#120000":"#140006","#021f00":"#0d2200","#082700":"#162b00","#174400":"#304b00","#4c6629":"#82930c","#395119":"#677600","#102300":"#1d2700","#354d0e":"#5d6500","#1b3100":"#2e3600","#1d2b00":"#2f3000","#020202":"#080808","#121212":"#141414","#060801":"#0f0f00","#101402":"#181700","#171e04":"#262500","#102402":"#1e2a00","#030400":"#0f0f00","#1a3200":"#2e3800","#122c00":"#233100","#91bf45":"#ecfc24","#36500e":"#5f6800","#102b00":"#203000","#8cb05a":"#cddf48","#263f0a":"#435100","#11130e":"#17180d","#0f1502":"#191a00","#293607":"#444200","#263206":"#3e3c00","#0e1202":"#161500","#010201":"#060d03","#242524":"#282a27","#355410":"#5e6f00","#354d13":"#5e6b00","#071800":"#101b00","#153600":"#293c00","#add33f":"#fff631","#b8d731":"#ffe626","#a8c94f":"#fff938","#294d02":"#485800","#385d09":"#617100","#325e00":"#576800","#22380b":"#3c4a00","#658327":"#b8bd00","#a4c92a":"#ffef0f","#9bc050":"#f3f935","#759d4a":"#badb25","#9dc251":"#f6fb36","#2a4c01":"#485500","#020302":"#060b05","#0c1b00":"#161e00","#092100":"#152500","#58980e":"#9ab800","#3b6f00":"#667b00","#5d852f":"#a4c304","#234907":"#405900","#64873f":"#a0be1e","#bad835":"#ffe62c","#b9d82f":"#ffe625","#4e7b27":"#89b400","#7da530":"#e3ec00","#335405":"#576300","#2c410e":"#4e5800","#3e7604":"#6e8700","#437804":"#748a00","#082100":"#142500","#679535":"#b4db06","#9ec428":"#fff107","#9bbd38":"#fff411","#bbda38":"#ffe931","#accd4e":"#fff73b","#68923c":"#aed213","#a7ca47":"#fff830","#799c1a":"#cac400","#274200":"#414900","#203500":"#353b00","#234b00":"#405300","#518708":"#8b9f00","#1e3600":"#333c00","#1a3102":"#2e3900","#3f6222":"#6d9002","#1b3606":"#314300","#58832d":"#9bc102","#a4c837":"#fff31c","#476f20":"#7e9f00","#80a555":"#bdd540","#c0dd41":"#ffe93e","#b8d853":"#fff44d","#76a148":"#bee121","#aacf41":"#fff72f","#799e14":"#c6bf00","#2a4b00":"#485300","#1c3100":"#2f3600","#040e00":"#091000","#031100":"#091300","#396907":"#657c00","#386500":"#607000","#0b2400":"#182800","#0f2500":"#1d2900","#1f4405":"#3a5100","#6f9f38":"#c4ea05","#97bd35":"#fffa0e","#466d1c":"#7c9800","#91b457":"#d9e642","#afd13c":"#fff02c","#92b629":"#f8ec00","#799f3e":"#d3e60f","#153000":"#273500","#214500":"#3c4d00","#244b00":"#415300","#284a01":"#455300","#142b00":"#253000","#274303":"#434e00","#396204":"#627100","#385d03":"#5f6b00","#253f00":"#3e4600","#131c00":"#1e1f00","#1a2502":"#2b2b00","#152500":"#242900","#091d00":"#142000","#2e5014":"#516f00","#89b641":"#e6f919","#77a21f":"#d0d600","#446512":"#778400","#94ba49":"#edf42c","#425c1b":"#778400","#284a00":"#455200","#1b3500":"#303b00","#163000":"#283500","#132b00":"#233000","#162a00":"#262f00","#1f3c00":"#364300","#284602":"#455000","#325504":"#566300","#3d5e09":"#687200","#3d5809":"#676c00","#2a3802":"#403e00","#1b2700":"#2b2b00","#293d13":"#495900","#091e00":"#142100","#2a4a0a":"#4b5d00","#5c7e30":"#a0b70a","#415e12":"#727c00","#2a4900":"#475100","#213a00":"#384000","#54710a":"#898600","#1e3d00":"#364400","#1d3a00":"#344000","#1e3900":"#343f00","#1d3c00":"#344300","#325501":"#545f00","#3e630a":"#6b7900","#416408":"#6e7800","#2d4400":"#494b00","#233400":"#383a00","#141f00":"#212200","#58742c":"#9ba909","#3d610a":"#697700","#4b6c1e":"#869900","#658827":"#b6c200","#633000":"#6e1400","#436207":"#707500","#425c07":"#6d6e00","#324e02":"#535900","#425f07":"#6e7100","#2e4701":"#4b5000","#2c5300":"#4c5c00","#2c5700":"#4e6100","#2b5700":"#4d6100","#2a5501":"#4b5f00","#385e04":"#5f6d00","#416507":"#6e7800","#476907":"#767c00","#416203":"#6b7000","#678a22":"#b8bf00","#324d0c":"#576300","#173003":"#2a3900","#282800":"#2c1f00","#c89667":"#fa7557","#090000":"#0f0005","#496d0a":"#7c8400","#50710a":"#868900","#345a02":"#596600","#355503":"#596200","#2b4401":"#474d00","#203c00":"#384300","#315f04":"#576e00","#244e00":"#425700","#2f5800":"#516200","#244e01":"#425800","#274d00":"#455500","#295300":"#495c00","#305801":"#536300","#3c6305":"#667300","#436906":"#717b00","#385f04":"#606e00","#3b5011":"#686c00","#314e0f":"#576700","#122001":"#1f2500","#175300":"#355c00","#181500":"#1b0f00","#1c141e":"#1c1127","#130200":"#150004","#3b6205":"#657200","#487609":"#7c8d00","#456107":"#727300","#48700b":"#7b8900","#375604":"#5c6400","#2e5404":"#516200","#2b4d01":"#4a5700","#274e00":"#455700","#2f5a04":"#536800","#346005":"#5c7000","#326303":"#597100","#2a5300":"#4a5c00","#3a6003":"#626e00","#3a5e03":"#616c00","#2b3e07":"#494d00","#233006":"#3b3c00","#569109":"#94ab00","#368109":"#679900","#623f00":"#6d2500","#1c0a00":"#1f0200","#304a04":"#505700","#496b0b":"#7c8300","#6d8f2a":"#c6cd00","#4f6f21":"#8ea000","#182800":"#282c00","#345402":"#575f00","#365b03":"#5c6800","#2f5701":"#526200","#366505":"#5f7600","#426f06":"#718200","#466f14":"#7c9100","#3a690c":"#678200","#4d8515":"#89ab00","#3d6e08":"#6b8300","#3d6b09":"#6b8100","#2f5702":"#526300","#325a00":"#556400","#396002":"#606d00","#2d410b":"#4e5400","#0a2000":"#162400","#417217":"#749800","#4d3200":"#551e00","#4d2300":"#550d00","#110000":"#130006","#050b05":"#061002","#040804":"#060d03","#0d110a":"#131707","#022500":"#0f2900","#173700":"#2c3d00","#365508":"#5d6700","#3f5e15":"#708000","#5a7a31":"#9ab00e","#507425":"#8faa00","#395c11":"#657900","#051700":"#0d1a00","#0b1f00":"#172200","#0f1f00":"#1b2200","#1a2b03":"#2d3300","#23320e":"#3f4700","#618139":"#a0b717","#6a9e33":"#bde800","#0a2400":"#172800","#2a5800":"#4c6200","#50800e":"#8b9e00","#355b00":"#596500","#294400":"#444b00","#091f00":"#142200","#121d00":"#1e2000","#748d49":"#b8c22b","#608830":"#aac804","#030601":"#0b0f00","#072c00":"#163100","#6e9f1d":"#c1d100","#50780b":"#889100","#4a6d07":"#7b8100","#253800":"#3c3e00","#071400":"#0e1600","#181c00":"#1f1a00","#9bb970":"#d5e367","#294d00":"#475500","#1a4300":"#334a00","#89b43b":"#f1ff0a","#75952a":"#d4d400","#5d7715":"#9b9600","#3d5202":"#5d5a00","#2e3e00":"#454200","#050801":"#0d0f00","#647d45":"#98aa2e","#3a6e00":"#657a00","#678e2a":"#bacc00","#84a931":"#f0f200","#7ca133":"#e3eb00","#6f892a":"#c7c100","#4b5e0d":"#776f00","#090e00":"#0f1000","#465532":"#687224","#416b00":"#6c7700","#032300":"#0f2700","#6e9d1e":"#c1d000","#5e891c":"#a6b700","#6b9127":"#c0cc00","#6f932b":"#c9d300","#5d6d25":"#a19501","#171601":"#1b1100","#060300":"#0f0300","#051002":"#0a1400","#385c0c":"#627300","#426011":"#737d00","#4b6e14":"#839000","#557b19":"#96a400","#557b1a":"#96a500","#546d18":"#949300","#646a3a":"#907e26","#050400":"#0f0800","#102002":"#1d2600","#375115":"#627100","#46611a":"#7e8900","#3f5b0f":"#6e7600","#385909":"#616d00","#47730e":"#7c8f00","#3f660d":"#6e8000","#40520a":"#666100","#44520d":"#695f00","#020c00":"#070f00","#040d04":"#061300","#1d2519":"#263015","#9eb75d":"#e8e44b","#90aa45":"#ece31d","#587125":"#a2a700","#2c400c":"#4d5400","#1e3003":"#333900","#2a4600":"#464e00","#345506":"#596500","#59782b":"#9eb005","#535f23":"#8b7d06","#1d2d07":"#333a00","#b0d062":"#fffd55","#9dbd4d":"#f6f331","#839f3b":"#e8e40a","#738738":"#c2b912","#3c4a1a":"#6d6c02","#0a0d00":"#0f0e00","#0c0e0c":"#0e110c","#41501d":"#757404","#9bbe43":"#fcf921","#91b43e":"#fcfb11","#89ad39":"#fcff00","#85aa2e":"#f0ef00","#273d0e":"#455300","#111210":"#141511","#243904":"#3d4400","#628f14":"#a9b500","#699525":"#bbce00","#789f32":"#dbe800","#719a2a":"#cbda00","#628923":"#afbf00","#30560a":"#556b00","#010600":"#070f00","#2a4d00":"#485500","#456a0f":"#788600","#4e7015":"#899400","#547a21":"#96ac00","#234300":"#3d4a00","#2a440b":"#4a5800","#36560a":"#5e6b00","#243e04":"#3e4900","#1d3202":"#323a00","#133000":"#253500","#0b1103":"#131600","#2f4a10":"#536400","#132405":"#222e00","#172906":"#293400","#1d330b":"#344500","#1a3004":"#2e3a00","#3f6610":"#6f8300","#386305":"#617300","#040500":"#0f0e00","#182f00":"#2a3400","#0a2100":"#162500","#233b01":"#3b4300","#283f0c":"#475300","#3b511f":"#667607","#171b00":"#1e1900","#4b6527":"#829309","#2b4a00":"#485200","#092000":"#152400","#64852f":"#b3c304","#283b03":"#424500","#4b6525":"#859406","#0a1700":"#131a00","#2d4406":"#4c5200","#385112":"#636e00","#3c3c2d":"#4b412a","#38570a":"#616c00","#2b4307":"#4a5200","#060b00":"#0d0f00","#35500e":"#5d6800","#023900":"#153f00","#477a00":"#778700","#467b04":"#788d00","#5b9611":"#9fb900","#508105":"#879500","#001b00":"#091e00","#020500":"#0b0f00","#060a00":"#0e0f00","#070c00":"#0e0f00","#080e00":"#0e1000","#070e00":"#0c1000","#111308":"#1b1803","#0d1900":"#171c00","#0d1a00":"#171d00","#355d05":"#5c6d00","#081000":"#0e1200","#233805":"#3c4400","#608419":"#a8ae00","#70941f":"#c5c700","#66881c":"#b3b600","#516d11":"#8b8c00","#394c0a":"#5f5e00","#304306":"#505100","#252c02":"#332c00","#111500":"#171500","#0d1700":"#161a00","#3c6a0a":"#6a8100","#203900":"#373f00","#050f00":"#0b1100","#040a00":"#0b0f00","#517516":"#8e9a00","#729625":"#ccd000","#779524":"#cdc600","#6a8a1f":"#bcbb00","#60841e":"#aab400","#547717":"#939e00","#4f7115":"#8a9500","#3f5e0c":"#6c7600","#3b5605":"#626500","#2e4705":"#4e5400","#1b2b00":"#2c3000","#060b02":"#0b0f00","#487a08":"#7c9000","#3b5d02":"#626900","#080d00":"#0e0f00","#0c2900":"#1b2e00","#486f11":"#7e8e00","#4e7415":"#899800","#64851b":"#b0b200","#5e7d1b":"#a6a900","#61871c":"#abb500","#517618":"#8f9e00","#466811":"#7a8600","#496a15":"#818d00","#456711":"#788500","#476911":"#7c8700","#42630e":"#727d00","#385606":"#5e6600","#385005":"#5c5e00","#356300":"#5c6e00","#233200":"#383700","#334d06":"#565c00","#436710":"#758400","#577d1a":"#9aa800","#759823":"#d0cf00","#779b27":"#d5d700","#6d9522":"#c1cb00","#69901f":"#b9c200","#698a1c":"#b8b800","#67842c":"#bec300","#4a6a18":"#839000","#446112":"#778000","#416111":"#727f00","#486b0e":"#7c8600","#395b07":"#616d00","#3f7804":"#6f8a00","#275500":"#485e00","#1e3300":"#323900","#365707":"#5d6800","#4e7c16":"#8aa200","#699520":"#bac900","#749f25":"#ceda00","#6e9d25":"#c4d700","#689a25":"#b9d400","#6b9e25":"#bed800","#63911d":"#aec100","#6b952d":"#c1d700","#577d1c":"#9aaa00","#5c7e15":"#9fa300","#43670e":"#748200","#5a7b11":"#9a9b00","#456209":"#747700","#345c02":"#596800","#233d00":"#3b4400","#142500":"#232900","#325201":"#535c00","#314a04":"#525700","#416d0a":"#718400","#528815":"#91ae00","#5e8e1d":"#a6be00","#639322":"#b0c900","#5f8e21":"#a9c200","#547c16":"#93a200","#4e7915":"#899e00","#528117":"#91a900","#5b8e1a":"#a0ba00","#61921f":"#acc400","#5d8515":"#a1ab00","#49790f":"#809700","#4d7a0c":"#859500","#42690a":"#728000","#467112":"#7b9100","#285100":"#475a00","#0b1400":"#131600","#010f00":"#061100","#2b4101":"#464900","#2e4700":"#4b4f00","#2c4900":"#495100","#3e7006":"#6c8300","#3c6b0b":"#6a8300","#538014":"#91a400","#527d14":"#8fa100","#538116":"#92a800","#55831a":"#96ae00","#53831a":"#93ae00","#4f761b":"#8ca100","#4d7418":"#889b00","#4b7615":"#849a00","#46700e":"#7a8c00","#457109":"#778700","#437206":"#738500","#426f05":"#718100","#050600":"#0f0d00","#274700":"#434f00","#314900":"#4f5100","#345200":"#555b00","#304608":"#525700","#52800c":"#8c9b00","#69951c":"#b8c400","#76a21f":"#cfd600","#6e9d1f":"#c1d100","#64941a":"#afc100","#5f8d17":"#a6b600","#518114":"#8ea500","#446e0f":"#778b00","#365a09":"#5e6e00","#315401":"#535e00","#4a6f0c":"#7e8900","#476d10":"#7c8b00","#274a02":"#455400","#315105":"#545f00","#305605":"#546500","#14220d":"#203103","#232918":"#353711","#212619":"#2f3115","#2f430c":"#525800","#567e1a":"#98a900","#95bc33":"#fffb0a","#90b42d":"#faf100","#8bad2b":"#f0e700","#80a42b":"#e6e500","#6a8c23":"#bec200","#56771b":"#99a200","#4c6c16":"#869000","#355803":"#5a6500","#2c4905":"#4c5700","#538018":"#92a900","#031001":"#081300","#426d09":"#728300","#3c5f0a":"#687500","#224501":"#3d4e00","#284c03":"#475800","#263315":"#404907","#384c18":"#666f00","#80a328":"#e1de00","#83a822":"#e0db00","#8bb129":"#f2ed00","#87ab2c":"#efeb00","#7a9b2a":"#dbd900","#668624":"#b8bd00","#54741e":"#96a200","#45670d":"#778100","#254002":"#3f4900","#4f8016":"#8ba700","#22400a":"#3d5200","#1a1b18":"#1f2019","#3b6705":"#667800","#4c6b15":"#858e00","#365309":"#5d6600","#1c2212":"#2c2f0b","#2c3f08":"#4b4f00","#38480d":"#5e5c00","#718e23":"#c4bf00","#7c9e2b":"#dfde00","#72932b":"#cfd300","#5c8024":"#a5b600","#4c6e17":"#869400","#2b4702":"#485100","#39600d":"#647900","#3e6713":"#6e8700","#12170e":"#191f0b","#3a5d09":"#647100","#557723":"#99ab00","#254200":"#3f4900","#10130a":"#191a06","#384026":"#55551c","#1c220b":"#323000","#53691a":"#918e00","#79982d":"#dbd800","#668a29":"#b9c700","#567a20":"#9aab00","#395908":"#616c00","#253f06":"#414d00","#4c7a17":"#86a100","#17220b":"#293200","#2c2d2b":"#32332f","#4a7012":"#819000","#031901":"#0b1d00","#191f08":"#2b2a00","#3f4f15":"#6f6c00","#6a8a2a":"#c1c800","#618426":"#afbd00","#486813":"#7e8900","#253904":"#3e4400","#4e7c18":"#8aa400","#263810":"#445000","#1c1d1c":"#1f211f","#4d7513":"#879700","#223803":"#3a4100","#011201":"#061500","#0f1205":"#1a1800","#435718":"#797b00","#688929":"#bdc600","#55761c":"#97a200","#2e4407":"#4e5300","#507d19":"#8ea700","#2e4613":"#526300","#171817":"#1a1b19","#51830f":"#8da200","#233b03":"#3c4500","#0f2100":"#1c2500","#091809":"#0c2302","#1a220a":"#2f3100","#587721":"#9fa900","#5a7e1d":"#a0ac00","#31490a":"#555c00","#53821a":"#93ad00","#2c4311":"#4e5d00","#151514":"#181716","#507713":"#8b9900","#5e831a":"#a5ae00","#3b580c":"#666f00","#233e03":"#3d4800","#1e2c1a":"#283b13","#354713":"#5f6400","#59791f":"#9fa900","#314a0b":"#555e00","#55851b":"#96b200","#25380f":"#424f00","#1a1a1a":"#1d1d1d","#366106":"#5f7200","#688d22":"#b9c200","#86b02d":"#f0f500","#40640c":"#6f7c00","#335206":"#576200","#343e34":"#3b4a34","#1b250a":"#303400","#4d6a19":"#899100","#314b0c":"#566100","#55831c":"#97b000","#1d2b0d":"#343e00","#232323":"#272727","#5a7c1a":"#9fa700","#719823":"#c9d000","#60871e":"#aab700","#56801a":"#98ab00","#3e660a":"#6c7c00","#406009":"#6d7500","#283917":"#435207","#040a04":"#050e01","#101607":"#1d2000","#314b0d":"#566200","#38590f":"#637300","#53801d":"#93ae00","#11170a":"#1c2104","#353534":"#3b3b39","#3e6c06":"#6b7f00","#476f10":"#7c8d00","#486215":"#7f8400","#5f851b":"#a7b200","#60861d":"#aab500","#4d7712":"#869800","#466c0b":"#788400","#44670c":"#758000","#1f3902":"#364100","#1c1610":"#26100b","#030a03":"#050f00","#192708":"#2c3400","#4a7417":"#839a00","#476c18":"#7e9300","#0b0d09":"#0f1108","#41650b":"#707c00","#151f05":"#252800","#2d430b":"#4f5700","#4f7413":"#8a9600","#426410":"#738100","#466b10":"#7a8900","#4c6f14":"#859100","#243f05":"#3f4b00","#1a180f":"#23170b","#57492e":"#773d1c","#131d0a":"#212b01","#57871d":"#9ab600","#22330c":"#3c4600","#121311":"#151612","#314d04":"#525a00","#354a0d":"#5c6100","#0b1501":"#141800","#1f3305":"#363e00","#2e4c08":"#505d00","#36570a":"#5e6c00","#466a0d":"#798400","#324d08":"#565e00","#0b1006":"#131701","#433b24":"#5c3517","#213111":"#3a4801","#4f7f18":"#8ca800","#040501":"#0f0f00","#1e1e1d":"#222120","#394b0f":"#646400","#0b1900":"#151c00","#030700":"#0b0f00","#1d3305":"#333e00","#203a04":"#384500","#395d07":"#626f00","#3b590b":"#666f00","#0e1d02":"#1a2200","#61472a":"#8a2c10","#896341":"#c03c20","#62442b":"#8b2411","#826041":"#b43e24","#334919":"#5b6c01","#365c10":"#607800","#0a0c08":"#0e1007","#4a710e":"#808d00","#3b5012":"#696d00","#132400":"#212800","#080c05":"#0d1102","#122003":"#202700","#203506":"#384100","#355009":"#5b6300","#1f3603":"#363f00","#030803":"#050f01","#0a2a01":"#193000","#a47146":"#e63d1d","#624328":"#8d220c","#3b581a":"#697f00","#1d2e0c":"#344000","#3c570f":"#697100","#1f3104":"#353b00","#0a1402":"#121800","#263a0b":"#434d00","#375409":"#5e6700","#284205":"#454f00","#040c01":"#090f00","#234104":"#3e4d00","#215200":"#405b00","#180600":"#1b0001","#5f6359":"#71735d","#2b4612":"#4c6200","#060705":"#090a05","#3b560e":"#676f00","#293a07":"#464800","#031200":"#091400","#202020":"#242424","#122002":"#1f2600","#40620b":"#6e7900","#3c5b09":"#666f00","#193203":"#2d3b00","#1c3802":"#324000","#5d7f18":"#a3a800","#3f4539":"#4e5339","#090d07":"#0d1204","#7aa92c":"#daec00","#3b590a":"#656e00","#283907":"#444700","#0d100c":"#10140b","#264005":"#424d00","#476b0d":"#7a8500","#234005":"#3e4d00","#152e01":"#273400","#203a03":"#384400","#3a3f34":"#484c34","#577e17":"#98a500","#4b6e11":"#828d00","#2b4207":"#4a5100","#112200":"#1e2600","#030a00":"#090f00","#0f1a02":"#1a1f00","#43670c":"#738000","#3d5f0a":"#697500","#102601":"#1f2b00","#53564f":"#616354","#739e22":"#cbd500","#6a9026":"#beca00","#36530e":"#5f6c00","#1c2c03":"#2f3400","#020301":"#0c0f00","#2f4e07":"#515e00","#4a6d0e":"#7f8900","#0e1f01":"#1a2400","#567d15":"#96a200","#6f9424":"#c6cc00","#4b6917":"#858e00","#2b4404":"#495000","#030303":"#080808","#152603":"#252e00","#375809":"#5f6c00","#5b7b16":"#9ea100","#6f942b":"#c9d400","#375908":"#5f6c00","#233703":"#3b4000","#031000":"#091200","#0d1d01":"#182100","#112302":"#1f2900","#152902":"#263000","#020700":"#090f00","#405511":"#707100","#5a8b19":"#9eb600","#3b540d":"#666c00","#0c1c01":"#172000","#060f01":"#0c1200","#030800":"#0a0f00","#111702":"#1c1b00","#5c7916":"#9f9e00","#40600b":"#6e7700","#142801":"#242e00","#0b1a01":"#151e00","#020600":"#0a0f00","#385f0a":"#627500","#283a08":"#454900","#4f6f0e":"#878b00","#041d00":"#0e2000","#3f6217":"#708600","#4a8010":"#83a000","#1b1b1b":"#1e1e1e","#1e3a07":"#364800","#76a62e":"#d4eb00","#1e2f02":"#323600","#36540c":"#5e6b00","#497015":"#819400","#699022":"#bbc600","#6d9425":"#c3cd00","#709a26":"#c8d500","#80a52f":"#e8eb00","#5f8c1c":"#a7ba00","#32490f":"#586200","#40541f":"#727b05","#78a221":"#d3d800","#729227":"#cdcd00","#323d18":"#585806","#3c4230":"#52532b","#222f07":"#3a3c00","#598013":"#9aa300","#4f7211":"#899100","#43650f":"#748100","#568220":"#99b400","#162a02":"#273100","#435f14":"#768000","#7ea32e":"#e4e800","#7ca52e":"#e0ea00","#85a933":"#f3f400","#89b335":"#f7ff03","#75a628":"#d0e500","#45611a":"#7c8900","#50621c":"#8c8600","#608212":"#a4a400","#252d0e":"#413f00","#0b0b0a":"#0d0c0b","#162107":"#272c00","#33510a":"#596500","#567713":"#959900","#5a8117":"#9da900","#698f23":"#bbc600","#4b7215":"#849600","#395713":"#657600","#4c6b17":"#869000","#789d2b":"#d9de00","#85aa32":"#f2f400","#8cb037":"#fffe01","#87ab31":"#f4f300","#3e6108":"#6a7500","#2b4502":"#484f00","#152105":"#252a00","#283809":"#454800","#263606":"#404300","#0a0f03":"#121400","#2e4b0a":"#515e00","#2b4a06":"#4b5900","#46630e":"#787d00","#658b21":"#b4bf00","#4d7617":"#889d00","#283e0d":"#475300","#3d5712":"#6c7500","#59791d":"#9fa700","#7fa52e":"#e6ea00","#8ab034":"#fbfd00","#7b9e30":"#e1e500","#3b4b15":"#6b6a00","#364128":"#4e561f","#273909":"#444900","#0c0c0c":"#0d0d0d","#213507":"#3a4300","#315009":"#556300","#4b6b0f":"#818700","#486e0f":"#7d8b00","#5d821a":"#a4ad00","#476f15":"#7d9300","#21350a":"#3a4600","#496317":"#828700","#618320":"#adb500","#8aae32":"#f9f600","#88ae38":"#f9ff00","#314513":"#586200","#2d3122":"#3f3e1d","#1b2607":"#2f3200","#090a09":"#0a0c09","#395a0d":"#647200","#537913":"#909b00","#638717":"#acaf00","#5b7d1b":"#a1a900","#8bb12e":"#f8f500","#557915":"#949e00","#426814":"#758a00","#22370b":"#3c4900","#4c6819":"#878f00","#678b24":"#b9c200","#8daf32":"#faf300","#3b5015":"#6a7000","#222b15":"#373c0b","#0a0b07":"#0e0e06","#3d5e0c":"#6a7600","#6f971b":"#c1c600","#6a8f21":"#bcc300","#a3c43c":"#fff21d","#628721":"#afba00","#0f1d08":"#1a2900","#3e6213":"#6e8200","#24380c":"#404b00","#4b6619":"#868d00","#6a8a26":"#bfc300","#6f8f23":"#c6c500","#161d0d":"#242906","#71991c":"#c5c900","#5f801d":"#a8ae00","#81a02a":"#e0d800","#558513":"#94a900","#171f0f":"#242b08","#385810":"#637300","#324f11":"#596b00","#465f16":"#7c8200","#5f7e24":"#acb400","#323e13":"#5a5800","#0c0e0a":"#101209","#344b0d":"#5b6200","#6b931a":"#bac000","#67891b":"#b4b600","#5c7d1d":"#a3ab00","#6a9423":"#bdcb00","#181c15":"#1f2313","#2d490e":"#506100","#426617":"#758b00","#395011":"#656c00","#526e1d":"#939a00","#1b2210":"#2c3008","#090a08":"#0b0c08","#263508":"#414400","#5b7b18":"#9fa300","#68881a":"#b4b200","#52711a":"#929a00","#5f861a":"#a7b200","#2d302a":"#36392b","#22350d":"#3c4900","#446a18":"#799000","#2d430e":"#505a00","#4f681c":"#8e9300","#24291c":"#323518","#171b13":"#1f2211","#415213":"#706d00","#64861a":"#afb200","#4d6b1b":"#8a9500","#5e8916":"#a3b000","#11190a":"#1c2403","#3f6316":"#708600","#385812":"#637600","#3b5114":"#697000","#202417":"#2f2f12","#111111":"#131313","#3e4333":"#535330","#556f1a":"#979800","#486016":"#808300","#0c0f0a":"#101308","#334f12":"#5b6c00","#507a1a":"#8ea400","#1f2c0b":"#373d00","#1e2412":"#31320a","#262824":"#2d2f26","#30391b":"#50500d","#4f6d15":"#8a9000","#353a2f":"#43462e","#1b2a0a":"#303a00","#4e791b":"#8aa400","#24360f":"#404d00","#272923":"#303124","#1e2b07":"#343800","#354b0c":"#5c6100","#090d05":"#0f1301","#436717":"#778c00","#406617":"#728b00","#23281e":"#2e321c","#1c2114":"#292c0f","#172703":"#282f00","#5a791b":"#9fa400","#7aa12b":"#dce200","#141f08":"#242b00","#4a721b":"#849d00","#38452b":"#4f5b21","#162008":"#272c00","#3f5f0f":"#6e7a00","#7da42d":"#e2e800","#040602":"#0c0f00","#2f441a":"#506306","#182304":"#292b00","#7ba92a":"#dcea00","#050704":"#090c03","#0a0c07":"#0f1005","#517918":"#8fa100","#111e01":"#1d2200","#0d0d0e":"#0e0f10","#427003":"#708000","#5b9014":"#9fb600","#46710a":"#788900","#3b6709":"#677c00","#578f0f":"#97af00","#002900":"#0e2e00","#6c9f1d":"#bdd100","#447809":"#778f00","#4d800b":"#859a00","#0f1c00":"#1a1f00","#4c7a0b":"#839400","#133500":"#273b00","#487d0a":"#7e9600","#5e9617":"#a5c000","#284a02":"#465400","#264400":"#414b00","#4d7d10":"#879d00","#223015":"#374408","#152e00":"#273300","#477413":"#7d9600","#518514":"#8faa00","#30520b":"#556700","#081401":"#101700","#1c2f0b":"#324000","#396909":"#657f00","#263816":"#405106","#131f0c":"#1f2d03","#264e05":"#455c00","#112900":"#212e00","#351300":"#3b0300","#141414":"#161616","#4f3600":"#582200","#c69364":"#f87053","#775410":"#963600","#001e00":"#0a2100","#2f0f00":"#340100","#75b32a":"#d0f500","#28550b":"#4a6b00","#160700":"#180000","#1e1e1e":"#212121","#4a7f05":"#7f9300","#346900":"#5d7500","#2e5007":"#516100","#47790c":"#7c9400","#325d01":"#576800","#1b2e02":"#2e3500","#315403":"#546100","#070707":"#080808","#2f4f06":"#515e00","#3a5a0f":"#667500","#233b02":"#3c4400","#1c2c07":"#313900","#315306":"#556300","#34530a":"#5a6700","#1c3102":"#303900","#131410":"#181810","#2b4a03":"#4a5500","#345508":"#5a6700","#2b4805":"#4a5500","#0f1802":"#1a1d00","#292929":"#2e2e2e","#142203":"#232900","#315206":"#556200","#38580d":"#627000","#264003":"#414a00","#1b2311":"#2b3109","#708f3c":"#bfcd15","#64911c":"#b0c000","#0f1b01":"#1a1f00","#39590f":"#647300","#2b4806":"#4b5700","#192902":"#2a3000","#101a09":"#1b2601","#48650f":"#7c8100","#294403":"#464f00","#223d03":"#3b4700","#25350f":"#424b00","#172109":"#292f00","#0e110c":"#12160b","#121907":"#202400","#4d7b0f":"#869900","#234100":"#3c4800","#182b01":"#293100","#070d01":"#0c1000","#1e2e0a":"#353e00","#080d03":"#0e1200","#171d0a":"#2a2b01","#435c19":"#788200","#244103":"#3f4b00","#2d5002":"#4d5b00","#3a4f24":"#5e7010","#263f09":"#435000","#213806":"#3a4500","#1d2c0a":"#333c00","#030602":"#080f00","#0b1304":"#141a00","#101b05":"#1c2400","#1a2709":"#2e3500","#445e1a":"#7a8500","#6b9527":"#c0d100","#57811d":"#9aaf00","#58861e":"#9cb600","#60911f":"#aac300","#70a929":"#c7e900","#6c9e2a":"#c1de00","#3a5814":"#677800","#34560a":"#5b6b00","#30431e":"#4d5f0d","#0e1c08":"#182800","#141e0a":"#242c00","#101707":"#1d2100","#060903":"#0c0f00","#192309":"#2d3100","#3b5516":"#697700","#5f8221":"#aab500","#445e15":"#788000","#243906":"#3e4600","#213500":"#363b00","#172600":"#262a00","#323e0b":"#514c00","#44531d":"#7a7702","#4b6b20":"#879a00","#5b8c1f":"#a1be00","#669c27":"#b5d800","#2c410d":"#4e5700","#09080b":"#07070e","#4e6f27":"#8aa303","#476e0e":"#7b8a00","#537e18":"#92a700","#577e1b":"#9aaa00","#4c6a19":"#879100","#56781b":"#98a300","#52781a":"#91a200","#3a5b0f":"#667600","#294308":"#485300","#1a3500":"#2f3b00","#0f2b00":"#1f3000","#213d02":"#3a4600","#345108":"#596300","#3b580e":"#677100","#455d09":"#717000","#264100":"#404800","#153100":"#283600","#30410b":"#535400","#3f5715":"#707800","#6a9c2b":"#bddd00","#09060c":"#060311","#284206":"#455000","#243c02":"#3d4500","#304c07":"#525c00","#314e09":"#556100","#233a07":"#3d4800","#304c08":"#535d00","#214102":"#3b4a00","#1c3a00":"#324000","#2c4b07":"#4d5b00","#274706":"#455500","#314f06":"#545e00","#4a6c17":"#839100","#4c6f12":"#848f00","#516f14":"#8d9100","#4f6d19":"#8c9500","#415914":"#737900","#354913":"#5f6600","#1f3003":"#343900","#2c3d09":"#4c4e00","#628b29":"#b0c800","#5b8424":"#a3ba00","#0e1114":"#0c171a","#2d4e04":"#4e5b00","#4a7311":"#819300","#507e15":"#8da300","#49720e":"#7e8e00","#3a5f09":"#647300","#234400":"#3d4b00","#2b4701":"#485000","#436410":"#758100","#4c7115":"#869500","#5b7f1e":"#a2ae00","#557818":"#96a000","#416309":"#6f7800","#496615":"#818900","#5a7a26":"#a3b200","#597c23":"#a0b000","#537524":"#95aa00","#49691c":"#839400","#52721e":"#93a000","#527121":"#94a200","#233708":"#3d4600","#152802":"#252f00","#52791e":"#92a800","#5a8a21":"#a0be00","#273523":"#32451d","#35530b":"#5c6800","#5a8416":"#9dab00","#6c941d":"#bdc400","#88ae32":"#f7f900","#82a930":"#ebf100","#547619":"#949f00","#4a6c0d":"#7f8600","#5f861b":"#a7b300","#628821":"#afbc00","#6a8d22":"#bdc200","#577c17":"#98a300","#44650b":"#747c00","#618528":"#afc000","#5b8224":"#a3b800","#597e26":"#a0b600","#597a2a":"#a0b402","#5a7729":"#a3af02","#5e7c26":"#abb400","#35500c":"#5c6600","#274402":"#434e00","#5e9621":"#a7cb00","#416714":"#738900","#272e2b":"#27372c","#375811":"#617500","#1d2a03":"#303200","#334509":"#575700","#465d15":"#7c7f00","#5c7a1d":"#a4a800","#4c6e0b":"#808600","#52750c":"#8a8f00","#6a901c":"#babf00","#759c21":"#ced200","#6a901f":"#bbc200","#557c13":"#939f00","#3d5f08":"#687200","#52721d":"#939f00","#799e2e":"#dce200","#749829":"#d1d600","#628329":"#b2bf00","#5d7c2b":"#a8b703","#597726":"#a2ae00","#4f6e19":"#8c9600","#3a5509":"#636800","#274f05":"#475d00","#468413":"#7ea800","#2c4e07":"#4d5e00","#322f36":"#323040","#244300":"#3e4a00","#345015":"#5d7000","#3a571c":"#678000","#1c3900":"#323f00","#1c3001":"#303600","#1f3201":"#343900","#416108":"#6e7500","#6c901a":"#bcbd00","#7fa320":"#d8d300","#759d21":"#ced300","#658e1d":"#b2be00","#51790f":"#8b9700","#395a06":"#616b00","#628422":"#b0b800","#89b12b":"#f4f400","#759c25":"#d0d600","#638827":"#b2c200","#557323":"#9aa700","#4c6e16":"#869300","#355107":"#5a6200","#244102":"#3e4a00","#4a8e11":"#85b000","#193200":"#2c3800","#3c403f":"#404944","#264502":"#424f00","#254307":"#425200","#264311":"#435d00","#1b2c0f":"#2f4101","#040409":"#02050e","#53730e":"#8d8f00","#77981d":"#c9c300","#73971d":"#c8c700","#678d1d":"#b5bd00","#6c901f":"#bfc200","#477209":"#7a8900","#426614":"#758700","#81a32c":"#e6e200","#89b028":"#f0ed00","#749a28":"#d0d700","#6e922b":"#c7d200","#5c7d24":"#a6b300","#4c6e1c":"#889900","#486a15":"#7f8d00","#284202":"#434b00","#264d03":"#455900","#508217":"#8daa00","#132a01":"#233000","#373e38":"#3c4939","#1d3301":"#323a00","#344b07":"#585b00","#25300b":"#414100","#445a19":"#7b8000","#537318":"#929a00","#5b7d10":"#9b9d00","#3e600b":"#6b7700","#6d8f24":"#c3c700","#91b72d":"#fdf700","#84a929":"#e9e700","#7fa22b":"#e4e200","#6f9227":"#c8cd00","#56791b":"#98a400","#4c7019":"#879800","#3d600c":"#6a7800","#3e690c":"#6d8200","#35560b":"#5d6c00","#2f3427":"#3e4124","#222d18":"#333e0f","#253018":"#3a430d","#092e00":"#193300","#002e00":"#0f3300","#0e1d00":"#192000","#81af29":"#e5f000","#17290b":"#283a00","#607b2e":"#abb308","#465f20":"#7f8c01","#2b4411":"#4c5e00","#303b25":"#444e1d","#769b39":"#d2e209","#071a00":"#101d00","#2e5f00":"#536900","#293f13":"#495b00","#3e5c00":"#636600","#4a7811":"#829800","#3d7002":"#6a7f00","#224300":"#3c4a00","#070f12":"#021a19","#1f3500":"#343b00","#193502":"#2e3d00","#648620":"#b2b800","#3f5e12":"#6f7c00","#142107":"#242c00","#112306":"#1f2e00","#2f4214":"#555f00","#375508":"#5e6700","#5d752c":"#a6aa08","#496212":"#7f8100","#647d33":"#aeb410","#314d08":"#545e00","#7a982c":"#dad500","#70981d":"#c4c900","#427409":"#748b00","#3c6210":"#6a7f00","#020b00":"#070f00","#87aa1e":"#ded300","#153a00":"#2b4000","#4e7001":"#7d7d00","#578218":"#99ab00","#2c5602":"#4e6200","#142303":"#232a00","#0f2e00":"#203300","#274802":"#445200","#6d8f1d":"#bfbf00","#719438":"#c7d70b","#41700b":"#728900","#294e00":"#475700","#0f2c00":"#1f3100","#6a8821":"#bcba00","#43630b":"#727a00","#5f8824":"#aabf00","#426b0e":"#738600","#021400":"#091600","#133c03":"#294600","#668c20":"#b5bf00","#54771b":"#95a200","#48690d":"#7b8300","#082400":"#152800","#62782c":"#afae07","#161f11":"#202a0b","#324e04":"#545b00","#56771e":"#9aa500","#679123":"#b7c800","#222f17":"#35410c","#3f5e0e":"#6d7800","#80a42f":"#e8ea00","#517813":"#8d9a00","#5e7b17":"#a2a000","#141c0e":"#1e2708","#0f1f01":"#1b2400","#435f12":"#757d00","#669320":"#b5c700","#517917":"#8fa000","#183502":"#2d3d00","#304f08":"#536100","#678f1e":"#b6c000","#151219":"#121020","#0b0b0e":"#0b0d11","#122205":"#202b00","#202121":"#232525","#181e15":"#1f2612","#0c100a":"#101508","#1d3504":"#333f00","#264600":"#414e00","#5f841a":"#a7af00","#43670a":"#737d00","#25212a":"#232034","#2e3a21":"#444e17","#577f17":"#98a700","#78a436":"#daf200","#719933":"#cee200","#2f4e02":"#4f5900","#040900":"#0b0f00","#050901":"#0c0f00","#141612":"#191b12","#0d0e0d":"#0f100e","#0a090b":"#0a090d","#0a080b":"#0a070e","#1e261a":"#273116","#2d372d":"#33432c","#4c6f0f":"#838c00","#2e4e06":"#505d00","#424e30":"#616725","#273f09":"#445000","#5b891f":"#a1ba00","#64852a":"#b6c200","#3f5716":"#717900","#2f4510":"#535e00","#56861e":"#99b600","#86c236":"#e1ff14","#81b630":"#e7ff00","#689422":"#b9ca00","#426111":"#737f00","#182e01":"#2a3400","#182d04":"#2b3600","#273a0b":"#454d00","#3c5412":"#6a7100","#314a0c":"#565f00","#537c16":"#92a200","#6c9c2b":"#c1dd00","#47630f":"#7a7f00","#233e01":"#3c4600","#111d01":"#1d2100","#3a650b":"#667c00","#587e1d":"#9cac00","#3d5811":"#6b7500","#2e3c0a":"#4e4c00","#1c2d02":"#2f3400","#0e2201":"#1b2700","#192b00":"#2a3000","#3d5214":"#6d7100","#334b0f":"#5a6400","#466514":"#7b8600","#466812":"#7b8700","#4b7012":"#839000","#517614":"#8d9900","#426515":"#758700","#334c0c":"#596200","#264303":"#424e00","#48671e":"#819400","#345607":"#5a6700","#638426":"#b3bd00","#112300":"#1f2700","#699b27":"#bbd700","#486a14":"#7f8c00","#253507":"#3f4300","#1e3100":"#323600","#233a01":"#3b4100","#254701":"#415000","#233a04":"#3c4500","#1d3500":"#323b00","#2a4800":"#475000","#324e05":"#545c00","#223902":"#3a4100","#324f0d":"#586600","#2a4201":"#454a00","#344a09":"#595c00","#43680f":"#758400","#3c6407":"#677700","#496f16":"#819400","#385c06":"#606d00","#2f4e03":"#505a00","#4f7114":"#8a9400","#5e8c20":"#a7bf00","#48671d":"#819300","#1f2e02":"#333500","#213802":"#384000","#2f4c05":"#505a00","#2f4f05":"#515d00","#365809":"#5e6c00","#375d09":"#607100","#3e5815":"#6e7900","#284008":"#465000","#436c08":"#738100","#4e710f":"#868e00","#5b8019":"#a0aa00","#5b8119":"#a0ab00","#4c671d":"#899300","#506f20":"#909f00","#5a851b":"#9fb200","#557912":"#939a00","#496b0e":"#7e8600","#567f1e":"#99ae00","#41660d":"#718000","#416510":"#728200","#051400":"#0c1600","#7ab92e":"#d8ff01","#2d4e08":"#4f5f00","#1b2900":"#2c2e00","#2f4909":"#515b00","#40650f":"#708100","#426712":"#748600","#42690e":"#738400","#3c5613":"#6a7500","#3a4d1c":"#677104","#426803":"#6e7700","#598115":"#9ba700","#7a9e27":"#dadb00","#435913":"#767800","#517910":"#8c9800","#254004":"#404b00","#294802":"#465200","#131e02":"#202400","#274703":"#445200","#477110":"#7c8f00","#6da427":"#c2e100","#577d21":"#9caf00","#133200":"#263800","#2f460b":"#525a00","#4d7716":"#889d00","#517e17":"#8fa500","#4e7614":"#899900","#47710b":"#7a8a00","#3d5912":"#6c7700","#324217":"#5a6102","#527502":"#848400","#5a8115":"#9ca700","#709925":"#c8d300","#7a9f2b":"#dce000","#7b9e2e":"#e0e200","#6a812c":"#beb902","#071801":"#101c00","#496d0c":"#7d8600","#386105":"#617100","#547e15":"#93a300","#2d3927":"#3b4921","#3b5c0c":"#667300","#77aa2e":"#d5f000","#173800":"#2c3e00","#3a610c":"#667900","#517a14":"#8e9e00","#588115":"#99a700","#598514":"#9baa00","#4c7609":"#818d00","#4f780e":"#889500","#384819":"#666a02","#435d12":"#757b00","#587e0c":"#949900","#729624":"#cbce00","#75992e":"#d5dd00","#638223":"#b2b700","#5a761d":"#a1a300","#48631d":"#828e00","#426a09":"#718000","#476a0e":"#7a8500","#769728":"#d4d300","#456811":"#798600","#000701":"#020f00","#87be38":"#e5ff12","#557620":"#99a700","#143300":"#273900","#345a08":"#5b6d00","#4f7715":"#8b9b00","#5e871a":"#a5b300","#618b15":"#a8b200","#67901c":"#b5bf00","#5f8b16":"#a5b300","#293712":"#4b5100","#5d7e17":"#a2a500","#749b23":"#ced300","#749431":"#d6db00","#45591e":"#7e8401","#354419":"#5f6304","#2e3b19":"#4e5409","#0f1d00":"#1a2000","#1f2411":"#333108","#5a8213":"#9ba500","#43690e":"#758400","#62871c":"#adb500","#213406":"#394000","#3b5316":"#6a7500","#375012":"#626d00","#23320b":"#3e4400","#131d01":"#1f2100","#355a03":"#5a6700","#416d11":"#738c00","#416f0c":"#728900","#416f09":"#718500","#406e0b":"#708600","#457113":"#7a9300","#4f7823":"#8dac00","#52782b":"#8fb005","#3a630d":"#667c00","#3b6606":"#667800","#365f02":"#5d6c00","#182f09":"#2b3e00","#2f500b":"#536500","#28470a":"#475a00","#234807":"#405800","#182606":"#2a3100","#405b19":"#738100","#324711":"#596200","#161f08":"#272b00","#345a01":"#586500","#48641f":"#829100","#3d640a":"#6a7a00","#447508":"#768b00","#558216":"#95a900","#5a851d":"#9fb400","#508117":"#8da900","#4d8315":"#89a900","#3d690e":"#6c8400","#466c1c":"#7d9700","#3d6118":"#6c8600","#345b04":"#5a6900","#3b6203":"#647000","#2f4f08":"#526100","#070806":"#090a06","#030901":"#080f00","#455d1e":"#7d8900","#4e6c20":"#8d9b00","#192206":"#2b2c00","#3d5d0e":"#6a7700","#414f1d":"#737104","#406005":"#6a7000","#4e7310":"#879100","#699025":"#bcc900","#658f26":"#b5c900","#628b24":"#afc200","#548218":"#94ab00","#426a15":"#758d00","#496d24":"#82a100","#27410c":"#455500","#355c03":"#5b6900","#274501":"#434e00","#61842e":"#aec203","#1e2b0a":"#353b00","#243b00":"#3c4100","#32421b":"#555f08","#2b3c00":"#434100","#3d4902":"#534800","#506f11":"#8a8e00","#5e7f1d":"#a7ad00","#6e9126":"#c6cb00","#769a2d":"#d6dd00","#6d8c29":"#c6c900","#648f23":"#b2c600","#416e0c":"#728700","#395a15":"#657b00","#1b2c0a":"#303c00","#223a02":"#3a4300","#2e4012":"#535b00","#091900":"#121c00","#161d03":"#242200","#303b02":"#443c00","#4d660a":"#7c7900","#5c7c1b":"#a3a800","#688c24":"#bac300","#75922c":"#d3d000","#718a28":"#c6bd00","#698e26":"#bdc800","#497612":"#809700","#294708":"#485800","#131a0c":"#1e2506","#080f04":"#0e1500","#0c1204":"#151800","#24271f":"#2e301e","#13180a":"#212203","#212e02":"#353500","#364503":"#504a00","#506b15":"#8c8e00","#628621":"#afb900","#668221":"#b5b300","#708927":"#c3bb00","#3e6410":"#6d8100","#152505":"#252f00","#090b08":"#0b0e07","#0b1005":"#141700","#1c2704":"#2f3000","#2d3c01":"#444100","#43590b":"#6f6d00","#32520a":"#576600","#121510":"#171a0f","#1c2117":"#262a14","#0f1405":"#1b1c00","#283b02":"#414400","#385403":"#5c6100","#416308":"#6e7700","#324b03":"#525700","#253d03":"#3f4700","#020300":"#0f0f00","#0e0200":"#100002","#181601":"#1c1100","#364d02":"#575800","#374b02":"#555300","#334b01":"#525400","#2a4901":"#475200","#0d100b":"#111509","#15190f":"#1f210b","#0f1605":"#1b1e00","#0b0f03":"#131400","#2a2f21":"#3a3c1d","#100604":"#160003","#9f5613":"#c62300","#070b03":"#0c1000","#253101":"#383500","#314300":"#4a4800","#354c02":"#565700","#3f6207":"#6b7500","#3b5a07":"#646c00","#2b4306":"#495100","#172204":"#272a00","#294604":"#475200","#233706":"#3c4400","#162105":"#262a00","#141904":"#201e00","#84653b":"#bb4619","#20150e":"#2e0906","#394e01":"#585500","#385402":"#5c5f00","#3b5603":"#606300","#406007":"#6c7200","#416509":"#6f7a00","#466d0c":"#798600","#466c0e":"#798700","#43660c":"#737f00","#3c5b07":"#656d00","#2b4903":"#4a5400","#375b07":"#5f6d00","#588314":"#99a800","#4d7213":"#869400","#3a5013":"#676e00","#5f482c":"#863115","#1d2c02":"#303300","#2e4203":"#4b4d00","#344903":"#545400","#364d04":"#595a00","#374f03":"#5a5b00","#425910":"#737500","#485e19":"#828400","#3d5a06":"#666b00","#3a5905":"#616800","#386302":"#607000","#223a04":"#3b4500","#305105":"#535f00","#4c7510":"#849400","#415f13":"#737f00","#354b11":"#5e6600","#483925":"#632b16","#a35a13":"#ca2700","#181e01":"#221f00","#273002":"#383200","#2c3602":"#3e3700","#2e3904":"#443d00","#313c07":"#4a4300","#2a3702":"#3f3c00","#283802":"#404000","#274106":"#444f00","#101c03":"#1c2200","#1e3204":"#343c00","#243c05":"#3e4800","#233507":"#3d4300","#120f08":"#1a0c03","#523814":"#712000","#090f01":"#0f1200","#091001":"#101300","#161c0a":"#282901","#242816":"#36330e","#0b0e00":"#100e00","#110700":"#130200","#13180b":"#1f2205","#1f2317":"#2d2e13","#2a331f":"#3d4417","#0e1602":"#181b00","#040b01":"#090f00","#0a0a0a":"#0b0b0b","#3c1c0b":"#4f0400","#2e4301":"#4a4b00","#2a4400":"#454b00","#375d01":"#5d6800","#214700":"#3c4f00","#365905":"#5c6800","#4c691a":"#889100","#314f03":"#525b00","#304508":"#525500","#386501":"#607100","#325507":"#576600","#34510c":"#5b6700","#38510c":"#616700","#284503":"#455000","#1f3303":"#353c00","#253b00":"#3d4100","#293d0a":"#484f00","#162802":"#272f00","#142701":"#242c00","#1a2904":"#2d3200","#224602":"#3e5000","#2b4305":"#495000","#29380b":"#484a00","#132900":"#232e00","#132001":"#202500","#263809":"#424800","#1d3600":"#323c00","#234600":"#3e4e00","#2e5505":"#516400","#2d4f03":"#4e5b00","#2e4502":"#4b4f00","#1f2808":"#353400","#213001":"#353600","#314b02":"#515500","#607f30":"#a9b909","#233900":"#3a3f00","#2f4f01":"#4f5900","#325302":"#545e00","#305200":"#515b00","#38530b":"#616800","#273c01":"#404400","#171f06":"#282900","#182600":"#272a00","#3c580a":"#666d00","#304806":"#515700","#172500":"#262900","#364f0f":"#5f6800","#668237":"#aeba13","#0c0f0b":"#0f130a","#1d3300":"#313900","#243300":"#393800","#233500":"#383b00","#293b00":"#414100","#2e3d11":"#535700","#0f1600":"#181800","#232c03":"#343000","#476111":"#7b7f00","#55701a":"#979900","#2d3706":"#443d00","#212e04":"#373800","#58781f":"#9ea800","#52682e":"#899413","#0c0f0c":"#0e120c","#091101":"#101400","#182901":"#292f00","#233800":"#393e00","#2b4501":"#474e00","#243603":"#3c3f00","#161f04":"#262700","#435614":"#767400","#53661e":"#938d00","#3f490f":"#625500","#364406":"#524c00","#273306":"#3f3d00","#6e8c2f":"#cacf01","#415424":"#6e780d","#0b1204":"#141800","#112001":"#1e2500","#243f01":"#3d4700","#182608":"#2b3300","#344511":"#5d5f00","#2f3d08":"#4d4a00","#516514":"#867f00","#525d14":"#7d6b00","#293909":"#474900","#709534":"#cadb04","#2b3a14":"#4d5501","#0e1606":"#191f00","#1a3100":"#2d3600","#1a3000":"#2d3500","#0a1304":"#121a00","#36470c":"#5c5b00","#587014":"#938d00","#748625":"#bea800","#2f3803":"#413900","#709433":"#cbda03","#0f160b":"#161f06","#172a01":"#283000","#040800":"#0c0f00","#566e14":"#908b00","#5f7215":"#968800","#394201":"#4a3e00","#2a3f09":"#495000","#1d2f00":"#303400","#66872c":"#bac700","#202e0e":"#394300","#0f1b03":"#1b2100","#152903":"#263100","#314b0b":"#555f00","#4e6f13":"#889000","#3e5204":"#5f5b00","#344b0e":"#5b6300","#53721f":"#95a100","#536d1c":"#959800","#1a2900":"#2b2e00","#597623":"#a1aa00","#22320c":"#3c4500","#17260a":"#293500","#415f05":"#6b6f00","#435e10":"#747a00","#4f6e1b":"#8d9800","#5c7e28":"#a7b800","#69892a":"#bfc700","#334305":"#504d00","#1c2601":"#2b2a00","#466619":"#7d8d00","#3c521b":"#6d7900","#405b18":"#738000","#668927":"#b8c300","#5e8224":"#a9b800","#6f9732":"#cadf00","#6e982b":"#c6d800","#628720":"#aeb900","#495915":"#7a7200","#1f1900":"#221100","#2f3e04":"#494600","#4f771f":"#8da700","#334d16":"#5b6e00","#47621f":"#808f00","#7ba23b":"#dbed08","#77a43a":"#d4f106","#648f1c":"#b0be00","#658d1d":"#b2bd00","#49601b":"#848900","#2f2703":"#381d00","#2e2e02":"#352500","#3a500b":"#636500","#5f8c2c":"#aacc00","#021900":"#0b1c00","#567325":"#9da900","#679021":"#b7c400","#6a951d":"#bac600","#5a8314":"#9ca800","#4c651e":"#8a9100","#36360e":"#4b3500","#46410e":"#5d3900","#2f3c06":"#494500","#364b0e":"#5e6300","#608b2d":"#accc00","#010b00":"#060f00","#63891f":"#b0ba00","#5e840f":"#9fa300","#5a7a20":"#a1ab00","#3f511c":"#737702","#383e0c":"#524300","#545517":"#785600","#4b5a13":"#796e00","#3e5714":"#6e7700","#567c26":"#9ab400","#05150a":"#001d00","#385605":"#5e6500","#4f681d":"#8f9400","#364313":"#5f5d00","#373e06":"#4b3e00","#555f17":"#836e00","#5c7123":"#a49f00","#3a510b":"#636600","#263507":"#414300","#617e25":"#b0b500","#3e6216":"#6e8500","#1b2d1f":"#173c14","#051500":"#0d1700","#405914":"#717900","#394e0c":"#626400","#334801":"#515100","#425808":"#6b6800","#5e7321":"#a49d00","#64822b":"#b7c000","#4f6f14":"#8a9100","#334709":"#575900","#324212":"#5a5d00","#769c34":"#d8e700","#1b3a01":"#324100","#2e4f00":"#4d5800","#43690d":"#748300","#537521":"#95a700","#638327":"#b4bd00","#6d9033":"#c4d305","#668a33":"#b3c908","#618420":"#adb600","#48610d":"#7a7a00","#253306":"#3f3f00","#4e691d":"#8d9500","#7ea93a":"#e4f903","#031900":"#0c1c00","#4e681e":"#8d9500","#6d912e":"#c7d400","#6e9336":"#c3d708","#87ab44":"#e4ee1b","#8baf41":"#eff516","#799c41":"#cfe016","#6f9035":"#c6d208","#62841b":"#acb000","#3e5108":"#635f00","#203101":"#343800","#679124":"#b8c900","#739c33":"#d1e600","#142705":"#243100","#293032":"#293c3b","#54701a":"#959900","#a4c63d":"#fff320","#99bb3f":"#fef817","#99bd47":"#f8f928","#89ad48":"#dfea26","#7c973f":"#d7d815","#718d2d":"#cecd00","#526b0e":"#868200","#1f2901":"#2f2c00","#4a6f15":"#829300","#7aa731":"#dcf000","#25242a":"#252632","#90af2d":"#f4e500","#abcd35":"#ffee1f","#8cb32b":"#f6f300","#84ac40":"#e5f411","#789641":"#ccd619","#748f2f":"#d3cf00","#5c7614":"#999400","#2f3a03":"#443d00","#7aa73a":"#dbf604","#517523":"#91a900","#101f0c":"#182d03","#0f0c12":"#0d0a17","#77892d":"#cab500","#a9c83a":"#ffed1f","#779d31":"#d9e500","#77973d":"#ceda12","#6b9029":"#c1cd00","#5a7f13":"#9ba200","#445c06":"#6d6b00","#5a7c1b":"#9fa800","#577821":"#9caa00","#0b0d06":"#121203","#263b01":"#3e4300","#a7c347":"#ffef28","#9bbe3a":"#fff714","#7da337":"#e4f101","#729932":"#d0e100","#6e9424":"#c4cc00","#648c19":"#aeb700","#486409":"#787900","#192800":"#292c00","#3e5516":"#6f7700","#62862b":"#b2c400","#090909":"#0a0a0a","#050d00":"#0a0f00","#131708":"#222101","#b2cb5f":"#fff34c","#729e36":"#cde902","#648f24":"#b2c700","#6c9522":"#c0cb00","#618a1b":"#aab700","#425508":"#676200","#1a2200":"#262300","#30450f":"#555d00","#729831":"#d0df00","#050504":"#090806","#030401":"#0f0f00","#020c01":"#060f00","#324616":"#5a6600","#a3c250":"#fcf635","#84a934":"#f1f500","#5a8417":"#9dac00","#66921f":"#b4c400","#719c21":"#c7d200","#5d7412":"#958b00","#323906":"#463b00","#090f02":"#101300","#455f1c":"#7d8900","#5d8624":"#a6bd00","#112b01":"#213100","#041c01":"#0d2000","#0c1d01":"#172100","#061101":"#0c1400","#2a4108":"#495100","#597925":"#a1af00","#85ab47":"#daea23","#659020":"#b3c300","#5b7b0f":"#999900","#5c7014":"#938600","#536209":"#776700","#333c02":"#453b00","#1a2101":"#262300","#273807":"#434600","#719a3b":"#c4e00d","#527d1f":"#92ad00","#0b1c05":"#152500","#0d2501":"#1b2a00","#274d04":"#465a00","#3c5f0c":"#687700","#294501":"#454e00","#173001":"#2a3600","#182a02":"#2a3100","#142501":"#232a00","#405f12":"#717d00","#6a9833":"#bee101","#548520":"#95b700","#0d1a0d":"#102407","#060b07":"#050f04","#0e1c0c":"#142804","#335304":"#566100","#436314":"#768400","#496e1a":"#829700","#4f761e":"#8da400","#588521":"#9db800","#406c14":"#728e00","#193900":"#2f3f00","#3a482e":"#515e25","#0b0e0e":"#0b110f","#101413":"#101814","#0b100c":"#0b1509","#040e05":"#041400","#0c1305":"#151b00","#010500":"#080f00","#1d2a0a":"#343a00","#121d06":"#202700","#303e18":"#545a06","#253111":"#434801","#1b2b13":"#2a3d08","#131705":"#1f1d00","#0e1604":"#191d00","#0d2002":"#192600","#769a42":"#c6dc18","#1c3404":"#323e00","#3e6507":"#6a7800","#417504":"#718600","#1b3001":"#2e3600","#263613":"#434f02","#395019":"#677500","#3d5711":"#6b7300","#0a1c0a":"#0d2901","#0f1d01":"#1b2100","#729936":"#cce105","#334d0d":"#596400","#102c00":"#203100","#51722e":"#88a40d","#0e0f0e":"#10110f","#222422":"#262925","#2c4110":"#4e5a00","#2f4511":"#545f00","#071700":"#0f1a00","#8aa924":"#e4d400","#a0bf44":"#fdf223","#071803":"#0f1e00","#182607":"#2a3200","#2d4909":"#4f5b00","#315c00":"#556600","#21360a":"#3a4700","#557320":"#99a300","#a7ca2d":"#ffed13","#b3d33c":"#ffed2e","#4c6a2d":"#7e9810","#9cc04f":"#f6f933","#1b2e03":"#2f3600","#213007":"#393d00","#131f06":"#222900","#42710b":"#748a00","#386800":"#617300","#55761f":"#98a500","#4a6529":"#7d910c","#b5d23a":"#ffe82a","#648826":"#b4c100","#325305":"#566200","#304704":"#505300","#151e04":"#242600","#101905":"#1c2100","#1e3903":"#354300","#335b03":"#586800","#0b2203":"#172900","#547a2a":"#95b402","#a4c82e":"#ffef12","#4b6915":"#848c00","#8cad2e":"#f3e900","#b4d340":"#ffed32","#567d2b":"#98b802","#789c30":"#dbe200","#324907":"#545900","#263902":"#3f4100","#111704":"#1d1e00","#1a3003":"#2e3900","#508408":"#899b00","#193002":"#2c3800","#2d4b13":"#506800","#486c21":"#809d00","#9bbe35":"#fff40f","#90b23a":"#fffb07","#597c2c":"#9eb604","#b0ce37":"#ffe923","#b9d949":"#fff043","#7ea746":"#d0e91e","#acd040":"#fff52f","#314a07":"#535a00","#2d4504":"#4b5100","#243705":"#3d4300","#0f1604":"#1a1d00","#121d05":"#202600","#213708":"#3a4600","#446619":"#798d00","#183600":"#2d3c00","#314e13":"#576c00","#122801":"#212e00","#2a4f0b":"#4c6400","#558127":"#97ba00","#a7ca36":"#fff11d","#5a7f21":"#a1b200","#325506":"#576500","#325604":"#566400","#385906":"#5f6900","#293f03":"#444900","#142104":"#232900","#142302":"#232900","#2a4903":"#485400","#345503":"#586200","#1a2602":"#2b2c00","#2c4b03":"#4b5700","#355203":"#585e00","#304b04":"#515800","#1b2f03":"#2f3800","#233c02":"#3c4500","#315304":"#546100","#436005":"#6e7000","#3f5c06":"#696d00","#355204":"#595f00","#223f02":"#3b4800","#060a01":"#0d0f00","#152108":"#252e00","#3a5306":"#606300","#3a5505":"#606400","#4d6a09":"#808000","#4d6908":"#7d7c00","#446107":"#717300","#335403":"#566100","#2e5400":"#4f5d00","#162f03":"#293800","#101d05":"#1d2600","#0a1003":"#121500","#101e06":"#1d2800","#262600":"#2a1e00","#446108":"#727500","#36520d":"#5e6900","#516c1d":"#929800","#445e0f":"#757900","#365104":"#5a5e00","#304c03":"#505800","#224500":"#3d4d00","#2d5800":"#4f6200","#2e5600":"#505f00","#244d01":"#425700","#264c00":"#435400","#162b02":"#273200","#365c0c":"#5f7300","#345b0d":"#5c7300","#274b08":"#465c00","#455e1e":"#7d8a00","#29380e":"#494e00","#2f5002":"#505b00","#264d00":"#445500","#2d5802":"#506400","#3a620e":"#667c00","#406a10":"#718700","#3f6a0f":"#6f8600","#3f6910":"#6f8600","#345e05":"#5b6e00","#345f05":"#5b6f00","#112a02":"#213100","#355a0d":"#5e7200","#38600e":"#637a00","#305b07":"#566d00","#282828":"#2c2c2c","#151615":"#171917","#222322":"#262725","#0d0d0d":"#0e0e0e","#2d2e2d":"#323431","#212820":"#27311f","#1a250c":"#2f3600","#35481c":"#5b6807","#4a6525":"#829406","#496423":"#829303","#4f652b":"#869010","#2d4315":"#506200","#1f310c":"#374400","#151f09":"#262c00","#040703":"#080e02","#10130f":"#13170e","#222921":"#283220","#233610":"#3e4e00","#344f17":"#5d7100","#2a3c11":"#4b5500","#22340e":"#3d4900","#2b3e12":"#4d5900","#45592a":"#707d15","#5f8132":"#a4bb0c","#5c7d2b":"#a6b802","#5b7e29":"#a5b900","#3d581e":"#6d8201","#111f09":"#1d2c00","#1c231a":"#222c18","#222920":"#29331f","#29272b":"#2b2932","#071601":"#0f1a00","#2c4b08":"#4d5c00","#273a09":"#444a00","#253609":"#404600","#1c2908":"#313600","#141e06":"#232800","#2f4316":"#556300","#4e6c21":"#8d9d00","#65892e":"#b7cb01","#3d561f":"#6b7e04","#0c1a07":"#152500","#010a00":"#060f00","#3a660c":"#677f00","#557c10":"#929b00","#45660b":"#767d00","#293d0b":"#485000","#1f2e0a":"#373e00","#293a11":"#4a5300","#63862e":"#b2c602","#3c561e":"#6a7f02","#0c1709":"#122102","#447413":"#799600","#7fa632":"#e7f000","#67841f":"#b5b300","#516b0d":"#858200","#3e560d":"#6b6e00","#2d420c":"#4f5700","#1e2c09":"#353b00","#182107":"#2a2c00","#516d2b":"#8b9e0b","#2d4c0a":"#4f5f00","#0a1300":"#111500","#719f28":"#cadd00","#7fa430":"#e7eb00","#71922f":"#cfd600","#6a822d":"#bfbc03","#5a7121":"#a2a000","#3c5210":"#696d00","#23330a":"#3e4400","#192507":"#2c3100","#4b6228":"#818d0c","#35530a":"#5c6700","#0f2f00":"#203400","#5d8d17":"#a3b600","#5a7f20":"#a1b000","#65872f":"#b6c703","#648828":"#b5c300","#668528":"#bac000","#496117":"#828500","#3b4f12":"#696c00","#24320c":"#404500","#2a3a13":"#4c5500","#1a2610":"#2a3606","#2f4b0b":"#525f00","#5d7632":"#9fa912","#5a7f1f":"#a0af00","#567b1b":"#98a700","#577d1b":"#9aa900","#678530":"#b9c306","#536d1f":"#969b00","#324311":"#5a5d00","#121a05":"#202200","#0d0f0e":"#0d120e","#2c4211":"#4e5c00","#587131":"#94a113","#456316":"#7a8600","#4e6c1f":"#8c9a00","#4f701a":"#8c9900","#547b19":"#94a400","#5b7c24":"#a4b200","#445a1b":"#7b8200","#29370e":"#494d00","#202b0a":"#393b00","#474747":"#4f4f4f","#242d14":"#3c4008","#93ad53":"#dedc3e","#7f973b":"#dbd30e","#557026":"#9ba501","#3b5512":"#687200","#3b5217":"#6a7500","#445f16":"#798200","#384e16":"#656f00","#3f521e":"#707804","#54702a":"#94a308","#577227":"#9ea802","#425a17":"#767d00","#676767":"#727272","#4b4b4b":"#535353","#24330b":"#404500","#b5d861":"#fffe5c","#9bba4a":"#f3ef2d","#83a336":"#f1ef00","#4c6d14":"#858f00","#426114":"#758200","#395112":"#656e00","#2b3c0f":"#4d5300","#0d1304":"#171a00","#020201":"#0d0a03","#1b2509":"#303300","#050506":"#060709","#3d4c19":"#706f00","#96ba3e":"#fffd14","#659019":"#b0bc00","#649017":"#aeb900","#649016":"#adb800","#436112":"#758000","#425f17":"#768300","#3f5916":"#707b00","#172a04":"#293300","#263b0e":"#445100","#0a0b08":"#0e0e07","#1d2d04":"#313600","#578113":"#97a400","#53731f":"#95a200","#4a6916":"#838d00","#5c7f22":"#a5b300","#5e8222":"#a8b600","#52731d":"#92a000","#4b691b":"#869300","#4a681b":"#849100","#233b0a":"#3e4d00","#161814":"#1b1d14","#152c03":"#273400","#486618":"#808c00","#4a611e":"#878d00","#3f5914":"#707900","#4d6d1b":"#899700","#4f6e1f":"#8e9d00","#51682a":"#8c960c","#486024":"#7f8c07","#3c5614":"#6b7600","#547617":"#939d00","#4a6615":"#828900","#283909":"#454900","#172208":"#292f00","#2d371e":"#454b13","#162505":"#272f00","#1f3405":"#363f00","#3b5614":"#697600","#3a5312":"#677000","#56761f":"#9aa500","#4e6d15":"#899000","#30430b":"#535700","#0f1904":"#1b2000","#172806":"#293300","#3f6e05":"#6d8000","#0d1502":"#161a00","#0d1402":"#161800","#1e3302":"#333b00","#113002":"#233800","#375c07":"#5f6e00","#52721c":"#929e00","#34490c":"#5a5e00","#29370f":"#4a4e00","#0e1a05":"#192200","#0e1906":"#192200","#222b0a":"#3b3900","#2b3f0d":"#4c5400","#253f05":"#404b00","#2e4306":"#4d5100","#161f05":"#262800","#162203":"#252900","#304017":"#565e03","#070900":"#0f0e00","#1e2c05":"#333600","#3e5315":"#6f7300","#263704":"#3f4100","#131e04":"#212600","#060800":"#0f0f00","#2b4103":"#474b00","#34490f":"#5c6200","#304805":"#505500","#273905":"#424500","#121c03":"#1f2200","#233302":"#393b00","#2f4702":"#4d5100","#34490d":"#5b5f00","#314706":"#525500","#1e2219":"#282b17","#15180e":"#20200a","#1b1d1a":"#1f221b","#1a2507":"#2e3100","#283b05":"#434700","#304707":"#515700","#314904":"#515500","#172b06":"#293600","#2f4f0d":"#536600","#537e17":"#92a500","#4b7315":"#849700","#1b2a07":"#2f3600","#030501":"#0c0f00","#10110d":"#15150c","#2c361a":"#484b0d","#1b2606":"#2f3100","#161e05":"#262700","#121904":"#1f2000","#2e3323":"#41411e","#202120":"#242523","#232c15":"#393e0b","#374d12":"#626900","#39500c":"#626600","#1e261e":"#222f1d","#0e1309":"#161b04","#324c0e":"#586400","#629519":"#acc100","#5b8e11":"#9db000","#161712":"#1c1b11","#050701":"#0f0f00","#415a10":"#717600","#587618":"#9b9e00","#5a7819":"#9ea100","#4b6812":"#828700","#527115":"#8f9500","#4f6a16":"#8b8e00","#28330d":"#474600","#2d3a12":"#525400","#273106":"#3d3900","#0b0f02":"#131300","#0d1501":"#161800","#233505":"#3c4000","#25390a":"#414a00","#64971c":"#b0c700","#345908":"#5b6c00","#020502":"#050e01","#111903":"#1d1f00","#60801b":"#a9ac00","#66851d":"#b4b300","#527116":"#909600","#739124":"#c9c400","#597f1c":"#9eac00","#4e6e16":"#899300","#466412":"#7a8300","#3d5a0e":"#6a7300","#31470a":"#545a00","#3b560c":"#666d00","#253804":"#3e4300","#1c3702":"#323f00","#090e01":"#0f1100","#2b4809":"#4b5a00","#040f00":"#091100","#354f0b":"#5c6400","#446210":"#767f00","#456a10":"#788700","#4d7215":"#879600","#3e5b0f":"#6c7600","#3e5e0a":"#6a7300","#3f5909":"#6a6d00","#2f5003":"#505c00","#37550e":"#606e00","#141e02":"#212400","#233506":"#3c4100","#324d06":"#555c00","#3a5c07":"#636e00","#365404":"#5a6200","#021401":"#081700","#4d7515":"#879900","#44700c":"#768a00","#1d2d01":"#303300","#34352d":"#3f3c2e","#0e1300":"#151400","#233902":"#3b4100","#5a7a11":"#9a9a00","#486509":"#787a00","#466507":"#747800","#294806":"#485700","#3b680a":"#687f00","#233d05":"#3d4900","#2a3f03":"#464900","#4b7115":"#849500","#2a4b02":"#485500","#162701":"#262c00","#354c00":"#545400","#426e05":"#708000","#537523":"#95a900","#2f5405":"#526300","#1a3300":"#2e3900","#050f01":"#0a1200","#171f01":"#242200","#0a0f04":"#121500","#2a3b00":"#414100","#151a06":"#242200","#21290b":"#3a3800","#415317":"#767600","#708e29":"#cbcb00","#6d8f2b":"#c6ce00","#567b22":"#9aae00","#446312":"#778200","#1b2e01":"#2e3400","#365210":"#5f6d00","#598222":"#9fb600","#1d201a":"#24271a","#284b03":"#465700","#0d1800":"#161b00","#2c3024":"#3b3c21","#0f1306":"#1c1c00","#1b210b":"#313000","#627b25":"#b2b000","#638728":"#b3c200","#52741d":"#92a100","#2b4407":"#4a5300","#273a0a":"#444b00","#5f8c22":"#a9c100","#20241e":"#262b1e","#162900":"#262e00","#1f211c":"#26271c","#020002":"#0b000f","#2a2929":"#2f2d2e","#0d1301":"#151600","#0b0d05":"#131201","#4b631e":"#888f00","#5e7d22":"#a9b000","#425e12":"#747c00","#1d2a06":"#323500","#608c21":"#abc000","#212719":"#2f3314","#294704":"#475300","#091201":"#101500","#483022":"#651611","#281b10":"#3a0d04","#b98659":"#ec6144","#030100":"#0f0100","#20270c":"#393600","#131a09":"#222601","#425718":"#777b00","#182505":"#2a2f00","#5d8a20":"#a5bd00","#252f17":"#3b410c","#32510c":"#586700","#1d3503":"#333e00","#1d290e":"#343c01","#231d23":"#261d2a","#040200":"#0f0300","#190208":"#1e0011","#1d250c":"#353600","#1f290c":"#383b00","#496518":"#828b00","#172105":"#282a00","#5b851f":"#a2b600","#293619":"#424c0c","#507122":"#90a300","#274404":"#445000","#1f3803":"#364100","#171e0f":"#242a08","#070d00":"#0d0f00","#94704c":"#cc4c2c","#19210a":"#2d3000","#354712":"#5f6300","#101b03":"#1c2100","#567d1d":"#99ab00","#293519":"#424a0c","#264402":"#424e00","#274605":"#455300","#1c3503":"#323e00","#0a1301":"#121600","#13190b":"#202404","#172902":"#283000","#1a3c01":"#314400","#1d270c":"#353900","#1e2d09":"#353c00","#53781d":"#94a500","#1d2810":"#313a04","#294b04":"#485800","#172c02":"#293300","#192d02":"#2c3400","#274702":"#445100","#355d18":"#5e8200","#1b0700":"#1e0001","#121c07":"#202700","#4a701c":"#849b00","#1c2112":"#2c2d0c","#294a06":"#485900","#254204":"#414e00","#1f3207":"#363f00","#3b5a0d":"#677200","#596448":"#797f40","#151515":"#171717","#0f1901":"#191d00","#4f6e21":"#8e9f00","#21231e":"#292a1f","#223f03":"#3c4900","#305306":"#546300","#122301":"#202800","#2e3f1c":"#4b590c","#5a7a16":"#9da000","#1e3107":"#353e00","#080d01":"#0e1000","#57712a":"#9aa507","#212121":"#252525","#487010":"#7e8e00","#749b25":"#cfd500","#678d20":"#b7c000","#4c7512":"#859600","#41650f":"#718100","#3a5912":"#677700","#2d4b08":"#4f5c00","#355908":"#5c6c00","#1e3604":"#354000","#081500":"#101700","#6b8043":"#aab029","#171a16":"#1b1f16","#040d01":"#091000","#4c5a33":"#747a23","#212221":"#252624","#395c09":"#627000","#4b6a14":"#838c00","#4a6e15":"#829100","#3b5b11":"#687800","#2c460b":"#4d5a00","#101f02":"#1d2500","#304b12":"#556700","#395c0f":"#647700","#324c07":"#555c00","#213700":"#373d00","#060d02":"#0b1100","#191f13":"#24290e","#324f06":"#555e00","#456412":"#798300","#34520d":"#5b6900","#33500f":"#5a6900","#284009":"#465100","#192a05":"#2c3400","#182706":"#2a3200","#21370b":"#3b4900","#355a09":"#5d6e00","#32530c":"#586900","#223f06":"#3d4d00","#192c00":"#2a3100","#101010":"#121212","#151d0c":"#232a04","#3b5d0d":"#677600","#3b5110":"#686c00","#192f03":"#2c3800","#060a02":"#0c0f00","#0f130a":"#171a06","#0d1407":"#171d01","#2e5008":"#516200","#375e08":"#607100","#233b00":"#3a4100","#0d2700":"#1b2b00","#141c0f":"#1d2609","#47700e":"#7b8c00","#395010":"#646b00","#172a00":"#282f00","#0b1901":"#151d00","#11140e":"#171a0c","#182907":"#2b3500","#385b0a":"#617000","#191919":"#1c1c1c","#5d7d28":"#a9b700","#3b521b":"#6b7900","#2c3f12":"#4f5a00","#0f1a0e":"#132409","#192d05":"#2c3800","#081900":"#111c00","#0c1a00":"#161d00","#42660b":"#717d00","#3a590b":"#646f00","#314809":"#545a00","#080c06":"#0c1103","#597e19":"#9ca800","#527614":"#8f9900","#3d5a0a":"#686f00","#060b04":"#0a1001","#759c29":"#d2db00","#527417":"#909a00","#2d4708":"#4e5800","#060d01":"#0b1000","#0b1007":"#121703","#131e06":"#222800","#648a1e":"#b1ba00","#6b9126":"#c0cb00","#466515":"#7c8700","#233802":"#3b4000","#070d02":"#0d1100","#161a12":"#1e2110","#47650d":"#797f00","#688c26":"#bbc600","#476a0f":"#7b8600","#1e2e03":"#323600","#080a05":"#0d0e03","#151c0e":"#212708","#4b6a13":"#838b00","#59821a":"#9dad00","#547c15":"#93a100","#0a1c01":"#142000","#1d1f1d":"#20241f","#668a1e":"#b4ba00","#395707":"#616800","#030802":"#070f00","#050d01":"#0a1000","#446a10":"#778700","#517417":"#8f9a00","#43620c":"#737a00","#1c3004":"#313a00","#0a0f08":"#0e1505","#345006":"#585f00","#5d8b1a":"#a4b700","#4d7012":"#869000","#1d4102":"#364a00","#040704":"#060c03","#0e120e":"#10160d","#294509":"#485700","#5b8d19":"#a0b800","#4b6b10":"#818900","#264306":"#435100","#1f2024":"#20252b","#050505":"#080808","#142405":"#242e00","#437211":"#779100","#4c7012":"#849000","#435f0e":"#737900","#273608":"#434500","#1f2122":"#212727","#2e5407":"#516500","#1f3804":"#374300","#2b4b07":"#4b5b00","#487912":"#7f9a00","#49730c":"#7e8d00","#51710e":"#8a8d00","#264301":"#414b00","#182c00":"#293100","#161c11":"#1f250d","#5b820f":"#9ba100","#4c7613":"#859800","#497c0a":"#7f9500","#3a6c01":"#657900","#416b05":"#6e7c00","#3f6008":"#6b7300","#325905":"#576800","#436b0e":"#758600","#476f0c":"#7a8900","#2d5a02":"#516600","#244401":"#3f4d00","#193501":"#2e3c00","#051800":"#0e1b00","#040c00":"#0a0f00","#091103":"#101600","#517118":"#8f9800","#1d2b0a":"#343b00","#34500b":"#5a6500","#587c1a":"#9ba700","#7ca22b":"#dfe400","#8fb439":"#ffff08","#7ea730":"#e4ef00","#37480f":"#616000","#2e371f":"#464a15","#3b4927":"#5b6418","#1c3200":"#303800","#354808":"#595900","#37411a":"#5e5a07","#2e3e09":"#4f4f00","#5d8514":"#a1aa00","#567e16":"#96a400","#497011":"#7f8f00","#0b1203":"#131700","#496915":"#818c00","#192508":"#2c3200","#3f5d0f":"#6e7800","#5c801b":"#a2ac00","#78a02c":"#d8e200","#344a13":"#5d6700","#1b1e14":"#272711","#2d3924":"#3e4b1c","#2b2c26":"#343227","#101702":"#1b1c00","#0f1705":"#1b1f00","#496817":"#818d00","#456311":"#788100","#5b7f1c":"#a1ac00","#84a82a":"#e9e600","#283a0c":"#474e00","#1e2514":"#2e330d","#0c1202":"#151600","#4d6b10":"#848900","#0f1706":"#1b2000","#466315":"#7c8500","#436211":"#758000","#597c1b":"#9da800","#53681c":"#938f00","#31352b":"#3e402a","#070b00":"#0e0f00","#0e1307":"#191c01","#425d16":"#758000","#21320b":"#3b4400","#3d5a0f":"#6a7500","#30371f":"#4a4a15","#3c530e":"#686c00","#0f120c":"#15170a","#3c5313":"#6a7100","#2f460e":"#535d00","#2b4408":"#4b5400","#4e6d16":"#899100","#202614":"#33340c","#0b1002":"#131400","#577416":"#989900","#161915":"#1a1e15","#28390c":"#474d00","#466415":"#7c8600","#3d5a10":"#6b7600","#040701":"#0c0f00","#43610f":"#747c00","#5f8018":"#a6a900","#131d04":"#212500","#263c09":"#434d00","#5c8514":"#9faa00","#638519":"#adaf00","#070902":"#0f0f00","#48631a":"#818b00","#162605":"#273000","#162405":"#272e00","#1e2d04":"#333600","#5c8214":"#9fa600","#648418":"#adad00","#060805":"#090b04","#293a0f":"#495100","#24380a":"#3f4900","#12160c":"#1c1e08","#172402":"#272a00","#587a15":"#999f00","#608218":"#a7ab00","#101606":"#1d1f00","#40531b":"#757a00","#181f0f":"#262b08","#0a1001":"#111300","#60841a":"#a8af00","#507012":"#8a9000","#3e501b":"#727601","#2c351f":"#424716","#0f1505":"#1b1d00","#658b1e":"#b2bc00","#567417":"#979a00","#4a6314":"#828400","#151d08":"#262900","#171e0e":"#252a07","#507315":"#8c9700","#698c20":"#babf00","#1b2902":"#2d3000","#7a9e2d":"#dde100","#719b20":"#c7d000","#242e10":"#414401","#151a0e":"#202409","#2b3e0c":"#4c5200","#62861d":"#adb500","#31450a":"#545800","#172803":"#283000","#57771a":"#9aa100","#7ba22c":"#dee500","#0b1202":"#131600","#0a0e04":"#121400","#446611":"#778400","#3c5a14":"#6a7a00","#21310c":"#3b4400","#29410b":"#485400","#779a2a":"#d7da00","#4e7410":"#879300","#20221f":"#252721","#152504":"#252e00","#2c4a0a":"#4e5d00","#293a15":"#485503","#253613":"#414f02","#587a1e":"#9da900","#7fa13c":"#e3eb0b","#1c2017":"#262915","#3a521f":"#647706","#20320e":"#394700","#365111":"#606d00","#6a8d28":"#c0c900","#192a08":"#2c3800","#324f0f":"#586800","#223313":"#3a4a03","#1e2f0c":"#354100","#4b6816":"#848c00","#080b07":"#0a0e06","#1f3408":"#374300","#354c1f":"#586d09","#222e17":"#35400d","#2c3b16":"#4d5604","#1b1f16":"#252713","#080f02":"#0e1300","#29450a":"#485800","#17220d":"#273103","#292d26":"#323626","#0a1006":"#111701","#262d1e":"#353a19","#0f1708":"#1a2201","#050804":"#080d03","#0e110d":"#11150c","#090c08":"#0c1007","#050702":"#0e0f00","#030801":"#090f00","#141b0c":"#212605","#070a05":"#0b0e03","#274004":"#434b00","#568b10":"#96ac00","#336100":"#596c00","#283f0d":"#475400","#081005":"#0d1700","#1b2d02":"#2e3400","#5f9515":"#a6bd00","#1d4100":"#364800","#2c5207":"#4e6300","#508a09":"#8ba300","#497d09":"#7f9500","#092300":"#162700","#070805":"#0b0b04","#2f5c04":"#546b00","#092600":"#172a00","#3e7406":"#6e8700","#69a916":"#b7d400","#2f4c0a":"#525f00","#1a1d16":"#222415","#355b04":"#5b6900","#0d1d02":"#182200","#3a6505":"#647600","#64a317":"#afce00","#396a06":"#657c00","#363c31":"#434930","#021d00":"#0c2000","#0a1a00":"#141d00","#3b620b":"#677900","#468008":"#7b9700","#0d1f02":"#192500","#051701":"#0d1b00","#010105":"#00050f","#183300":"#2c3900","#18270b":"#2a3800","#080e04":"#0e1400","#0e130b":"#141a08","#1c2217":"#262c13","#2c3127":"#373c26","#40591a":"#738000","#070904":"#0c0e02","#b18b65":"#dc7358","#412e24":"#581b18","#47651c":"#7f8f00","#0d1404":"#171b00","#020401":"#0a0f00","#55821e":"#97b200","#1a3101":"#2e3800","#101809":"#1b2302","#141411":"#181611","#1d1c1e":"#1f1e22","#131215":"#131219","#100f11":"#101014","#101011":"#111213","#48641d":"#828f00","#405b1c":"#738400","#3b5418":"#6a7800","#121a04":"#1f2100","#0b1d00":"#162000","#060a05":"#080e03","#0b0e06":"#131402","#1e280f":"#353a03","#304213":"#575e00","#1d3800":"#333e00","#2c4c07":"#4d5c00","#1a2905":"#2d3300","#142008":"#242c00","#393c32":"#484832","#465a26":"#77810d","#3b4c20":"#646d0b","#35441d":"#5a610b","#243211":"#414a01","#18250d":"#2a3601","#1d2a15":"#2b3a0c","#070b07":"#080e06","#203906":"#394600","#648e25":"#b3c700","#8dbf39":"#eeff14","#608c20":"#aabf00","#527b1c":"#92a800","#466b13":"#7b8c00","#527320":"#93a300","#5a7b26":"#a3b300","#547c22":"#96af00","#507f19":"#8ea900","#44661d":"#799100","#090b06":"#0e0f04","#0b0d0b":"#0c100b","#3d4f22":"#67710d","#3a4b24":"#5d6912","#263319":"#3b470d","#0f1a0b":"#172504","#071804":"#0e1f00","#5d871f":"#a5b800","#6d962a":"#c4d500","#233604":"#3b4000","#213200":"#353800","#142300":"#222700","#1f2c07":"#363900","#313c09":"#4d4600","#1e3309":"#354300","#243f07":"#404e00","#374814":"#636600","#446418":"#798a00","#628e27":"#afc900","#152a02":"#263100","#395710":"#647200","#608723":"#acbd00","#608623":"#acbc00","#37540d":"#606c00","#1c3600":"#313c00","#2d4804":"#4c5400","#36530a":"#5d6700","#405c0c":"#6e7300","#425a09":"#6e6d00","#294406":"#475200","#293b0b":"#484e00","#29370d":"#494b00","#162401":"#252900","#66912c":"#b7d200","#4d701e":"#8a9e00","#3d630f":"#6b7f00","#476e15":"#7d9100","#5e871e":"#a7b700","#5c7f1d":"#a3ad00","#507019":"#8e9800","#1a3902":"#304100","#3c5c0b":"#677200","#51741c":"#90a000","#4d6e10":"#858c00","#4c6c1d":"#889800","#425d15":"#757f00","#4d6a1b":"#8a9400","#415c19":"#748200","#152600":"#242a00","#4e741d":"#8ba100","#5f9224":"#a9ca00","#43670d":"#748100","#446710":"#778400","#324e09":"#566100","#224301":"#3c4b00","#41610e":"#717b00","#537717":"#929e00","#496911":"#7f8700","#3b5a06":"#636b00","#4f6b1d":"#8e9700","#5d8026":"#a8b800","#5b7f25":"#a4b600","#4f7322":"#8ea500","#507422":"#8fa700","#587828":"#a0b200","#597627":"#a3ae00","#5b7923":"#a5ad00","#2d4508":"#4d5500","#274100":"#414800","#467517":"#7c9b00","#47701a":"#7e9900","#1e300c":"#354300","#395c0c":"#647300","#40660b":"#6f7d00","#40650e":"#708000","#2f5106":"#526100","#254400":"#404b00","#335007":"#576100","#5b7e18":"#9fa700","#5d8720":"#a5b900","#698b26":"#bdc400","#63871e":"#afb700","#507513":"#8b9700","#3e5e0b":"#6b7500","#64882a":"#b5c600","#6d9229":"#c5d000","#658929":"#b7c600","#5c7d2a":"#a7b901","#5c7b2b":"#a5b503","#5a7825":"#a4ae00","#506f1a":"#8e9800","#3f5b0c":"#6c7200","#1e3f01":"#374700","#2f6407":"#577700","#497b15":"#81a000","#1b2c0b":"#303d00","#63911b":"#aebf00","#61881a":"#aab400","#617d24":"#b0b300","#5c7526":"#a9ac00","#3b5511":"#687100","#4b6d0c":"#808600","#527612":"#8e9700","#698f1c":"#b8be00","#719821":"#c8cd00","#678e1e":"#b6bf00","#527912":"#8e9a00","#486416":"#7f8700","#769a2a":"#d5da00","#81a929":"#e6e900","#6c9126":"#c2cb00","#5e7d29":"#acb800","#567324":"#9ca800","#4f7219":"#8c9a00","#405d0d":"#6e7600","#203001":"#343600","#326907":"#5c7c00","#4b7a17":"#85a100","#1c2b0c":"#323d00","#3c5a0c":"#687100","#32440b":"#565800","#405310":"#6e6c00","#33480d":"#595e00","#2f410b":"#525400","#3d5111":"#6b6d00","#3c5606":"#646600","#4e700d":"#858b00","#749a1e":"#cbcc00","#7ca321":"#dada00","#749a21":"#cdd000","#668f1e":"#b4c000","#567d11":"#949e00","#385d05":"#606d00","#50721c":"#8f9e00","#83ab27":"#e8e900","#729728":"#cdd400","#5e8125":"#a9b800","#4e701c":"#8b9b00","#4b7019":"#859800","#3b610d":"#677a00","#18210c":"#2a3002","#193100":"#2c3600","#173100":"#2a3600","#0b1c00":"#161f00","#081400":"#101600","#284106":"#454f00","#5b7b10":"#9a9a00","#6c891a":"#b5ae00","#587316":"#989700","#486213":"#7e8200","#537c0d":"#8e9800","#42640e":"#727f00","#6f8f26":"#c8c900","#92b82c":"#fdf600","#82a728":"#e6e400","#80a32b":"#e5e300","#749629":"#d1d400","#5f821f":"#a9b300","#507219":"#8e9a00","#496c15":"#818f00","#2c4804":"#4b5400","#304b10":"#556500","#3b5d11":"#687a00","#2f5204":"#515f00","#152d00":"#263200","#0f2700":"#1e2b00","#1c2714":"#2a360c","#1a181d":"#191823","#081207":"#0b1a02","#263906":"#414600","#2c3b0b":"#4d4e00","#27330b":"#454500","#2f3c14":"#575900","#1d290a":"#343900","#2b3a08":"#494900","#3e610b":"#6b7800","#496f15":"#819300","#98be34":"#fff90e","#90b52d":"#fbf400","#8cae2b":"#f1e700","#83a62b":"#e8e400","#759628":"#d3d300","#60811f":"#abb200","#53731b":"#949e00","#44660f":"#768200","#203401":"#353b00","#34520c":"#5b6800","#4d7a16":"#88a000","#264a01":"#435300","#395f07":"#627100","#314a17":"#576c00","#253e13":"#415a00","#112006":"#1e2a00","#191c17":"#1f2217","#030704":"#020e02","#395b0f":"#647600","#8db02f":"#f8f000","#85a726":"#e4db00","#88ae25":"#eae500","#89ad2d":"#f2ed00","#80a22b":"#e4e000","#729229":"#cfd000","#618024":"#afb600","#4d701a":"#899900","#334f08":"#576100","#182801":"#282e00","#476f14":"#7d9100","#41581f":"#748103","#326900":"#5a7500","#39432f":"#4d5529","#1a2d00":"#2c3200","#536d15":"#909000","#4f7010":"#888e00","#82a031":"#e8e100","#040700":"#0d0f00","#8fb32f":"#fbf400","#437509":"#758c00","#16290b":"#263a00","#071d00":"#112000","#92b424":"#f0e000","#132700":"#222b00","#4e6e00":"#7a7900","#0e2600":"#1c2a00","#0e2500":"#1c2900","#2e4708":"#4f5800","#264802":"#435200","#6e901d":"#c0bf00","#1c3402":"#313c00","#0c1805":"#162000","#0f190a":"#182403","#102d00":"#213200","#6f8d24":"#c4c200","#2c4112":"#4f5c00","#19220c":"#2d3201","#11170c":"#1a2007","#123a03":"#274400","#688e21":"#b9c200","#5a7721":"#a2a900","#324a11":"#596500","#283513":"#474e02","#092500":"#162900","#657c2e":"#b5b408","#57771f":"#9ca700","#446002":"#6d6d00","#516b28":"#8f9c07","#212d16":"#333f0c","#446410":"#768100","#071001":"#0d1300","#0a1900":"#131c00","#1d2615":"#2b340e","#689421":"#b8c900","#57791e":"#9ba800","#4d6514":"#868600","#343d26":"#4c501d","#1e2e04":"#333800","#476c10":"#7c8a00","#719b26":"#cad600","#709825":"#c8d200","#83ab40":"#e3f411","#79a137":"#dbee02","#345702":"#586300","#030205":"#02010e","#0c0b11":"#090b16","#203d05":"#394900","#5b791b":"#a1a400","#60831d":"#aab200","#385807":"#5f6900","#516e26":"#92a202","#161a14":"#1b2013","#598616":"#9cad00","#6a9426":"#bece00","#608227":"#aebc00","#465b1e":"#808600","#23350a":"#3e4600","#1d3005":"#323b00","#375a10":"#617600","#629424":"#aecc00","#8cc93a":"#e3ff20","#7aad2b":"#daf000","#628f1c":"#acbe00","#35520b":"#5c6700","#203318":"#2f480c","#1f2424":"#202b27","#221f28":"#1e1d31","#252329":"#242431","#252426":"#28272b","#58791a":"#9ba300","#567619":"#989f00","#476610":"#7b8300","#476320":"#809100","#253313":"#414a03","#52761f":"#93a500","#79a734":"#dbf300","#3e5c11":"#6d7900","#223304":"#393d00","#172700":"#272b00","#0f2800":"#1e2c00","#324a07":"#555a00","#50691f":"#919700","#5a831c":"#9fb000","#528017":"#90a800","#467113":"#7b9300","#3e5e0f":"#6c7900","#203404":"#373e00","#0e1b00":"#191e00","#263b0c":"#434f00","#32530d":"#586b00","#436111":"#757f00","#51721a":"#909b00","#3c571f":"#698003","#25380c":"#424b00","#608d1f":"#aabf00","#537819":"#93a100","#2f440d":"#535a00","#1c2c01":"#2e3200","#2b4a04":"#4a5700","#2c4e03":"#4c5a00","#2c5102":"#4d5c00","#284e02":"#475900","#254302":"#404d00","#213602":"#383e00","#1e3401":"#333b00","#2a4603":"#475100","#2f4806":"#505700","#2d4905":"#4d5700","#42630d":"#727c00","#527818":"#91a000","#4f741b":"#8c9f00","#4a7610":"#819500","#4a740f":"#819100","#39560d":"#636e00","#2c4909":"#4d5b00","#5a821b":"#9fae00","#2c4d02":"#4b5800","#182805":"#2a3200","#6a9228":"#bece00","#548421":"#95b700","#193201":"#2d3900","#243504":"#3c3f00","#34520a":"#5a6600","#3a600c":"#667800","#3e610e":"#6c7b00","#3d610d":"#6a7a00","#3e640d":"#6c7d00","#40640d":"#6f7d00","#426115":"#758300","#324912":"#596500","#2d4a07":"#4e5a00","#3f6307":"#6b7600","#45660c":"#767f00","#3a590c":"#657000","#355210":"#5e6d00","#34510b":"#5a6600","#293e01":"#434600","#334c0d":"#596300","#2b470a":"#4c5a00","#163101":"#293800","#193402":"#2e3c00","#2b4908":"#4b5a00","#294608":"#485700","#527913":"#8f9b00","#2d4c03":"#4d5800","#111c07":"#1e2700","#5e8d21":"#a7c100","#37570b":"#606d00","#466f11":"#7b8e00","#4f7a16":"#8ba000","#4f7818":"#8ca000","#456d0e":"#788900","#3d5a11":"#6b7700","#394c19":"#687000","#3b570e":"#677000","#486f06":"#798200","#577e13":"#97a100","#64881d":"#b0b700","#749d22":"#cdd400","#5a7b1a":"#9fa500","#4a6322":"#869202","#668d31":"#b6d003","#6e9027":"#c6cb00","#557218":"#969900","#416a0e":"#728500","#36540d":"#5e6c00","#33510b":"#596600","#274506":"#455300","#4d7212":"#869300","#2b4704":"#495300","#29252e":"#272438","#273f0a":"#455100","#7ca932":"#e0f300","#345811":"#5c7500","#193600":"#2e3c00","#487211":"#7e9100","#557e15":"#94a300","#5a8517":"#9dad00","#527e11":"#8e9f00","#4f7c0b":"#879600","#4d6b18":"#889100","#3c4d22":"#646d0e","#456008":"#737300","#557b09":"#8e9300","#5f8819":"#a6b300","#739b26":"#cdd600","#789f29":"#d7de00","#7a9a2b":"#dbd800","#536c1b":"#959600","#46670e":"#798200","#1c3103":"#313a00","#162700":"#252b00","#1c2901":"#2d2f00","#385314":"#647200","#587918":"#9aa100","#1f3a04":"#374500","#4b7010":"#828e00","#3e6409":"#6b7900","#030301":"#0f0b00","#577c21":"#9cae00","#4e6e1a":"#8b9700","#243f02":"#3e4800","#4a7312":"#829400","#5b831b":"#a1af00","#5f8a17":"#a6b300","#668e1a":"#b2ba00","#5f8814":"#a4ad00","#57810e":"#949f00","#586a2e":"#979712","#526625":"#949505","#55780d":"#909400","#608516":"#a6ac00","#72982a":"#ced700","#73962a":"#d0d500","#7a9c2e":"#dee000","#759235":"#d3d607","#3c5812":"#6a7600","#030e01":"#081100","#293025":"#333b23","#2c3528":"#374225","#293325":"#344021","#213b04":"#3a4600","#597e18":"#9ca700","#304f0a":"#546300","#517715":"#8e9b00","#3d6309":"#697800","#161519":"#15161e","#6a9227":"#becd00","#315308":"#566500","#4b7113":"#839300","#698f22":"#bbc400","#6f9726":"#c6d200","#6f9825":"#c6d200","#73992a":"#cfd800","#628e1e":"#adbf00","#5a7c1e":"#a0ab00","#435125":"#717211","#587520":"#9fa500","#779b2f":"#d9e000","#739430":"#d3da00","#607d27":"#afb600","#476114":"#7d8200","#425d14":"#757d00","#252824":"#2b2f26","#45650d":"#767f00","#41690a":"#708000","#588017":"#9aa800","#567f17":"#97a700","#0e120b":"#141808","#36510f":"#5f6b00","#213a04":"#3a4500","#7da22e":"#e3e700","#7da62e":"#e2eb00","#84a932":"#f0f300","#8bb137":"#fcff03","#6ca027":"#c0dd00","#47611e":"#818d00","#4d5c2b":"#818115","#6c9022":"#c0c600","#6d8f21":"#c2c300","#4d601f":"#8d8c00","#313a1f":"#4d4f13","#252b17":"#3b3b0e","#2a301f":"#3d3f19","#456e09":"#768400","#4c7010":"#838e00","#739526":"#ced000","#40670a":"#6e7d00","#0c1206":"#151b00","#4f6f18":"#8c9600","#2c3f0f":"#4e5700","#507216":"#8c9700","#698e23":"#bbc400","#82a72d":"#ebeb00","#8eb23a":"#ffff07","#97b93e":"#fff914","#3b570c":"#666e00","#3f600e":"#6e7a00","#6a853a":"#b3bd17","#5a692c":"#968f0f","#6a8719":"#b2ab00","#313e12":"#595800","#0a1200":"#111400","#35401d":"#595a0d","#638d15":"#abb400","#486f0f":"#7d8c00","#688c1f":"#b8be00","#243c04":"#3e4700","#2d3e0d":"#4f5300","#496419":"#828b00","#151d03":"#232400","#162102":"#252700","#051d00":"#0f2000","#31440d":"#565a00","#5b811d":"#a1af00","#213309":"#3a4300","#0f1701":"#191b00","#2b4507":"#4a5400","#213d00":"#394400","#190a0a":"#24030d","#120202":"#160007","#180400":"#1b0004","#4f6f19":"#8c9700","#4e7316":"#899800","#070c01":"#0d0f00","#212912":"#383a07","#345303":"#575f00","#1d3107":"#333e00","#312323":"#3e1f28","#34190b":"#460300","#152104":"#242900","#070b01":"#0e0f00","#0f1603":"#1a1c00","#192a01":"#2a3000","#233601":"#393d00","#353b02":"#443700","#5a831b":"#9faf00","#2a3e09":"#494f00","#446218":"#798700","#1f2415":"#2f300f","#262c1c":"#373a16","#0d1804":"#171f00","#171c02":"#211e00","#344304":"#4f4a00","#3f550b":"#6b6a00","#607f1c":"#aaac00","#3f5710":"#6e7200","#1a2606":"#2d3100","#0b0c08":"#100f07","#141b03":"#212100","#263705":"#404300","#3c530c":"#676900","#4d7411":"#869400","#406a09":"#6f8000","#687f21":"#b2a800","#647c20":"#ada600","#33480e":"#5a5f00","#212f0a":"#3a3f00","#22241f":"#2a2b20","#0d1104":"#171700","#1e1d1c":"#221f1e","#203105":"#373c00","#304e06":"#525d00","#3e670a":"#6c7d00","#506812":"#878500","#546c16":"#908d00","#59711b":"#9b9800","#637720":"#a89c00","#415615":"#747700","#152205":"#252b00","#131809":"#222302","#030b00":"#090f00","#294106":"#464f00","#445d0f":"#757800","#4f6716":"#8b8a00","#394e0e":"#636600","#5d7920":"#a7aa00","#628321":"#afb600","#30470d":"#545d00","#101903":"#1c1f00","#0d1206":"#181b00","#262a1e":"#34351b","#203203":"#363b00","#213504":"#383f00","#314a0a":"#555d00","#4c6f16":"#869400","#50681a":"#8f9000","#4a5d15":"#7f7a00","#28370b":"#464900","#141f04":"#232700","#1b240d":"#303502","#030300":"#0f0b00","#63440c":"#7b2a00","#48691d":"#819500","#0e1607":"#192000","#060902":"#0d0f00","#172504":"#282e00","#223705":"#3b4300","#273e06":"#434b00","#577022":"#9fa200","#5a7123":"#a4a300","#485f18":"#818400","#394e0f":"#646700","#263c0a":"#434e00","#031e01":"#0d2200","#698d2d":"#bfce00","#0b0e08":"#101306","#0c0f09":"#111407","#182903":"#2a3100","#253411":"#434d00","#2c3b15":"#4f5702","#324515":"#5a6400","#2b3e0a":"#4b5000","#192e01":"#2b3400","#051200":"#0c1400","#bd895b":"#f06347","#bc8759":"#f06044","#658a2a":"#b7c800","#1c3108":"#323f00","#0e110a":"#151707","#0e1900":"#181c00","#193006":"#2d3c00","#567d21":"#9aaf00","#193107":"#2d3e00","#648f2d":"#b4d100","#7ba63b":"#dbf406","#87b13e":"#ebfa0f","#082403":"#142b00","#86ae38":"#f5ff00","#173509":"#2b4500","#87b13c":"#effd0a","#0d2600":"#1b2a00","#7ba638":"#dff501","#0a1701":"#131b00","#6f9c2e":"#c8e000","#0f1c01":"#1a2000","#3b5c0e":"#677600","#061104":"#0b1700","#151617":"#161a1b","#556333":"#89881e","#648029":"#b7bc00","#091202":"#101600","#101a04":"#1c2100","#2a3f00":"#444600","#324e00":"#515700","#1d2e01":"#303400","#2f4d04":"#505a00","#395f03":"#606d00","#537e14":"#91a200","#3b6208":"#667600","#396008":"#637300","#385c07":"#606e00","#1c2118":"#252a16","#476418":"#7e8a00","#254109":"#425200","#304708":"#525800","#305103":"#525d00","#2f4103":"#4b4b00","#243900":"#3b3f00","#3a5e05":"#626e00","#406408":"#6d7800","#3a6208":"#657600","#385e07":"#617000","#325206":"#566200","#305006":"#535f00","#243b03":"#3d4500","#203602":"#373e00","#131413":"#151715","#3c4811":"#635b00","#486719":"#808e00","#0f1e02":"#1b2400","#1b3005":"#303b00","#34510a":"#5a6500","#2a4601":"#464f00","#152200":"#232600","#273400":"#3a3700","#2a2700":"#2f1d00","#1e2b01":"#303100","#283f04":"#444a00","#2d4503":"#4b5000","#3b6105":"#647100","#385f07":"#617100","#375e06":"#5f6f00","#305706":"#546700","#2d5404":"#4f6200","#325406":"#566400","#2e4b08":"#505c00","#2d4a05":"#4d5800","#253e04":"#404900","#203305":"#373e00","#232623":"#272c25","#5b7328":"#a6a903","#416414":"#738500","#0b1e02":"#162400","#101013":"#101217","#111f03":"#1e2600","#31560a":"#576b00","#436613":"#768600","#182000":"#242200","#222c0c":"#3d3e00","#1a2601":"#2a2b00","#2b4a02":"#495400","#2d4e01":"#4c5800","#305805":"#546700","#355e07":"#5d7000","#2c4506":"#4b5300","#1f3403":"#353d00","#243707":"#3e4500","#3e5412":"#6d7100","#2c3f0d":"#4e5400","#1f2e0b":"#373f00","#282a25":"#303126","#435515":"#767300","#628d27":"#b0c800","#0e2503":"#1c2c00","#060607":"#060709","#0e1805":"#192000","#30500a":"#546400","#3a640c":"#667c00","#264803":"#435300","#12120f":"#16140f","#252f11":"#434502","#151f01":"#222400","#263a03":"#3f4400","#324f02":"#535a00","#3a5b04":"#616900","#335600":"#555f00","#2f4804":"#4f5400","#273b04":"#414600","#26350a":"#434600","#203104":"#363b00","#1e2f05":"#343a00","#486115":"#7f8300","#496316":"#818600","#1a2809":"#2e3600","#3b5713":"#697600","#272824":"#2f2e26","#263515":"#414d06","#6b8b2d":"#c4cc00","#46720f":"#7b8f00","#040304":"#09050a","#101a06":"#1c2400","#34580d":"#5c7000","#588e14":"#9ab400","#244503":"#405000","#0b0f01":"#121200","#070606":"#090607","#131313":"#151515","#0e1501":"#171800","#213202":"#373a00","#335004":"#565d00","#395804":"#5f6600","#314903":"#515400","#202d01":"#333300","#152001":"#232500","#273d04":"#424800","#25350a":"#414600","#162202":"#252800","#3d5210":"#6b6d00","#526e18":"#919500","#2a3607":"#444100","#5c821d":"#a3b000","#0c0c0a":"#0e0d0a","#0f2506":"#1c3000","#548312":"#92a500","#476c0e":"#7b8700","#5c8e18":"#a1b800","#376309":"#617800","#386805":"#637900","#070f01":"#0d1200","#101901":"#1b1d00","#2c4603":"#4a5100","#395904":"#5f6700","#395a04":"#606800","#253802":"#3d4000","#172201":"#262700","#192501":"#292a00","#192602":"#2a2c00","#1b2309":"#303100","#39480b":"#5c5700","#526c1a":"#929500","#4a5617":"#796c00","#1e2701":"#2c2a00","#31400c":"#545300","#799d35":"#dde801","#060e01":"#0b1100","#335a09":"#5a6e00","#162604":"#272f00","#0c1600":"#151800","#171b10":"#23240c","#242424":"#282828","#0a0d05":"#121301","#121c01":"#1e2000","#314d03":"#525900","#385704":"#5e6500","#2c4403":"#494f00","#213301":"#363a00","#1c2b04":"#303400","#243010":"#424700","#445b19":"#7b8100","#425017":"#726c00","#323f03":"#494300","#3d480f":"#615600","#3e5210":"#6c6d00","#7ea53c":"#e1f108","#030403":"#070a05","#222222":"#262626","#070903":"#0f0f00","#080c00":"#0f0f00","#182301":"#272800","#243702":"#3c3f00","#365503":"#5a6200","#355209":"#5b6500","#283e03":"#434800","#253a03":"#3e4400","#263408":"#414300","#2b3d03":"#464700","#718b2a":"#c9c200","#4f5912":"#776400","#273a00":"#3f4000","#749a36":"#d1e204","#0b0c0b":"#0c0e0c","#121b00":"#1d1e00","#151e00":"#212100","#1e2e01":"#313400","#202d07":"#373a00","#2c3c09":"#4c4d00","#6c8520":"#b7ae00","#646f14":"#917700","#2b3501":"#3c3500","#628228":"#b2bd00","#23310e":"#3f4600","#5d791d":"#a6a700","#485b09":"#6f6700","#394b06":"#5a5600","#4a6218":"#848700","#2f430b":"#525700","#233e06":"#3e4b00","#425f0c":"#717700","#2f4400":"#4b4b00","#3a4f09":"#626200","#547027":"#97a503","#618124":"#afb700","#354b09":"#5a5d00","#233306":"#3c3f00","#1f3f00":"#374600","#405b06":"#6a6c00","#597920":"#a0aa00","#618729":"#afc300","#608424":"#acba00","#5d761f":"#a5a300","#212300":"#271d00","#293805":"#444300","#6c932e":"#c4d600","#6e912f":"#c9d500","#678e2c":"#bace00","#6d9632":"#c6de00","#6b9424":"#bfcc00","#39400d":"#554800","#2e2600":"#331b00","#3a4e05":"#5c5a00","#080809":"#08090b","#445e1e":"#7b8a00","#87b23c":"#eefe0a","#7ca840":"#d6f210","#608b19":"#a8b600","#67901b":"#b4be00","#445d1d":"#7b8700","#332805":"#3e1d00","#4e550f":"#6f5900","#314001":"#484400","#151418":"#14141d","#374819":"#646a02","#7fad2c":"#e3f100","#6f9b20":"#c4d000","#608a13":"#a5ae00","#527124":"#94a500","#363e0d":"#534800","#575318":"#7b4e00","#50610e":"#7b6f00","#253900":"#3c3f00","#29292e":"#2b2e36","#324d0f":"#586600","#77a519":"#cdd300","#688f16":"#b3b700","#4c6326":"#859008","#303909":"#494100","#4b4e12":"#6b5000","#59661f":"#948200","#374c05":"#5a5a00","#3c510a":"#656500","#4e7309":"#838a00","#6c9420":"#bfc800","#475e1e":"#818a00","#47510a":"#655500","#607425":"#aaa200","#557119":"#969900","#253500":"#3b3b00","#57701d":"#9c9d00","#425e15":"#758000","#3c520e":"#686b00","#334900":"#515100","#4c650c":"#7d7b00","#647e2b":"#b7ba02","#608228":"#aebd00","#4b680e":"#808300","#202a00":"#2f2c00","#587422":"#a0a700","#1a1e1b":"#1b241b","#1a2919":"#203613","#1a3900":"#303f00","#436a06":"#717c00","#52771f":"#92a700","#6a8d31":"#bfd003","#729539":"#c8d80c","#688d36":"#b5cd0c","#61801f":"#adb000","#4e660f":"#827f00","#4b6818":"#858e00","#1a3403":"#2f3d00","#739035":"#cfd208","#769c35":"#d7e602","#7e9f43":"#d8e417","#92b645":"#f0f323","#80a33c":"#e5ee09","#73923b":"#c7d211","#6b8b28":"#c2c700","#445e05":"#6e6d00","#2b3500":"#3b3400","#5f891b":"#a7b600","#020b03":"#030f00","#8fb03a":"#fffa05","#a7c642":"#fff126","#95b83d":"#fffb11","#95b949":"#eef32c","#7fa045":"#d7e41a","#768e34":"#d0c908","#5e7617":"#9d9500","#313e00":"#453f00","#213a09":"#3b4a00","#7aa93a":"#dbf903","#242b27":"#243426","#a0bd38":"#ffeb11","#a6ca33":"#fff11a","#87ac2b":"#efec00","#7ea741":"#d9f012","#728d39":"#c7cb11","#6c8822":"#bdb800","#4d630b":"#7a7400","#182700":"#282b00","#406207":"#6c7500","#577823":"#9dac00","#26242d":"#232537","#55641b":"#8d8000","#aac83c":"#ffec22","#94bb2e":"#fff904","#779e32":"#d9e700","#76953b":"#ced710","#6a9124":"#bdc900","#537a0e":"#8e9700","#3a4f02":"#5a5700","#0c1c00":"#171f00","#83a144":"#e2e618","#1d3506":"#344100","#728c2c":"#ccc600","#adce45":"#fff332","#83a937":"#f0f900","#729934":"#cfe202","#6c9523":"#c0cc00","#648b18":"#aeb500","#4b630b":"#7a7700","#0f1a00":"#191d00","#6e8637":"#c0c111","#434c26":"#696415","#b5d554":"#fff64b","#81ac32":"#e9f600","#67932e":"#b9d600","#679020":"#b6c300","#668d1e":"#b4be00","#43580a":"#6d6900","#141800":"#1b1700","#405518":"#747900","#719439":"#c6d70d","#010701":"#050f00","#a2c051":"#f8f337","#598416":"#9bab00","#6b9720":"#bdcb00","#6c901d":"#bec000","#455109":"#645700","#0f0f00":"#110c00","#334715":"#5c6600","#709738":"#c5dc09","#0b0a0b":"#0c0b0d","#1a3002":"#2e3800","#5e7d2a":"#abb901","#98c055":"#e9f73d","#77a629":"#d4e600","#5f8011":"#a1a100","#5c6e13":"#8f8100","#4c5706":"#675600","#262900":"#2e2300","#161f00":"#222200","#4e6c1b":"#8b9600","#7ead47":"#cbeb23","#0f0f0f":"#111111","#102e00":"#213300","#375e07":"#5f7000","#39520f":"#646c00","#405b11":"#707800","#263e01":"#3f4600","#132402":"#222a00","#436612":"#768500","#78a741":"#ccf012","#5a8829":"#a0c400","#1d251c":"#222e1a","#000601":"#020f00","#103008":"#1f3e00","#123f01":"#294700","#376000":"#5d6b00","#557a20":"#98ab00","#577d22":"#9cb000","#66922a":"#b7d100","#618e26":"#adc800","#376209":"#617700","#081906":"#0e2200","#121512":"#141912","#2f3330":"#323b32","#020703":"#020f00","#0d1610":"#091d0a","#0e1611":"#0b1d0c","#0e1d10":"#0d2907","#0d1c0f":"#0c2706","#080b0a":"#070e0a","#1e2818":"#2a3512","#040502":"#0e0e01","#1c201c":"#20261d","#272c28":"#2a3429","#171b18":"#182017","#171d18":"#182416","#274201":"#424a00","#435c25":"#72850b","#162809":"#273600","#192b04":"#2c3400","#0b0200":"#0f0002","#191d14":"#222511","#646607":"#795700","#415912":"#727700","#5a8511":"#9ba700","#263511":"#454e00","#152a00":"#252f00","#080808":"#090909","#081300":"#0f1500","#394b1b":"#666e03","#2b420c":"#4c5700","#071600":"#0f1800","#648127":"#b6ba00","#99bf4d":"#f2f931","#264601":"#424f00","#4d7926":"#88b000","#7aa22e":"#dde700","#304f05":"#525d00","#030003":"#0b000f","#324322":"#4d5d13","#67913b":"#add112","#a4c844":"#fff92a","#739618":"#c1bd00","#090009":"#0b000f","#445c24":"#758509","#050e00":"#0a1000","#739e46":"#bbe01d","#a5cc3d":"#fff927","#769b13":"#c1bc00","#1d3400":"#323a00","#aed13b":"#fff12a","#8fb327":"#f2e800","#759b3b":"#cde10c","#93b948":"#ecf32a","#314b03":"#515700","#2d4808":"#4e5900","#274a03":"#455500","#50700c":"#878a00","#426210":"#737f00","#344c0e":"#5b6400","#3f5813":"#6f7700","#425f14":"#758000","#325a04":"#576800","#516f1f":"#929e00","#314c09":"#555e00","#293f07":"#464e00","#3e5317":"#707600","#496219":"#838900","#293b0a":"#474d00","#2a5002":"#4a5b00","#324d09":"#565f00","#283e06":"#444b00","#334411":"#5b5e00","#223008":"#3b3e00","#1d2a05":"#313400","#223505":"#3a4000","#030603":"#060d03","#0e170c":"#132007","#283528":"#2e4225","#2c4806":"#4c5700","#567016":"#959300","#3e5715":"#6e7800","#506c24":"#92a000","#50701a":"#8e9900","#46640f":"#798000","#43561c":"#7b7f00","#252c13":"#3f3e07","#131115":"#12111a","#0f0e0f":"#110f11","#1f3b07":"#384900","#2b420e":"#4c5900","#243a08":"#3f4900","#314907":"#535900","#3f590a":"#6b6e00","#607f17":"#a7a600","#3e540e":"#6b6d00","#151a0a":"#252602","#191818":"#1c1a1b","#171717":"#1a1a1a","#306002":"#566d00","#446b0a":"#758200","#1f350c":"#374800","#4f6c13":"#898d00","#5b7714":"#9a9800","#263208":"#403f00","#0b0c07":"#100f05","#151e13":"#1b270f","#38690c":"#648200","#679514":"#b1bc00","#3a5e00":"#606800","#274000":"#414700","#142007":"#232b00","#23330d":"#3e4700","#627f18":"#a8a500","#334309":"#545200","#090a07":"#0d0d06","#5d901e":"#a5c100","#82a832":"#edf200","#557114":"#939400","#465f11":"#7a7c00","#354114":"#5e5b00","#28330e":"#484800","#638314":"#a8a600","#2f3f09":"#505000","#27242e":"#222239","#385010":"#636b00","#88b036":"#f8ff00","#5b7b1a":"#a0a500","#577427":"#9eab01","#45542d":"#6c731c","#587714":"#989a00","#2b3717":"#494f08","#2c452a":"#365c20","#5d8a17":"#a2b300","#6b9821":"#bdcd00","#466718":"#7c8d00","#38580a":"#616d00","#202d05":"#363800","#0b1502":"#141a00","#121b14":"#11230f","#395f0b":"#647600","#486a11":"#7d8900","#517512":"#8c9600","#4e6e17":"#8a9400","#45661b":"#7b8f00","#3f6113":"#6f8100","#203006":"#373c00","#2f4b0f":"#536400","#517522":"#91a800","#476715":"#7d8a00","#37580c":"#606f00","#1c2e04":"#303800","#0f160e":"#131d0b","#222823":"#243022","#232c1a":"#333b13","#93ac53":"#ddda3e","#7a9536":"#dad707","#738d4a":"#b5c22d","#40631a":"#728b00","#476a15":"#7d8d00","#456211":"#788000","#283d0b":"#465000","#1f330d":"#374700","#a6c55b":"#fbf945","#93b146":"#efeb23","#6e8a2b":"#c9c800","#4a6e1e":"#849b00","#0e1b01":"#191f00","#080900":"#0f0c00","#122307":"#202f00","#8eb140":"#f5f714","#84a933":"#f1f400","#658533":"#b1c10b","#466a1d":"#7d9600","#284905":"#475700","#142a00":"#242f00","#1a2718":"#213412","#142707":"#243300","#679024":"#b8c800","#689123":"#b9c800","#698d2f":"#bfd100","#4c7318":"#869a00","#345c08":"#5b6f00","#051702":"#0c1c00","#1d350a":"#344600","#67833f":"#a6b720","#688f29":"#bbcc00","#68951a":"#b5c200","#567e19":"#98a800","#081605":"#0e1e00","#1d2f06":"#333b00","#1c3603":"#323f00","#071901":"#101d00","#4d7e09":"#849600","#061502":"#0d1a00","#2f4810":"#536200","#293b0f":"#495200","#101a03":"#1c2000","#274203":"#434d00","#143500":"#283b00","#0d1b07":"#172600","#172807":"#293400","#122905":"#223300","#374e0e":"#606600","#101509":"#1b1e03","#141a0a":"#232602","#141b11":"#1b240d","#1c2f0e":"#314400","#304e10":"#556800","#122201":"#202700","#587629":"#9eae03","#121810":"#171f0d","#1c2e0e":"#314300","#315013":"#576e00","#364d1e":"#5c7007","#0f150d":"#141c0a","#1d320a":"#344300","#26430d":"#445900","#304618":"#556701","#244402":"#3f4e00","#070f02":"#0d1300","#223312":"#3b4b02","#264805":"#445500","#30471a":"#536804","#040404":"#080808","#060606":"#080808","#161e12":"#1e280d","#244107":"#405000","#294c06":"#495b00","#171d08":"#292800","#0f1500":"#171700","#0d1200":"#141400","#0f1400":"#161500","#121802":"#1d1c00","#101600":"#181800","#0b1102":"#131500","#303e23":"#475418","#415f1f":"#748c00","#090e02":"#101200","#406910":"#718600","#243b06":"#3e4800","#020901":"#070f00","#2c3516":"#4c4b07","#557116":"#959600","#384b0a":"#5e5e00","#2c3d05":"#494900","#222902":"#302a00","#0c1300":"#141500","#0e1700":"#171a00","#0c1f00":"#182200","#131f04":"#212700","#679f1d":"#b5d100","#3b600d":"#677900","#020602":"#050f00","#1d250a":"#343400","#3a4910":"#635f00","#65841d":"#b3b300","#172503":"#272c00","#42710a":"#738900","#203603":"#373f00","#2f440c":"#525900","#5b7a18":"#9fa200","#040407":"#03060c","#3f6803":"#6a7700","#42630b":"#717a00","#080c01":"#0e0f00","#354d0d":"#5c6400","#41630f":"#717f00","#090c07":"#0d1005","#679115":"#b1b800","#1c3605":"#324100","#0c0e08":"#121306","#080f00":"#0e1100","#486e0b":"#7b8600","#112402":"#1f2a00","#538916":"#93b000","#61901e":"#abc100","#659422":"#b3ca00","#629021":"#aec400","#5a8219":"#9eac00","#547f18":"#94a800","#578519":"#99af00","#5d901b":"#a4be00","#62931f":"#adc600","#4c790c":"#839400","#41680a":"#707f00","#496d0b":"#7c8500","#304112":"#565c00","#4e7312":"#889400","#1c3500":"#313b00","#44720f":"#788f00","#588216":"#9aa900","#578217":"#99aa00","#5a8719":"#9eb200","#58861b":"#9bb300","#51781b":"#90a300","#4e7518":"#8a9d00","#4c7715":"#869b00","#48720f":"#7d8f00","#3f6b06":"#6c7d00","#3c6406":"#677600","#3f650c":"#6e7d00","#0d1905":"#172100","#839b4c":"#d6d729","#1f3606":"#374300","#050a01":"#0b0f00","#283b01":"#414300","#284100":"#424800","#406d08":"#6f8200","#4f790c":"#879400","#69951d":"#b8c600","#385e09":"#627200","#385f06":"#617000","#365a07":"#5d6c00","#3f620e":"#6e7c00"} },
+    // 1004: Eldan the Chronicler (NPC) — retro-tinted mage (base 130),
+    // the SAME posterize-4 + 0.85-darken recipe the dat-baked Ancient
+    // Dragon (431) uses, but applied client-side: zone colors compose
+    // first, then the banding. No dat/spr change, no ASSET_VERSION bump.
+    1004: { base: 130, posterizeDark: true },
+  };
+
+  // id -> { base, table: Map<uint32 LE RGBA, uint32> } — compiled lazily
+  const compiled = new Map();
+
+  function compile(id) {
+    let entry = REGISTRY[id];
+    // Parametric entry (no color map): pass through to the sprite-buffer
+    // transform branches (posterizeDark etc.) with base intact.
+    if (!entry.map) {
+      return entry;
+    }
+    let table = new Map();
+    Object.keys(entry.map).forEach(function (from) {
+      let to = entry.map[from];
+      let f = parseInt(from.slice(1), 16);
+      let t = parseInt(to.slice(1), 16);
+      // hex is #RRGGBB; pixel words are little-endian RGBA (A in the high byte)
+      let fWord = ((0xFF << 24) | (((f) & 0xFF) << 16) | (((f >> 8) & 0xFF) << 8) | ((f >> 16) & 0xFF)) >>> 0;
+      let tWord = ((0xFF << 24) | (((t) & 0xFF) << 16) | (((t >> 8) & 0xFF) << 8) | ((t >> 16) & 0xFF)) >>> 0;
+      table.set(fWord, tWord);
+    });
+    return { base: entry.base, table: table };
+  }
+
+  // AUTO ALPHA RANGE (owner 2026-07-14, revised same day: "remove the hue
+  // ... only do the saturation"): looktype 20000 + base = the base look
+  // with SATURATION boosted — alphas read as a vivid, super-charged
+  // version of their species, same hue family. No shipped data.
+  // Hand-authored REGISTRY looks (acid dragon 1003) are separate ids and
+  // always win via WORLD.ALPHA_LOOKS.
+  const AUTO_BASE = 20000;
+  const AUTO_MAX = 20999;
+  const AUTO_SAT_SCALE = 1.6;
+
+  return {
+
+    get: function (id) {
+      if (REGISTRY.hasOwnProperty(id)) {
+        if (!compiled.has(id)) {
+          compiled.set(id, compile(id));
+        }
+        return compiled.get(id);
+      }
+      if (id >= AUTO_BASE && id <= AUTO_MAX) {
+        if (!compiled.has(id)) {
+          const base = id - AUTO_BASE;
+          compiled.set(id, { base: base, satScale: AUTO_SAT_SCALE });
+        }
+        return compiled.get(id);
+      }
+      return null;
+    },
+
+    has: function (id) {
+      return REGISTRY.hasOwnProperty(id);
+    }
+
+  };
+
+})();
+
+
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/chunk.js ===== */
 
 const Chunk = function (id, position, tiles) {
 
@@ -5155,7 +5380,7 @@ Chunk.prototype.__isOpenDoorCid = function (cid) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/condition.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/condition.js ===== */
 
 const ConditionManager = function (player, conditions) {
 
@@ -5259,7 +5484,7 @@ ConditionManager.prototype.PZ_LOCK = 19;
 ConditionManager.prototype.CAPTCHA_FREEZE = 20;
 ConditionManager.prototype.HUNT_FREEZE = 21;
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/container.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/container.js ===== */
 
 const Container = function (properties) {
 
@@ -5339,13 +5564,25 @@ Container.prototype.createDOM = function (title, items) {
     Container.prototype.__enableDepotMinimize(element);
   }
 
-  // Restore the player's saved window geometry for this container TYPE (which
-  // column + minimized), keyed by the stable container item id. Best-effort:
-  // loadContainerGeometry returns null on any failure and an invalid/missing
-  // column falls through to the default placement below — a bad save can never
-  // stop the container from opening.
+  // Restore the player's saved window geometry PER INSTANCE (owner
+  // 2026-07-12: "wouldn't per instance be better?"), keyed by the same
+  // open-order index the height store uses (__restoreKey — "the k-th open
+  // container" is the stable cross-relog identity; server container ids are
+  // re-minted guids). Same OTCv8 semantics as heights: honored only for the
+  // login/reconnect re-push; a MID-PLAY open clears the slot's memory and
+  // takes the default placement. Best-effort: null on any failure — a bad
+  // save can never stop the container from opening.
   let __wm = gameClient.interface.windowManager;
-  let __savedGeom = __wm.loadContainerGeometry(this.id);
+  let __savedGeom = null;
+  try {
+    let __geomWithinStart = (typeof gameClient !== "undefined" && gameClient.__gameStartAt
+      && (Date.now() - gameClient.__gameStartAt) < this.GAME_START_RESTORE_MS);
+    if (__geomWithinStart) {
+      __savedGeom = __wm.loadContainerGeometry(this.__restoreKey());
+    } else {
+      __wm.clearContainerGeometry(this.__restoreKey());
+    }
+  } catch (e) { __savedGeom = null; }
 
   // Place into the least-crowded sidebar column: prefer the right, overflow to
   // the left when the right is full, and when BOTH are full pick the emptier one
@@ -5353,16 +5590,40 @@ Container.prototype.createDOM = function (title, items) {
   // auto + scrolling body) instead of clipping the newest off-screen. This is
   // getFreeStack's job — it must be the single placement authority.
   //
-  // We deliberately do NOT pin a per-type saved column for placement. That
-  // pinned every identical backpack to one side, ignored available space (so a
-  // bag opened out of view when that column was full), and piled all same-type
-  // bags onto one column after a refresh (Gruby + JOHbola reports 2026-06-25).
-  // Space-based placement restores the old "stack-and-shrink, always visible"
-  // behaviour. The saved MINIMIZED state is still honoured below.
-  this.window.addTo(__wm.getFreeStack(expectedHeight));
+  // For MEASURED (mid-play) opens we deliberately do NOT pin a per-type saved
+  // column. That pinned every identical backpack to one side, ignored available
+  // space (so a bag opened out of view when that column was full), and piled
+  // all same-type bags onto one column after a refresh (Gruby + JOHbola
+  // reports 2026-06-25). The saved column IS passed as a preference: it only
+  // takes effect inside getFreeStack's hidden-layout LOGIN branch, where no
+  // pixel truth exists — so a relog restores the column the player dragged the
+  // bag to (report 2026-07-09). The saved MINIMIZED state is honoured below.
+  this.window.addTo(__wm.getFreeStack(expectedHeight, __savedGeom ? __savedGeom.column : null));
 
   // Register the window with the WindowManager to enable drag and drop
   __wm.register(this.window);
+
+  try {
+    // Login re-push only (same gate as the height restore): put the bag back
+    // at its saved POSITION within the column — the order among all windows
+    // there, fixed ones included — so a relog reproduces the arrangement the
+    // player dragged (report 2026-07-12: "position between backpacks" lost).
+    // Mid-play opens keep the default append; saves without order skip.
+    let __withinStart = (typeof gameClient !== "undefined" && gameClient.__gameStartAt
+      && (Date.now() - gameClient.__gameStartAt) < this.GAME_START_RESTORE_MS);
+    let __stack = element.parentElement;
+    if (__withinStart && __savedGeom && typeof __savedGeom.order === "number" && __stack) {
+      let __idx = Math.min(__savedGeom.order, __stack.children.length - 1);
+      let __target = __stack.children[__idx];
+      if (__target && __target !== element) {
+        __stack.insertBefore(element, __target);
+      }
+    }
+    // Overflow fit (report 2026-07-12: containers opening off-screen when a
+    // column is full): shrink the largest sibling bodies to make room; they
+    // grow back when a window closes (reflowColumnOnRemove).
+    __wm.fitColumnAfterAdd(element.parentElement, element);
+  } catch (e) { /* placement is best-effort — the window is already open */ }
 
   // Persist column + minimized state when the user minimizes/expands this
   // container. Deferred (setTimeout 0) because the "minimize" event fires
@@ -6162,7 +6423,7 @@ Container.prototype.__enableDepotTouchDrag = function (element) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/creature.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/creature.js ===== */
 
 const Creature = function (data) {
 
@@ -7203,7 +7464,7 @@ Creature.prototype.__createCharacterElement = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/equipment.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/equipment.js ===== */
 
 const Equipment = function (items) {
 
@@ -7600,7 +7861,7 @@ Equipment.prototype.render = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/friendlist.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/friendlist.js ===== */
 
 const Friendlist = function(friends) {
 
@@ -7865,7 +8126,7 @@ Friendlist.prototype.__nameSort = function(a, b) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/item.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/item.js ===== */
 
 const Item = function(id, count) {
 
@@ -8101,11 +8362,11 @@ Item.prototype.__getCountPattern = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/monster.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/monster.js ===== */
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/outfit.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/outfit.js ===== */
 
 const Outfit = function(outfit) {
 
@@ -8118,6 +8379,11 @@ const Outfit = function(outfit) {
   this.lookTypeEx = outfit.lookTypeEx || 0;
   this.details = outfit.details;
   this.mount = outfit.mount;
+
+  // Virtual looktype (client-side recolor variant, data/virtual-looktypes.js):
+  // resolves to { base, table } — getDataObject() then answers with the BASE
+  // outfit's frames/patterns and the sprite buffer recolors at cache fill.
+  this.__virtual = (typeof VirtualLooktypes !== "undefined") ? VirtualLooktypes.get(this.id) : null;
 
   this.mounted = outfit.mounted;
   this.addonOne = outfit.addonOne;
@@ -8271,6 +8537,12 @@ Outfit.prototype.getDataObject = function() {
     return gameClient.dataObjects.get(this.lookTypeEx);
   }
 
+  // Virtual looktypes borrow the base outfit's data object wholesale
+  // (frames, patterns, displacement) — only pixel colors differ.
+  if(this.__virtual) {
+    return gameClient.dataObjects.getOutfit(this.__virtual.base);
+  }
+
   return gameClient.dataObjects.getOutfit(this.id);
 
 }
@@ -8362,7 +8634,7 @@ Outfit.prototype.getSignature = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/player.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/player.js ===== */
 
 const Player = function (data) {
   /*
@@ -8690,7 +8962,7 @@ Player.prototype.recalculateEquipmentStats = function () {
 
   let totalArmor = 0;
   let totalAttack = 0;
-  let skillBonuses = { sword: 0, axe: 0, club: 0, fist: 0, distance: 0, shielding: 0 };
+  let skillBonuses = { sword: 0, axe: 0, club: 0, fist: 0, distance: 0, shielding: 0, magic: 0 };
   let defs = gameClient.itemDefinitionsByCid;
 
   if (!defs) return;
@@ -8721,6 +8993,10 @@ Player.prototype.recalculateEquipmentStats = function () {
     if (props.skillFist)   skillBonuses.fist       += props.skillFist;
     if (props.skillDist)   skillBonuses.distance   += props.skillDist;
     if (props.skillShield) skillBonuses.shielding  += props.skillShield;
+    // Magic level gear (spellbook of dark mysteries +2, owner 2026-07-11:
+    // "+2 should show in the skill window"). Number() guards junk string
+    // values on imported 8.x defs — mirrors the server's getMagicLevel.
+    if (props.magiclevelpoints) skillBonuses.magic += Number(props.magiclevelpoints) || 0;
 
   });
 
@@ -9095,7 +9371,7 @@ Player.prototype.__setLookDirection = function (direction) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/skills.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/skills.js ===== */
 
 const Skills = function (skills, vocation) {
 
@@ -9292,7 +9568,7 @@ Skills.prototype.__getRequiredSkillPoints = function (skillType, level) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/slot.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/slot.js ===== */
 
 const Slot = function () {
 
@@ -9593,7 +9869,7 @@ Slot.prototype.isEmpty = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/spellbook.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/spellbook.js ===== */
 
 "use strict";
 
@@ -9785,7 +10061,7 @@ Spellbook.prototype.__unlockSpell = function (id) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/state.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/state.js ===== */
 
 "use strict";
 
@@ -9848,7 +10124,7 @@ State.prototype.__createPattern = function(key, callback) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/thing.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/thing.js ===== */
 
 const Thing = function (id) {
 
@@ -10143,7 +10419,7 @@ Thing.prototype.__generateExtendedDurations = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/entities/tile.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/entities/tile.js ===== */
 
 // Wall-mounted CIDs that need __parent set on construction so
 // Item.__getHangablePattern can pick the wall-sprite variant after
@@ -10549,7 +10825,16 @@ Tile.prototype.isOccupied = function() {
   // Can not walk through other creatures (players, NPCs, monsters)
   // Skip creatures still animating their walk to this tile (isMoving) — they haven't visually arrived yet
   // Server-side validation still prevents actual collisions
-  if(Array.from(this.monsters).filter(x => x !== gameClient.player && !x.isMoving()).length > 0) {
+  // /ghost (server-authoritative verifiedGhost, GOD-only): a ghosted god is a
+  // non-entity for movement — others walk through the ghost, and a ghosted
+  // SELF walks through everyone. Mirrors the server's Tile.isOccupiedCharacters
+  // ghost skip; without this the local walk prediction snaps the step back.
+  let selfGhost = gameClient.player && gameClient.player.outfit && gameClient.player.outfit.verifiedGhost === true;
+  if(!selfGhost && Array.from(this.monsters).filter(function(x) {
+    if (x === gameClient.player || x.isMoving()) return false;
+    if (x.outfit && x.outfit.verifiedGhost === true) return false;
+    return true;
+  }).length > 0) {
     return true;
   }
 
@@ -10711,7 +10996,7 @@ Tile.prototype.getPattern = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/gamepad.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/input/gamepad.js ===== */
 
 const GamepadHandler = function () {
 
@@ -11739,7 +12024,7 @@ GamepadHandler.prototype.__startBindingPoll = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/input-provenance.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/input/input-provenance.js ===== */
 
 "use strict";
 
@@ -11823,7 +12108,7 @@ GamepadHandler.prototype.__startBindingPoll = function () {
 })();
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/keyboard.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/input/keyboard.js ===== */
 
 const Keyboard = function () {
   /*
@@ -13317,11 +13602,13 @@ Keyboard.prototype.__keyDown = function (event) {
     return gameClient.interface.hotbarManager.handleKeyPress(event.keyCode);
   }
 
-  // Tab key for switching channels
+  // Tab cycles channels forward; Shift+Tab cycles backward (player
+  // report 2026-07-15 — the reverse direction existed for the < button
+  // but the keyboard path hardcoded +1)
   if (event.keyCode === Keyboard.prototype.KEYS.TAB) {
     if (gameClient.isConnected()) {
       event.preventDefault();
-      return gameClient.interface.channelManager.handleChannelIncrement(1);
+      return gameClient.interface.channelManager.handleChannelIncrement(event.shiftKey ? -1 : 1);
     }
   }
 
@@ -13755,7 +14042,7 @@ Keyboard.prototype.__keyUp = function (event) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/mouse.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/input/mouse.js ===== */
 
 "use strict";
 
@@ -15459,6 +15746,16 @@ Mouse.prototype.__handleSlotContextMenu = function (event) {
     }
   }
 
+  // "Add to Loot List" for pickupable items with a known SID — one-tap
+  // "/lootlist add <sid>" (premium enforced server-side, catalog-validated).
+  let lootAddBtn = menu.element.querySelector("button[action=lootlist-add]");
+  if (lootAddBtn) {
+    lootAddBtn.style.display = "none";
+    if (item !== null && item.isPickupable() && item.sid) {
+      lootAddBtn.style.display = "";
+    }
+  }
+
   // Open with the slot object reference
   menu.open(event, slotObject);
   gameClient.interface.menuManager.__activeMenu = menu;
@@ -15780,6 +16077,19 @@ Mouse.prototype.__handleMouseDown = function (event) {
 
   // Track left button state
   if (event.button === 0) {
+
+    // Selection-drag suppression (desktop): a left-button drag that starts
+    // on an item slot must never seed a NATIVE text-selection drag — the
+    // browser's selection autoscroll scrolls the page/sidebar column and
+    // the entire UI (HP/mana arcs included) rides up and down with the
+    // cursor (Evolone video, 2026-07-15). Scoped to slots so clicking the
+    // game canvas still blurs/focuses normally and chat text stays
+    // selectable. CSS user-select:none on .slot/.window>.body is the belt;
+    // this is the braces for browsers that still anchor selections there.
+    if (event.target && event.target.closest && event.target.closest(".slot") !== null) {
+      event.preventDefault();
+    }
+
     this.__leftButtonDown = true;
 
     // Check if right button is already down - both buttons = Look
@@ -16289,7 +16599,7 @@ Mouse.COOKABLE_SIDS = {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/pathfinder.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/input/pathfinder.js ===== */
 
 const Pathfinder = function () {
 
@@ -17609,7 +17919,7 @@ Pathfinder.prototype.searchMinimap = function (fromPos, toPos) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/input/touch.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/input/touch.js ===== */
 
 "use strict";
 
@@ -19094,9 +19404,21 @@ Touch.prototype.__performTapAction = function () {
             break;
 
         default:
-            // Check if tapping on or near a monster — toggle attack
-            // Uses fuzzy targeting: checks tapped tile + adjacent tiles for forgiving mobile input
-            let monster = this.__findNearbyMonster(tileObject.which);
+            // Check if tapping on or near a monster — toggle attack.
+            // "Mobile precise click" (Optimization setting, owner 2026-07-15):
+            // resolve the tap against creatures' DRAWN sprites via the desktop
+            // OTCv8-style resolver (fakeEvent carries the clientX/clientY it
+            // needs) — a hit attacks exactly that creature; a miss deliberately
+            // SKIPS the fuzzy scan and falls through to walk. That strictness
+            // is the point: tap the sprite to attack, tap anywhere else to
+            // walk. Off (default) = forgiving 3x3 tile scan.
+            let monster;
+            if (gameClient.interface.settings.isMobilePreciseClickEnabled
+                && gameClient.interface.settings.isMobilePreciseClickEnabled()) {
+                monster = gameClient.mouse.__pickCreatureAtClick(fakeEvent, tileObject.which) || null;
+            } else {
+                monster = this.__findNearbyMonster(tileObject.which);
+            }
             if (monster !== null) {
                 // Skip attack logic in protection zones — open context menu instead
                 if (gameClient.player.isInProtectionZone()) {
@@ -19366,6 +19688,15 @@ Touch.prototype.__openSlotContextMenu = function (slotObject, touch) {
         }
     }
 
+    // "Add to Loot List" — mirror the desktop container menu toggle
+    let lootAddBtn = menu.element.querySelector("button[action=lootlist-add]");
+    if (lootAddBtn) {
+        lootAddBtn.style.display = "none";
+        if (item !== null && item.isPickupable() && item.sid) {
+            lootAddBtn.style.display = "";
+        }
+    }
+
     // Open the menu at touch position
     let fakeEvent = { clientX: touch.clientX, clientY: touch.clientY };
     menu.open(fakeEvent, slotObject);
@@ -19590,6 +19921,7 @@ Touch.prototype.__handleJoystickStart = function (event) {
     }
 
     let touch = event.changedTouches[0];
+
     let rect = this.joystickZone.getBoundingClientRect();
 
     this.joystick.active = true;
@@ -19643,6 +19975,7 @@ Touch.prototype.__handleJoystickEnd = function (event) {
     this.joystick.touchId = null;
     this.joystick.direction = null;
     this.joystick.__turnDir = null;
+
 
     // Clear the movement buffer on release to prevent taps from double-stepping
     if (gameClient.player) {
@@ -19723,6 +20056,7 @@ Touch.prototype.__handleDpadStart = function (event) {
     event.preventDefault();
 
     let touch = event.changedTouches[0];
+
     let rect = this.joystickZone.getBoundingClientRect();
     let centerX = rect.left + rect.width / 2;
     let centerY = rect.top + rect.height / 2;
@@ -20098,6 +20432,8 @@ Touch.prototype.__applyMovementStyle = function () {
     }
     if (this.joystickZone) {
         this.joystickZone.classList.toggle("dpad-active", isDpad);
+        this.joystickZone.style.visibility = "";
+        this.joystickZone.style.pointerEvents = "";
     }
 
 }
@@ -23039,7 +23375,7 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/launcher.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/launcher.js ===== */
 
 "use strict";
 
@@ -23084,6 +23420,8 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
     "src/utils/eventemitter.js",
     "src/core/gameclient.js",
     "src/rendering/minimap.js",
+    "src/data/virtual-looktypes.js",
+    "src/data/virtual-items.js",
     "src/entities/outfit.js",
     "src/entities/thing.js",
     "src/utils/dataobject.js",
@@ -23178,7 +23516,7 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
     "src/ui/modals/modal-menu.js",
     "src/ui/modals/modal-games.js",
     "src/ui/modals/modal-chess.js",
-    // "src/ui/modals/modal-cards.js",  // PARKED 2026-06-26 — card collecting not shipped (file kept; re-add to resume)
+    // "src/ui/modals/modal-cards.js",  // PARKED again 2026-07-12 (owner) — cards + holo reveal built, not shipped (file kept; re-add to resume)
     // "src/ui/modals/modal-minibeasts.js",        // PARKED 2026-06-26 — Minibeasts not shipped (files kept; re-add to resume)
     // "src/ui/modals/modal-minibeast-battle.js",  // PARKED 2026-06-26
     "src/ui/modals/modal-simplegame.js",
@@ -23699,7 +24037,7 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
     "ab_dendriel": "Ab'Dendriel", "kazordoon": "Kazordoon", "edron": "Edron",
     "darashia": "Darashia", "ankrahmun": "Ankrahmun", "port_hope": "Port Hope",
     "rookgaard": "Rookgaard", "svargrond": "Svargrond", "liberty_bay": "Liberty Bay",
-    "starfish": "Starfish Island"
+    "starfish": "Starfish Island", "sun_triad": "The Sun Triad"
   };
 
   function fetchWeather(loaderEl) {
@@ -23864,7 +24202,7 @@ Touch.prototype.__minimizePanel = function (panelName, button) {
 })();
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/network-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/network/network-manager.js ===== */
 
 // Standard CRC32 (IEEE 802.3 polynomial 0xEDB88320) — table-driven.
 // Used by the frame-CRC probe so the client can cross-reference the
@@ -23916,6 +24254,13 @@ const NetworkManager = function () {
   this.__lastCharacterName = null;
   this.__sessionToken = null;
   this.__lastHost = null;
+
+  // Logout -> character screen (owner 2026-07-11): the char-select modal
+  // stashes its freshest payload here on every open; a graceful logout
+  // (__logoutToCharSelect, armed by the logout confirm) re-opens the modal
+  // with it after the reset instead of dropping to the login form.
+  this.__lastCharSelectPayload = null;
+  this.__logoutToCharSelect = false;
 
   // Web Lock release function — held while connected to prevent mobile browsers from freezing the tab
   this.__releaseWakeLock = null;
@@ -24624,6 +24969,17 @@ NetworkManager.prototype.readPacket = function (packet) {
       return this.packetHandler.handleShopPointUpdate(packet.readUInt32());
     }
 
+    case CONST.PROTOCOL.SERVER.OUTFIT_LIST: {
+      // Live outfit-list refresh (shop outfit purchase / quest grant /
+      // premium change) — a new outfit shows without a relog. Same wire
+      // shape as the login list.
+      let outfits = packet.readOutfits(true);   // entries carry owned-addon bits
+      if (gameClient.player) {
+        gameClient.player.outfits = outfits;
+      }
+      return;
+    }
+
     case CONST.PROTOCOL.SERVER.PARTY_INFO: {
       let info = packet.readPartyInfo();
       if (info) {
@@ -25149,7 +25505,12 @@ NetworkManager.prototype.__maybeSupplyMessage = function (cid, fluidType, count)
     let FLUID_SUPPLY_NAMES = { 7: "mana fluids", 10: "life fluids" };
     let name = (fluidType && FLUID_SUPPLY_NAMES[fluidType]) ? FLUID_SUPPLY_NAMES[fluidType] : (def.properties.name + "s");
     if (gameClient.interface && gameClient.interface.notificationManager) {
-      gameClient.interface.notificationManager.setServerMessage("Using one of " + prev + " " + name + "...", 30 /* LIGHTGREEN */, 0);
+      // Priority -1 (chatter): must never overwrite a loot line still on
+      // screen — killing with a rune sends "Loot of ..." and this supply
+      // line back-to-back, and the loot is the one the player needs to see
+      // (player report 2026-07-09). Another supply line (equal priority)
+      // still replaces it, so chained potion chugs keep updating the count.
+      gameClient.interface.notificationManager.setServerMessage("Using one of " + prev + " " + name + "...", 30 /* LIGHTGREEN */, -1);
     }
   } catch (e) { /* cosmetic — never break the packet loop */ }
 
@@ -26332,6 +26693,19 @@ NetworkManager.prototype.__handleClose = function (event) {
     if (this.__deathReconnectPending) {
       this.__deathReconnectPending = false;
       gameClient.interface.modalManager.open("floater-connecting", "Logging in...");
+      return;
+    }
+    // Graceful logout -> straight back to the CHARACTER screen (owner
+    // 2026-07-11): re-open character select with the payload stashed on its
+    // last open (token is 8h multi-use). Falls through to the plain login
+    // screen when nothing is stashed (shouldn't happen — the modal is the
+    // only way in-game) or on the death path above, which reconnects the
+    // same character instead.
+    if (this.__logoutToCharSelect) {
+      this.__logoutToCharSelect = false;
+      if (this.__lastCharSelectPayload) {
+        gameClient.interface.modalManager.open("character-select-modal", this.__lastCharSelectPayload);
+      }
     }
     return;
   }
@@ -26506,6 +26880,11 @@ NetworkManager.prototype.__handleConnection = function (event) {
 
   // Connected — the CONNECTING watchdog for this attempt is moot.
   this.__clearConnectWatchdog();
+
+  // A fresh connection voids any armed logout->character-screen intent: a
+  // logout the server REFUSED (combat) leaves the flag set, and without
+  // this it would hijack a LATER unrelated intentional close.
+  this.__logoutToCharSelect = false;
 
   // #1 reconnect-lifecycle: if this connect ended a disconnect episode, log how
   // long the gap was (and how many attempts it took). Read BEFORE the resets
@@ -27653,7 +28032,7 @@ NetworkManager.prototype.__onForegroundReturn = function (forceReconnect) {
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/packet-handler.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/network/packet-handler.js ===== */
 
 const PacketHandler = function () {
 
@@ -28811,16 +29190,30 @@ PacketHandler.prototype.handleEmote = function (packet) {
       }
       sourceCreature.__weaponTrail = { start: performance.now(), particles: particles, ndx: ndx, ndy: ndy, color: color };
 
-      // Attacker lunge: player briefly lunges toward the target
-      gameClient.player.__attackLunge = { start: performance.now(), ndx: ndx, ndy: ndy };
+      // The lunge + slash arc imply the PLAYER swung — but this handler fires
+      // for ANY damage on the player's target (the packet carries only the
+      // victim id, no attacker), so an ALLY's hit on a shared target made the
+      // player's own character twitch/bounce as if attacking on every hit
+      // (owner report 2026-07-12). Throttle these player-specific FX to the
+      // player's attack cadence so they roughly track real swings; the
+      // target's recoil + blood above still react to every hit (it IS being
+      // hit, by anyone).
+      let __nowFx = performance.now();
+      let __atkInterval = gameClient.player.attackSlowness || 2000;
+      if (__nowFx - (gameClient.player.__lastMeleeLungeAt || 0) >= __atkInterval * 0.7) {
+        gameClient.player.__lastMeleeLungeAt = __nowFx;
 
-      // Slash arc between player and target
-      gameClient.renderer.__activeSlashArcs.push({
-        start: performance.now(),
-        worldPos: sp,
-        ndx: ndx,
-        ndy: ndy
-      });
+        // Attacker lunge: player briefly lunges toward the target
+        gameClient.player.__attackLunge = { start: __nowFx, ndx: ndx, ndy: ndy };
+
+        // Slash arc between player and target
+        gameClient.renderer.__activeSlashArcs.push({
+          start: __nowFx,
+          worldPos: sp,
+          ndx: ndx,
+          ndy: ndy
+        });
+      }
     }
   }
 
@@ -29220,6 +29613,8 @@ PacketHandler.prototype.handleServerMessage = function (string, color, priority)
   //                            over and grab it (the actionable one)
   //   {valuable} purple      = unlisted rare — consider listing it
   string = string.replace(/\{valuable\}(.*?)\{\/valuable\}/g, "<span style=\"color:#C77DFF\">$1</span>");
+  //   {retro}    turquoise bold = ancient/retro relic (Elder Age drops)
+  string = string.replace(/\{retro\}(.*?)\{\/retro\}/g, "<span style=\"color:#40E0D0;font-weight:bold\">$1</span>");
   string = string.replace(/\{eat\}(.*?)\{\/eat\}/g, "<span style=\"color:#FF8547\">$1</span>");
   string = string.replace(/\{auto\}(.*?)\{\/auto\}/g, "<span style=\"color:#FFD700\">$1</span>");
   string = string.replace(/\{listed\}(.*?)\{\/listed\}/g, "<span style=\"color:#FFFFFF;font-weight:bold\">$1</span>");
@@ -29295,8 +29690,26 @@ PacketHandler.prototype.clientSideMoveCheck = function (position) {
     return false;
   }
 
+  // Early creature check — deliberately stricter than the tile.isOccupied()
+  // call at the end of this function (this one also counts creatures still
+  // animating INTO the tile). Ghost-aware since 2026-07-13: this was the
+  // THIRD ghost gate — it short-circuited before the ghost-aware
+  // isOccupied() below ever ran, so a ghosted god's move packet was never
+  // even sent ("You cannot walk here."). A ghosted SELF ignores creatures
+  // entirely; server-verified ghost creatures block nobody.
   if (tile.monsters.size > 0) {
-    return true;
+    let __selfGhost = gameClient.player.outfit && gameClient.player.outfit.verifiedGhost === true;
+    if (!__selfGhost) {
+      let __blocked = false;
+      tile.monsters.forEach(function (x) {
+        if (x === gameClient.player) return;
+        if (x.outfit && x.outfit.verifiedGhost === true) return;
+        __blocked = true;
+      });
+      if (__blocked) {
+        return true;
+      }
+    }
   }
 
   // Elevation change handling from high to low
@@ -31170,7 +31583,7 @@ PacketHandler.prototype.__getDamageTintColor = function (creature) {
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/packet.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/network/packet.js ===== */
 
 "use strict";
 
@@ -31197,7 +31610,7 @@ Packet.prototype.advance = function(amount) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/packetreader.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/network/packetreader.js ===== */
 
 "use strict";
 
@@ -32448,7 +32861,7 @@ PacketReader.prototype.readPlayerInfo = function () {
 
   let equipment = this.readEquipment();
   let mounts = this.readOutfits();
-  let outfits = this.readOutfits();
+  let outfits = this.readOutfits(true);   // outfit entries carry owned-addon bits
   let spellbook = this.readArray();
   let friendlist = this.readFriendlist();
 
@@ -32519,18 +32932,21 @@ PacketReader.prototype.readArray = function () {
 
 }
 
-PacketReader.prototype.readOutfits = function () {
+PacketReader.prototype.readOutfits = function (withAddons) {
 
   /*
    * Function PacketReader.readOutfits
-   * Reads all the outfits from a packet
+   * Reads all the outfits from a packet. `withAddons` = true for the OUTFIT
+   * list (each entry carries an owned-addon-bits byte since 2026-07-12 so
+   * the outfit window can disable unearned addons); MOUNTS share this
+   * reader but keep the old wire shape (no flag).
    */
 
   let length = this.readUInt8();
   let outfits = new Array();
 
   for (let i = 0; i < length; i++) {
-    outfits.push(this.__readSingleOutfit());
+    outfits.push(this.__readSingleOutfit(withAddons));
   }
 
   return outfits;
@@ -32576,17 +32992,25 @@ PacketReader.prototype.__readSingleSpell = function () {
 
 }
 
-PacketReader.prototype.__readSingleOutfit = function () {
+PacketReader.prototype.__readSingleOutfit = function (withAddons) {
 
   /*
    * Function PacketReader.readSingleOutfit
-   * Reads a single outfit from the packet
+   * Reads a single outfit from the packet. `withAddons` entries carry the
+   * server-validated owned-addon bits (1 = addon one, 2 = addon two) the
+   * outfit window uses to disable unearned addon checkboxes.
    */
 
-  return new Object({
+  let entry = new Object({
     "id": this.readUInt16(),
     "name": this.readString()
   });
+
+  if (withAddons) {
+    entry.addons = this.readUInt8();
+  }
+
+  return entry;
 
 }
 
@@ -32648,13 +33072,19 @@ PacketReader.prototype.readShopOffer = function () {
     let points = this.readUInt32();
     let sid = this.readUInt16();
     let category = this.readString();
+    // Outfit products: looktype + addon layers for the preview (0 = item
+    // render). Written unconditionally by ShopOfferPacket — wire contract.
+    let outfitId = this.readUInt16();
+    let outfitAddons = this.readUInt8();
 
     offers.push({
       "id": id,
       "name": name,
       "points": points,
       "sid": sid,
-      "category": category
+      "category": category,
+      "outfitId": outfitId,
+      "outfitAddons": outfitAddons
     });
   }
 
@@ -33046,7 +33476,7 @@ PacketReader.prototype.readCreatureManifest = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/packetwriter.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/network/packetwriter.js ===== */
 
 const PacketWriter = function(opcode, length) {
 
@@ -33230,7 +33660,7 @@ PacketWriter.prototype.writePosition = function(position) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/network/protocol.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/network/protocol.js ===== */
 
 const OutfitChangePacket = function (outfit) {
 
@@ -34441,8 +34871,18 @@ const LootListUpdatePacket = function (items, enabled, routes) {
    *   UInt16 × N each item SID
    *   UInt16 route count, then per route UInt16 sid + u8-len string bag
    *   name (loot router — server reads this tail defensively).
-   * The route tail is trimmed to keep the whole packet under ~1000 bytes
-   * (inbound per-tick ceiling is 1024).
+   * The route tail is trimmed only as a runaway guard. The OLD ~1000-byte
+   * cap matched the server's inbound limit (uWS maxPayloadLength =
+   * CONFIG.SERVER.MAX_PACKET_SIZE, previously 1024) — and since the item
+   * list eats 2 bytes each, it silently dropped route (backpack) assignments
+   * once ~74+ items were selected (player report 2026-07-12). Raised to
+   * 8192, then to 16384 alongside the route cap going 200 -> 500 (player
+   * report 2026-07-14: the server's silent 200 clamp dropped every route
+   * above the 200th-lowest sid). Real max config — 500 items (1000 B) +
+   * 500 routes x 23 B (~11.5 KB) ~= 12.6 KB — fits 16384.
+   * MUST stay <= the server's MAX_PACKET_SIZE: a bigger packet is DROPPED by
+   * uWS (total save failure), so the two values move together and the engine
+   * ships first.
    */
 
   let arr = Array.isArray(items) ? items : [];
@@ -34459,7 +34899,10 @@ const LootListUpdatePacket = function (items, enabled, routes) {
     }
   }
   let base = 1 + 2 + arr.length * 2 + 2;
-  let budget = 1000 - base;
+  // 16384 = the server's MAX_PACKET_SIZE; the take-loop below is a runaway
+  // guard above the ~12.6 KB real max (500 items + 500 routes). Route
+  // assignments no longer get trimmed for large selections.
+  let budget = 16384 - base;
   let take = [];
   for (let i = 0; i < routeArr.length; i++) {
     let cost = 2 + 1 + routeArr[i].name.length;
@@ -34558,7 +35001,7 @@ HotbarCountsRequestPacket.prototype.constructor = HotbarCountsRequestPacket;
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/canvas.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/canvas.js ===== */
 
 const Canvas = function (id, width, height) {
 
@@ -35592,33 +36035,58 @@ Canvas.prototype.__drawSprite = function (sprite, position, x, y, size) {
 
   if (this.__tintActive && this.__tintCtx) {
 
-    // Draw sprite to temp canvas, multiply with tint color, restore alpha
-    let tc = this.__tintCtx;
+    // CACHED tint compositing (owner 2026-07-14: ~30 tinted furniture kits
+    // in one house = the mobile FPS leak). The old path ran the full 5-op
+    // composite (clear, draw, multiply fill, alpha restore, blit) for EVERY
+    // tinted sprite EVERY frame — composite-mode switches are the priciest
+    // 2D-context state changes. Each unique (sprite, tint) is now rendered
+    // once into a small offscreen canvas and reused as a single drawImage,
+    // making steady-state tinted draws as cheap as untinted ones. Bounded
+    // at 512 entries (~2 MB), insertion-order eviction; sprite sheets and
+    // per-item tintIds are static so entries never go stale.
+    if (!this.__tintCache) this.__tintCache = new Map();
+    let srcId = sprite.src.__tintSrcId;
+    if (srcId === undefined) {
+      srcId = Canvas.__tintSrcSeq = (Canvas.__tintSrcSeq || 0) + 1;
+      sprite.src.__tintSrcId = srcId;
+    }
     let sx = 32 * sprite.position.x;
     let sy = 32 * sprite.position.y;
+    let key = srcId + ":" + sx + ":" + sy + ":" + this.__tintR + ":" + this.__tintG + ":" + this.__tintB;
+    let tinted = this.__tintCache.get(key);
 
-    tc.clearRect(0, 0, 32, 32);
-    tc.globalCompositeOperation = "source-over";
-    tc.drawImage(sprite.src, sx, sy, 32, 32, 0, 0, 32, 32);
+    if (tinted === undefined) {
+      tinted = document.createElement("canvas");
+      tinted.width = 32;
+      tinted.height = 32;
+      let tc = tinted.getContext("2d");
 
-    // Multiply blend: pixel * tint per channel (clamped to 1.0 for multiply pass)
-    tc.globalCompositeOperation = "multiply";
-    tc.fillStyle = "rgb(" + Math.round(Math.min(this.__tintR, 1) * 255) + "," + Math.round(Math.min(this.__tintG, 1) * 255) + "," + Math.round(Math.min(this.__tintB, 1) * 255) + ")";
-    tc.fillRect(0, 0, 32, 32);
+      tc.drawImage(sprite.src, sx, sy, 32, 32, 0, 0, 32, 32);
 
-    // Additive pass for channels > 1.0 (brightens beyond original)
-    let exR = this.__tintR - 1, exG = this.__tintG - 1, exB = this.__tintB - 1;
-    if (exR > 0 || exG > 0 || exB > 0) {
-      tc.globalCompositeOperation = "lighter";
-      tc.fillStyle = "rgb(" + Math.round(Math.max(exR, 0) * 255) + "," + Math.round(Math.max(exG, 0) * 255) + "," + Math.round(Math.max(exB, 0) * 255) + ")";
+      // Multiply blend: pixel * tint per channel (clamped to 1.0 for multiply pass)
+      tc.globalCompositeOperation = "multiply";
+      tc.fillStyle = "rgb(" + Math.round(Math.min(this.__tintR, 1) * 255) + "," + Math.round(Math.min(this.__tintG, 1) * 255) + "," + Math.round(Math.min(this.__tintB, 1) * 255) + ")";
       tc.fillRect(0, 0, 32, 32);
+
+      // Additive pass for channels > 1.0 (brightens beyond original)
+      let exR = this.__tintR - 1, exG = this.__tintG - 1, exB = this.__tintB - 1;
+      if (exR > 0 || exG > 0 || exB > 0) {
+        tc.globalCompositeOperation = "lighter";
+        tc.fillStyle = "rgb(" + Math.round(Math.max(exR, 0) * 255) + "," + Math.round(Math.max(exG, 0) * 255) + "," + Math.round(Math.max(exB, 0) * 255) + ")";
+        tc.fillRect(0, 0, 32, 32);
+      }
+
+      // Restore original sprite alpha (multiply/lighter fills transparent areas too)
+      tc.globalCompositeOperation = "destination-in";
+      tc.drawImage(sprite.src, sx, sy, 32, 32, 0, 0, 32, 32);
+
+      if (this.__tintCache.size >= 512) {
+        this.__tintCache.delete(this.__tintCache.keys().next().value);
+      }
+      this.__tintCache.set(key, tinted);
     }
 
-    // Restore original sprite alpha (multiply/lighter fills transparent areas too)
-    tc.globalCompositeOperation = "destination-in";
-    tc.drawImage(sprite.src, sx, sy, 32, 32, 0, 0, 32, 32);
-
-    this.context.drawImage(this.__tintCanvas, 0, 0, 32, 32, dstX, dstY, dstW, dstH);
+    this.context.drawImage(tinted, 0, 0, 32, 32, dstX, dstY, dstW, dstH);
 
   } else {
 
@@ -35677,6 +36145,11 @@ Canvas.prototype.__drawCharacter = function (spriteBuffer, spriteBufferMount, ou
 
       // No customizable outfit: just draw the outfit as is (i.e., normal monsters) and proceed
       if (!outfit.hasLookDetails()) {
+        // Virtual looktype: fill this (variant-signature-keyed) buffer with
+        // a recolored copy once; plain get() would cache the original pixels.
+        if (outfit.__virtual && baseIdentifier !== 0 && !spriteBuffer.has(baseIdentifier)) {
+          spriteBuffer.addRecolored(baseIdentifier, outfit);
+        }
         this.__drawSprite(spriteBuffer.get(baseIdentifier), position, x, y, size);
         continue;
       }
@@ -35687,7 +36160,11 @@ Canvas.prototype.__drawCharacter = function (spriteBuffer, spriteBufferMount, ou
       // when a sprite is unavailable, and for semi-transparent creatures —
       // stacked addon layers under alpha blend differently than a pre-merged
       // sprite.
-      if (this.__isWebGL && this.__spriteBatch.__globalAlpha >= 1 &&
+      // Virtual looktypes skip the GPU colorize path — an arbitrary color
+      // map is not expressible in the zone shader; they compose on CPU
+      // (cache-fill only) where addComposed applies the map.
+      if (!outfit.__virtual &&
+          this.__isWebGL && this.__spriteBatch.__globalAlpha >= 1 &&
           gameClient.interface.settings.isGpuOutfitColorsEnabled() &&
           this.__drawOutfitCellGL(spriteBufferMount, outfit, characterGroup, mountGroup, characterFrame, mountFrame, xPattern, zPattern, x, y, position, size)) {
         continue;
@@ -36080,7 +36557,7 @@ Canvas.prototype.drawSlashArc = function (position, ndx, ndy, progress) {
 
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/debugger.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/debugger.js ===== */
 
 const Debugger = function() {
 
@@ -36734,7 +37211,7 @@ Debugger.prototype.__renderStatistics = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/item-tint.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/item-tint.js ===== */
 
 /*
  * Item Tint Map
@@ -36928,7 +37405,7 @@ function getItemGlow(sid, tintId) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/light-canvas.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/light-canvas.js ===== */
 
 "use strict";
 
@@ -37184,7 +37661,7 @@ LightCanvas.prototype.renderLightBubble = function(x, y, size, colorByte, intens
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/minimap.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/minimap.js ===== */
 
 const Minimap = function () {
 
@@ -38506,7 +38983,7 @@ Minimap.prototype.colors = new Array(
 ).map(Number);
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/outline-canvas.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/outline-canvas.js ===== */
 
 const OutlineCanvas = function(id, width, height) {
 
@@ -38578,7 +39055,7 @@ Canvas.prototype.drawOutlineSprite = function(position) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/renderer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/renderer.js ===== */
 
 const Renderer = function () {
 
@@ -38682,6 +39159,13 @@ const Renderer = function () {
 // Floor fade duration (ms) — roofs fade out/in over this window when the
 // visible-floor cut changes on the same player floor (OTCv8-style polish).
 Renderer.prototype.FLOOR_FADE_MS = 150;
+
+// Max tiles + items the floor-fade band may contain before the reveal snaps
+// instead of fading (ALL platforms — owner 2026-07-13: "no point to load
+// multiple fades and nuke performance"; Low Spec snaps unconditionally).
+// Sized to one full floor in the 15×11 viewport (~165 tiles + furniture) so
+// a single-story reveal always fades; stacked multi-story interiors snap.
+Renderer.prototype.FLOOR_FADE_WORK_BUDGET = 450;
 
 Renderer.prototype.render = function () {
 
@@ -39012,7 +39496,34 @@ Renderer.prototype.__rebuildTileCache = function () {
     this.__displayedFloorMax = max;
     this.__floorFade = null;
   } else if (max !== (this.__floorFade ? this.__floorFade.target : this.__displayedFloorMax)) {
-    if (lowSpec || (!cutInfo.opening && !this.__lastCutOpening)) {
+    // Opening fades are BUDGETED (owner 2026-07-13: "when it has to load too
+    // many it just skips it, but if it's just 1 it still does it — unless Low
+    // Spec"): sum the tiles + items the fade band would draw; over budget →
+    // snap. One floor's worth (a hut, sparse upper stories) stays under the
+    // budget and fades; a stacked multi-story interior (the windowed Cormaya
+    // flats — the mobile FPS collapse: 200ms of superset alpha draws + a
+    // cache rebuild per window/door toggle, chaining every step) snaps.
+    // Empty sky floors above a low building cost ~0, so band HEIGHT doesn't
+    // matter — only real content does. Scan runs once per cut CHANGE (not
+    // per frame or per step) and early-outs at the budget.
+    let __fadeOverBudget = false;
+    if (!lowSpec && (cutInfo.opening || this.__lastCutOpening)) {
+      let fromFloor = this.__floorFade ? this.__floorFade.target : this.__displayedFloorMax;
+      let lo = Math.min(fromFloor, max);
+      let hi = Math.max(fromFloor, max);
+      let work = 0;
+      for (let i = hi; i > lo && !__fadeOverBudget; i--) {
+        let bandTiles = this.__getFloorTilesTiles(i);
+        work += bandTiles.length;
+        for (let j = 0; j < bandTiles.length; j++) {
+          work += bandTiles[j].items.length;
+        }
+        if (work > Renderer.prototype.FLOOR_FADE_WORK_BUDGET) {
+          __fadeOverBudget = true;
+        }
+      }
+    }
+    if (lowSpec || __fadeOverBudget || (!cutInfo.opening && !this.__lastCutOpening)) {
       // Plain ceiling-scan change: snap (also cancels any in-flight fade)
       this.__floorFade = null;
     } else if (this.__floorFade) {
@@ -39405,6 +39916,26 @@ Renderer.prototype.__getFloorTilesTiles = function (floor) {
     }
   }
 
+  // Painter's DIAGONAL order (owner wardrobe-under-mountain report,
+  // 2026-07-11): draw by (x+y) ascending, ties by x. The raw order above is
+  // chunk-major then row-major, which breaks 64px-wide sprites against the
+  // NE/SW diagonal: a 2x2 mountain wall at (x-1,y+1) — one ROW below a
+  // wardrobe's top half at (x,y) — painted AFTER it and covered its left
+  // side, even though the real client dat classes the wall ON_BOTTOM
+  // (under commons). Diagonal order (the OTC-family visible-tile order)
+  // fixes the diagonal pair (same sum -> west tile first), preserves
+  // south/east-covers-north/west (bigger sum draws later, so mountains
+  // still occlude what stands behind them), keeps every creature-deferral
+  // relation (defer targets are south/east/previous — same earlier/later
+  // sign as row-major), and removes chunk-boundary order artifacts.
+  // Cost: one O(n log n) sort per CACHE REBUILD (player step), not per
+  // frame — ~2k tiles/floor, well under a millisecond.
+  tiles.sort(function (a, b) {
+    let pa = a.getPosition();
+    let pb = b.getPosition();
+    return (pa.x + pa.y) - (pb.x + pb.y) || pa.x - pb.x;
+  });
+
   return tiles;
 
 }
@@ -39439,6 +39970,10 @@ Renderer.prototype.__renderWorld = function () {
 
   // Lowest Spec per-tile draw caps (items/effects) read this per-frame flag
   this.__lowestSpecFrame = settings.isLowestSpecMode();
+  // Mobile gets a default per-tile stack-draw cap even outside Lowest Spec
+  // (owner 2026-07-13: a furniture-hoarded Cormaya house tanked phone FPS —
+  // buried stack items are fully covered yet each cost a draw per frame).
+  this.__mobileFrame = !!(gameClient.touch && gameClient.touch.isMobileMode);
 
   // Reset light queue for FBO-based lighting
   this.__lightQueueSize = 0;
@@ -39548,6 +40083,7 @@ Renderer.prototype.__renderWorld = function () {
   // Low Spec Mode the expire loop still runs so the queue doesn't grow
   // unbounded — only the draw call is skipped.
   let now = performance.now();
+  let __playerZ = gameClient.player ? gameClient.player.getPosition().z : null;
   for (let i = this.__activeDeathExplosions.length - 1; i >= 0; i--) {
     let d = this.__activeDeathExplosions[i];
     let elapsed = now - d.start;
@@ -39556,6 +40092,14 @@ Renderer.prototype.__renderWorld = function () {
       continue;
     }
     if (lowSpecMode) continue;
+    // Floor gate (owner report 2026-07-12: "blood splash of another player
+    // on a floor above me"): these are SCREEN-SPACE overlays projected from
+    // a raw worldPos, so without a z check a death one floor up/down paints
+    // straight through the ceiling. Mirrors the sameFloor gate the per-frame
+    // blood/spark queues already have (2026-05-18 fix) — this persistent
+    // queue was the one that missed it. Checked at DRAW time so a player
+    // changing floors mid-burst also stops seeing it.
+    if (__playerZ !== null && d.worldPos.z !== __playerZ) continue;
     // Convert world position to screen position each frame (follows camera)
     let screenPos = this.getStaticScreenPosition(d.worldPos);
     this.screen.drawBloodSplatter(screenPos, d.particles, elapsed / 500, d.color);
@@ -39571,6 +40115,9 @@ Renderer.prototype.__renderWorld = function () {
       continue;
     }
     if (lowSpecMode) continue;
+    // Floor gate — same cross-floor screen-overlay leak as the death
+    // explosions (a stair-hop mid-arc painted it on the landing floor).
+    if (__playerZ !== null && a.worldPos.z !== __playerZ) continue;
     let screenPos = this.getStaticScreenPosition(a.worldPos);
     this.screen.drawSlashArc(screenPos, a.ndx, a.ndy, elapsed / 120);
   }
@@ -39585,6 +40132,10 @@ Renderer.prototype.__renderWorld = function () {
       continue;
     }
     if (lowSpecMode) continue;
+    // Floor gate — POFF/BLOCKHIT sparks arrive for any streamed floor
+    // (canSee is projected-2D, no z), so ungated they twinkle through
+    // ceilings exactly like the death-blood leak.
+    if (__playerZ !== null && s.worldPos.z !== __playerZ) continue;
     let screenPos = this.getStaticScreenPosition(s.worldPos);
     this.screen.drawBlockSpark(32 * screenPos.x + 16, 32 * screenPos.y + 16, elapsed / 300);
   }
@@ -39699,6 +40250,25 @@ Renderer.prototype.__renderWorld = function () {
       // Minimum player light so you can always see yourself in the dark
       playerLightSize = 4;
       playerLightColor = defaultLightColor;
+    }
+
+    // Carried light sources (owner 2026-07-17: "frozen starlight should give
+    // some light"): any EQUIPPED item whose dat entry carries the Light flag
+    // boosts the player's own bubble to the item's light level — frozen
+    // starlight (6/29 icy), lit torches, lamps. Strongest source wins and
+    // brings its color. 10 slot lookups per frame — negligible.
+    if (gameClient.player.equipment && gameClient.player.equipment.slots) {
+      let __slots = gameClient.player.equipment.slots;
+      for (let i = 0; i < __slots.length; i++) {
+        let it = __slots[i] && __slots[i].item;
+        if (!it || typeof it.getDataObject !== "function") continue;
+        let d = it.getDataObject();
+        let li = d && d.properties && d.properties.light;
+        if (li && li.level > playerLightSize) {
+          playerLightSize = li.level;
+          if (li.color) playerLightColor = li.color;
+        }
+      }
     }
 
     // A verified ghost (GM /ghost) emits no light of its own — otherwise the
@@ -39996,6 +40566,9 @@ Renderer.prototype.__renderAnimation = function (animation, thing) {
 // could only see the top few anyway. Items keep the NEWEST-on-top semantics
 // (the last N in stack order draw); effects keep the newest N.
 Renderer.prototype.LOWEST_SPEC_TILE_ITEM_MAX = 5;
+// Regular-mobile stack cap (hoarded-house FPS, owner 2026-07-13) — higher
+// than Lowest Spec so normal phones keep visual fidelity on busy tiles.
+Renderer.prototype.MOBILE_TILE_ITEM_MAX = 8;
 Renderer.prototype.LOWEST_SPEC_TILE_EFFECT_MAX = 2;
 
 Renderer.prototype.__renderTileAnimations = function (tile) {
@@ -40131,7 +40704,15 @@ Renderer.prototype.__renderTileObjects = function (tile, posX, posY) {
   // first so we know how many to skip from the bottom; the pre-pass only
   // runs for lowest-spec players on tiles deeper than the cap.
   let skipBuried = 0;
-  if (this.__lowestSpecFrame && itemsLength > Renderer.prototype.LOWEST_SPEC_TILE_ITEM_MAX) {
+  // Effective per-tile stack cap: Lowest Spec = 5, regular mobile = 8
+  // (owner 2026-07-13, hoarded-house FPS), desktop = uncapped. Items
+  // deeper than the cap are fully covered by the ones above — skipping
+  // their draws is visually lossless; elevation contributions are kept
+  // in the loop below either way.
+  let __tileItemCap = this.__lowestSpecFrame
+    ? Renderer.prototype.LOWEST_SPEC_TILE_ITEM_MAX
+    : (this.__mobileFrame ? Renderer.prototype.MOBILE_TILE_ITEM_MAX : 0);
+  if (__tileItemCap > 0 && itemsLength > __tileItemCap) {
     let eligible = 0;
     for (let i = 0; i < itemsLength; i++) {
       let it = items[i];
@@ -40140,7 +40721,7 @@ Renderer.prototype.__renderTileObjects = function (tile, posX, posY) {
       if (it.hasFlag(PropBitFlag.prototype.flags.DatFlagOnTop)) continue;
       eligible++;
     }
-    skipBuried = Math.max(0, eligible - Renderer.prototype.LOWEST_SPEC_TILE_ITEM_MAX);
+    skipBuried = Math.max(0, eligible - __tileItemCap);
   }
 
   // Render the regular items on the tile (excluding splashes, ground borders, and on-top items)
@@ -40968,7 +41549,7 @@ Renderer.prototype.__createAnimationLayers = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/sprite-batch.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/sprite-batch.js ===== */
 
 const SpriteBatch = function(canvas) {
 
@@ -41020,7 +41601,7 @@ const SpriteBatch = function(canvas) {
   this.__quadCount = 0;
 
   // Interleaved vertex data: [x, y, u, v, alpha] per vertex, 4 verts per quad
-  this.__vertexData = new Float32Array(this.__maxQuads * 4 * 5);
+  this.__vertexData = new Float32Array(this.__maxQuads * 4 * 8);
 
   // Masked-outfit batch ("GPU outfit colors"): outfits are colorized in the
   // shader from the shared sprite atlas instead of pre-composing a recolored
@@ -41028,7 +41609,7 @@ const SpriteBatch = function(canvas) {
   // [x, y, u, v, maskU, maskV, alpha, head.rgb, body.rgb, legs.rgb, feet.rgb]
   this.__maxMaskQuads = 1024;
   this.__maskQuadCount = 0;
-  this.__maskVertexData = new Float32Array(this.__maxMaskQuads * 4 * 19);
+  this.__maskVertexData = new Float32Array(this.__maxMaskQuads * 4 * 22);
   this.__maskTexture = null;
 
   // Currently bound texture
@@ -41098,11 +41679,9 @@ SpriteBatch.prototype.__initGL = function() {
   this.__spriteUniforms = {
     "projection": gl.getUniformLocation(this.__spriteProgram, "u_projection"),
     "atlas": gl.getUniformLocation(this.__spriteProgram, "u_atlas"),
-    "tint": gl.getUniformLocation(this.__spriteProgram, "u_tint")
   };
 
   // Set default tint to white (no tinting)
-  gl.uniform3f(this.__spriteUniforms.tint, 1.0, 1.0, 1.0);
 
   // Get uniform locations for rect program
   gl.useProgram(this.__rectProgram);
@@ -41130,7 +41709,6 @@ SpriteBatch.prototype.__initGL = function() {
   this.__maskUniforms = {
     "projection": gl.getUniformLocation(this.__maskProgram, "u_projection"),
     "atlas": gl.getUniformLocation(this.__maskProgram, "u_atlas"),
-    "tint": gl.getUniformLocation(this.__maskProgram, "u_tint")
   };
 
   // Create VAO and buffers
@@ -41142,13 +41720,15 @@ SpriteBatch.prototype.__initGL = function() {
   gl.bindBuffer(gl.ARRAY_BUFFER, this.__vbo);
   gl.bufferData(gl.ARRAY_BUFFER, this.__vertexData.byteLength, gl.DYNAMIC_DRAW);
 
-  // Vertex layout: position (2f) + texcoord (2f) + alpha (1f) = 5 floats = 20 bytes
+  // Vertex layout: position (2f) + texcoord (2f) + alpha (1f) + tint (3f) = 8 floats = 32 bytes
   gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 20, 0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 32, 0);
   gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 8);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 32, 8);
   gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 20, 16);
+  gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 32, 16);
+  gl.enableVertexAttribArray(3);
+  gl.vertexAttribPointer(3, 3, gl.FLOAT, false, 32, 20);   // per-vertex tint
 
   // Index buffer (static) — two triangles per quad: [0,1,2, 2,3,0]
   this.__ibo = gl.createBuffer();
@@ -41166,7 +41746,7 @@ SpriteBatch.prototype.__initGL = function() {
 
   gl.bindVertexArray(null);
 
-  // Masked-outfit VAO — 19 floats per vertex (76-byte stride), reuses the
+  // Masked-outfit VAO — 22 floats per vertex (88-byte stride), reuses the
   // quad index buffer above (__maxMaskQuads <= __maxQuads keeps it in range)
   this.__maskVao = gl.createVertexArray();
   gl.bindVertexArray(this.__maskVao);
@@ -41174,21 +41754,23 @@ SpriteBatch.prototype.__initGL = function() {
   gl.bindBuffer(gl.ARRAY_BUFFER, this.__maskVbo);
   gl.bufferData(gl.ARRAY_BUFFER, this.__maskVertexData.byteLength, gl.DYNAMIC_DRAW);
   gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 76, 0);    // position
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 88, 0);    // position
   gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 76, 8);    // texcoord
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 88, 8);    // texcoord
   gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 76, 16);   // mask texcoord
+  gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 88, 16);   // mask texcoord
   gl.enableVertexAttribArray(3);
-  gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 76, 24);   // alpha
+  gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 88, 24);   // alpha
   gl.enableVertexAttribArray(4);
-  gl.vertexAttribPointer(4, 3, gl.FLOAT, false, 76, 28);   // head color
+  gl.vertexAttribPointer(4, 3, gl.FLOAT, false, 88, 28);   // head color
   gl.enableVertexAttribArray(5);
-  gl.vertexAttribPointer(5, 3, gl.FLOAT, false, 76, 40);   // body color
+  gl.vertexAttribPointer(5, 3, gl.FLOAT, false, 88, 40);   // body color
   gl.enableVertexAttribArray(6);
-  gl.vertexAttribPointer(6, 3, gl.FLOAT, false, 76, 52);   // legs color
+  gl.vertexAttribPointer(6, 3, gl.FLOAT, false, 88, 52);   // legs color
   gl.enableVertexAttribArray(7);
-  gl.vertexAttribPointer(7, 3, gl.FLOAT, false, 76, 64);   // feet color
+  gl.vertexAttribPointer(7, 3, gl.FLOAT, false, 88, 64);   // feet color
+  gl.enableVertexAttribArray(8);
+  gl.vertexAttribPointer(8, 3, gl.FLOAT, false, 88, 76);   // per-vertex tint
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.__ibo);
   gl.bindVertexArray(null);
 
@@ -41513,7 +42095,7 @@ SpriteBatch.prototype.flush = function() {
 
   // Upload only the portion of vertex data we actually used
   gl.bindBuffer(gl.ARRAY_BUFFER, this.__vbo);
-  gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.__vertexData.subarray(0, this.__quadCount * 4 * 5));
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.__vertexData.subarray(0, this.__quadCount * 4 * 8));
 
   // Draw all quads
   gl.drawElements(gl.TRIANGLES, this.__quadCount * 6, gl.UNSIGNED_SHORT, 0);
@@ -41554,17 +42136,18 @@ SpriteBatch.prototype.draw = function(srcX, srcY, srcW, srcH, dstX, dstY, dstW, 
   let x1 = dstX + dstW;
   let y1 = dstY + dstH;
 
-  let offset = this.__quadCount * 4 * 5;
+  let offset = this.__quadCount * 4 * 8;
   let vd = this.__vertexData;
+  let tr = this.__tintR, tg = this.__tintG, tb = this.__tintB;
 
   // Vertex 0: top-left
-  vd[offset +  0] = x0; vd[offset +  1] = y0; vd[offset +  2] = u0; vd[offset +  3] = v0; vd[offset +  4] = alpha;
+  vd[offset +  0] = x0; vd[offset +  1] = y0; vd[offset +  2] = u0; vd[offset +  3] = v0; vd[offset +  4] = alpha; vd[offset +  5] = tr; vd[offset +  6] = tg; vd[offset +  7] = tb;
   // Vertex 1: top-right
-  vd[offset +  5] = x1; vd[offset +  6] = y0; vd[offset +  7] = u1; vd[offset +  8] = v0; vd[offset +  9] = alpha;
+  vd[offset +  8] = x1; vd[offset +  9] = y0; vd[offset + 10] = u1; vd[offset + 11] = v0; vd[offset + 12] = alpha; vd[offset + 13] = tr; vd[offset + 14] = tg; vd[offset + 15] = tb;
   // Vertex 2: bottom-right
-  vd[offset + 10] = x1; vd[offset + 11] = y1; vd[offset + 12] = u1; vd[offset + 13] = v1; vd[offset + 14] = alpha;
+  vd[offset + 16] = x1; vd[offset + 17] = y1; vd[offset + 18] = u1; vd[offset + 19] = v1; vd[offset + 20] = alpha; vd[offset + 21] = tr; vd[offset + 22] = tg; vd[offset + 23] = tb;
   // Vertex 3: bottom-left
-  vd[offset + 15] = x0; vd[offset + 16] = y1; vd[offset + 17] = u0; vd[offset + 18] = v1; vd[offset + 19] = alpha;
+  vd[offset + 24] = x0; vd[offset + 25] = y1; vd[offset + 26] = u0; vd[offset + 27] = v1; vd[offset + 28] = alpha; vd[offset + 29] = tr; vd[offset + 30] = tg; vd[offset + 31] = tb;
 
   this.__quadCount++;
 
@@ -41612,7 +42195,8 @@ SpriteBatch.prototype.drawMasked = function(texture, srcX, srcY, maskX, maskY, d
   let y1 = dstY + dstH;
 
   let vd = this.__maskVertexData;
-  let o = this.__maskQuadCount * 4 * 19;
+  let o = this.__maskQuadCount * 4 * 22;
+  let mtr = this.__tintR, mtg = this.__tintG, mtb = this.__tintB;
 
   // Corner order matches the shared quad index buffer: TL, TR, BR, BL
   let xs = [x0, x1, x1, x0];
@@ -41633,6 +42217,7 @@ SpriteBatch.prototype.drawMasked = function(texture, srcX, srcY, maskX, maskY, d
     for (let c = 0; c < 12; c++) {
       vd[o++] = colors[c];
     }
+    vd[o++] = mtr; vd[o++] = mtg; vd[o++] = mtb;   // per-vertex tint
   }
 
   this.__maskQuadCount++;
@@ -41643,9 +42228,9 @@ SpriteBatch.prototype.flushMasked = function() {
 
   /*
    * Function SpriteBatch.flushMasked
-   * Submits queued masked-outfit vertex data to the GPU. Reads the tint
-   * multipliers at flush time (setTint drains this queue via flush() before
-   * changing them, so queued quads always flush under their own tint).
+   * Submits queued masked-outfit vertex data to the GPU. Tint travels as a
+   * per-vertex attribute (baked into each quad at queue time), so quads
+   * queued under different tints coexist in one flush.
    */
 
   if (this.__contextLost) {
@@ -41664,7 +42249,6 @@ SpriteBatch.prototype.flushMasked = function() {
   gl.useProgram(this.__maskProgram);
   gl.uniformMatrix3fv(this.__maskUniforms.projection, false, this.__projection);
   gl.uniform1i(this.__maskUniforms.atlas, 0);
-  gl.uniform3f(this.__maskUniforms.tint, this.__tintR, this.__tintG, this.__tintB);
 
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, this.__maskTexture);
@@ -41672,7 +42256,7 @@ SpriteBatch.prototype.flushMasked = function() {
   gl.bindVertexArray(this.__maskVao);
 
   gl.bindBuffer(gl.ARRAY_BUFFER, this.__maskVbo);
-  gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.__maskVertexData.subarray(0, this.__maskQuadCount * 4 * 19));
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.__maskVertexData.subarray(0, this.__maskQuadCount * 4 * 22));
 
   gl.drawElements(gl.TRIANGLES, this.__maskQuadCount * 6, gl.UNSIGNED_SHORT, 0);
 
@@ -41711,19 +42295,14 @@ SpriteBatch.prototype.setTint = function(r, g, b) {
     return;
   }
 
-  if (r === this.__tintR && g === this.__tintG && b === this.__tintB) {
-    return;
-  }
-
-  this.flush();
-
+  // Per-vertex tint (2026-07-14): tint is written into each queued quad's
+  // vertices, so changing it is PURE STATE — no batch flush, no uniform
+  // upload. The old uniform version flushed on every change; with ~50
+  // tinted furniture items on screen the per-item setTint/resetTint pair
+  // broke the batch ~100 times per frame (the owner's house FPS drop).
   this.__tintR = r;
   this.__tintG = g;
   this.__tintB = b;
-
-  let gl = this.__gl;
-  gl.useProgram(this.__spriteProgram);
-  gl.uniform3f(this.__spriteUniforms.tint, r, g, b);
 
 }
 
@@ -42022,14 +42601,14 @@ SpriteBatch.prototype.drawCanvasOverlay = function(sourceCanvas, sx, sy, sw, sh,
   let u1 = (sx + sw) / this.__overlayTexWidth;
   let v1 = (sy + sh) / this.__overlayTexHeight;
 
-  // Queue the quad
-  let offset = this.__quadCount * 4 * 5;
+  // Queue the quad (neutral tint — overlays are never tinted)
+  let offset = this.__quadCount * 4 * 8;
   let vd = this.__vertexData;
 
-  vd[offset +  0] = dx;      vd[offset +  1] = dy;      vd[offset +  2] = u0; vd[offset +  3] = v0; vd[offset +  4] = 1.0;
-  vd[offset +  5] = dx + dw; vd[offset +  6] = dy;      vd[offset +  7] = u1; vd[offset +  8] = v0; vd[offset +  9] = 1.0;
-  vd[offset + 10] = dx + dw; vd[offset + 11] = dy + dh; vd[offset + 12] = u1; vd[offset + 13] = v1; vd[offset + 14] = 1.0;
-  vd[offset + 15] = dx;      vd[offset + 16] = dy + dh; vd[offset + 17] = u0; vd[offset + 18] = v1; vd[offset + 19] = 1.0;
+  vd[offset +  0] = dx;      vd[offset +  1] = dy;      vd[offset +  2] = u0; vd[offset +  3] = v0; vd[offset +  4] = 1.0; vd[offset +  5] = 1.0; vd[offset +  6] = 1.0; vd[offset +  7] = 1.0;
+  vd[offset +  8] = dx + dw; vd[offset +  9] = dy;      vd[offset + 10] = u1; vd[offset + 11] = v0; vd[offset + 12] = 1.0; vd[offset + 13] = 1.0; vd[offset + 14] = 1.0; vd[offset + 15] = 1.0;
+  vd[offset + 16] = dx + dw; vd[offset + 17] = dy + dh; vd[offset + 18] = u1; vd[offset + 19] = v1; vd[offset + 20] = 1.0; vd[offset + 21] = 1.0; vd[offset + 22] = 1.0; vd[offset + 23] = 1.0;
+  vd[offset + 24] = dx;      vd[offset + 25] = dy + dh; vd[offset + 26] = u0; vd[offset + 27] = v1; vd[offset + 28] = 1.0; vd[offset + 29] = 1.0; vd[offset + 30] = 1.0; vd[offset + 31] = 1.0;
 
   this.__quadCount++;
   this.flush();
@@ -42332,14 +42911,17 @@ SpriteBatch.prototype.SPRITE_VERTEX_SHADER = [
   "layout(location = 0) in vec2 a_position;",
   "layout(location = 1) in vec2 a_texCoord;",
   "layout(location = 2) in float a_alpha;",
+  "layout(location = 3) in vec3 a_tint;",
   "uniform mat3 u_projection;",
   "out vec2 v_texCoord;",
   "out float v_alpha;",
+  "out vec3 v_tint;",
   "void main() {",
   "  vec2 clipPos = (u_projection * vec3(a_position, 1.0)).xy;",
   "  gl_Position = vec4(clipPos, 0.0, 1.0);",
   "  v_texCoord = a_texCoord;",
   "  v_alpha = a_alpha;",
+  "  v_tint = a_tint;",
   "}"
 ].join("\n");
 
@@ -42348,13 +42930,13 @@ SpriteBatch.prototype.SPRITE_FRAGMENT_SHADER = [
   "precision mediump float;",
   "in vec2 v_texCoord;",
   "in float v_alpha;",
+  "in vec3 v_tint;",
   "uniform sampler2D u_atlas;",
-  "uniform vec3 u_tint;",
   "out vec4 fragColor;",
   "void main() {",
   "  vec4 texel = texture(u_atlas, v_texCoord);",
   "  if (texel.a < 0.01) discard;",
-  "  fragColor = vec4(texel.rgb * min(u_tint, vec3(1.0)) + max(u_tint - vec3(1.0), vec3(0.0)), texel.a * v_alpha);",
+  "  fragColor = vec4(texel.rgb * min(v_tint, vec3(1.0)) + max(v_tint - vec3(1.0), vec3(0.0)), texel.a * v_alpha);",
   "}"
 ].join("\n");
 
@@ -42372,6 +42954,7 @@ SpriteBatch.prototype.MASK_VERTEX_SHADER = [
   "layout(location = 5) in vec3 a_body;",
   "layout(location = 6) in vec3 a_legs;",
   "layout(location = 7) in vec3 a_feet;",
+  "layout(location = 8) in vec3 a_tint;",
   "uniform mat3 u_projection;",
   "out vec2 v_texCoord;",
   "out vec2 v_maskCoord;",
@@ -42380,6 +42963,7 @@ SpriteBatch.prototype.MASK_VERTEX_SHADER = [
   "out vec3 v_body;",
   "out vec3 v_legs;",
   "out vec3 v_feet;",
+  "out vec3 v_tint;",
   "void main() {",
   "  vec2 clipPos = (u_projection * vec3(a_position, 1.0)).xy;",
   "  gl_Position = vec4(clipPos, 0.0, 1.0);",
@@ -42390,6 +42974,7 @@ SpriteBatch.prototype.MASK_VERTEX_SHADER = [
   "  v_body = a_body;",
   "  v_legs = a_legs;",
   "  v_feet = a_feet;",
+  "  v_tint = a_tint;",
   "}"
 ].join("\n");
 
@@ -42403,8 +42988,8 @@ SpriteBatch.prototype.MASK_FRAGMENT_SHADER = [
   "in vec3 v_body;",
   "in vec3 v_legs;",
   "in vec3 v_feet;",
+  "in vec3 v_tint;",
   "uniform sampler2D u_atlas;",
-  "uniform vec3 u_tint;",
   "out vec4 fragColor;",
   "void main() {",
   "  vec4 texel = texture(u_atlas, v_texCoord);",
@@ -42420,7 +43005,7 @@ SpriteBatch.prototype.MASK_FRAGMENT_SHADER = [
   "    else if (!r && g && !b) { c = v_legs; }",
   "    else if (!r && !g && b) { c = v_feet; }",
   "  }",
-  "  fragColor = vec4(texel.rgb * c * min(u_tint, vec3(1.0)) + max(u_tint - vec3(1.0), vec3(0.0)), texel.a * v_alpha);",
+  "  fragColor = vec4(texel.rgb * c * min(v_tint, vec3(1.0)) + max(v_tint - vec3(1.0), vec3(0.0)), texel.a * v_alpha);",
   "}"
 ].join("\n");
 
@@ -43082,7 +43667,7 @@ SpriteBatch.prototype.WATER_BLEND_SHADER = [
 ].join("\n");
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/sprite-buffer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/sprite-buffer.js ===== */
 
 const SpriteBuffer = function(size) {
 
@@ -43229,6 +43814,125 @@ SpriteBuffer.prototype.addComposedOutfit = function(baseIdentifier, outfit, item
 
 }
 
+SpriteBuffer.prototype.__applyColorMap = function(imageData, virtual) {
+
+  /*
+   * Function SpriteBuffer.__applyColorMap
+   * Applies a virtual-looktype transform at sprite-buffer cache fill (never
+   * per frame). Two kinds: an exact uint32 color table (hand-authored
+   * recolors), or a parametric hue rotation (the auto alpha range — every
+   * alpha species gets its own hue, no shipped data). Neutrals and
+   * near-black/white pixels are exempt from rotation so outlines and
+   * shading stay clean.
+   */
+
+  if (virtual.table) {
+    let words = new Uint32Array(imageData.data.buffer);
+    for(let i = 0; i < words.length; i++) {
+      let to = virtual.table.get(words[i]);
+      if(to !== undefined) {
+        words[i] = to;
+      }
+    }
+    return;
+  }
+
+  // Retro tint (posterize-4 + 15% darken) — byte-identical to the dat
+  // build tool's posterizeDark() that baked the Ancient Dragon look:
+  // v -> round((v * 0.85) / 85) * 85 per channel, alpha-only. Runs after
+  // zone-color composition, mirroring the tool (compose first, then band).
+  if (virtual.posterizeDark) {
+    let d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (!d[i + 3]) continue;
+      d[i]     = Math.round((d[i]     * 0.85) / 85) * 85;
+      d[i + 1] = Math.round((d[i + 1] * 0.85) / 85) * 85;
+      d[i + 2] = Math.round((d[i + 2] * 0.85) / 85) * 85;
+    }
+    return;
+  }
+
+  if (!virtual.hueShift && !virtual.satScale) {
+    return;
+  }
+
+  let d = imageData.data;
+  let shift = (virtual.hueShift || 0) / 360;
+  let satScale = virtual.satScale || 1;
+
+  for (let i = 0; i < d.length; i += 4) {
+    if (!d[i + 3]) continue;
+    let r = d[i] / 255, g = d[i + 1] / 255, b = d[i + 2] / 255;
+    let mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    let l = (mx + mn) / 2;
+    if (mx === mn || l < 0.06 || l > 0.94) continue;   // neutral / outline
+    let diff = mx - mn;
+    let sat = l > 0.5 ? diff / (2 - mx - mn) : diff / (mx + mn);
+    if (sat < 0.12) continue;
+    let h;
+    if (mx === r) h = ((g - b) / diff + (g < b ? 6 : 0)) / 6;
+    else if (mx === g) h = ((b - r) / diff + 2) / 6;
+    else h = ((r - g) / diff + 4) / 6;
+    h = (h + shift) % 1;
+    sat = Math.min(1, sat * satScale);
+    let q = l < 0.5 ? l * (1 + sat) : l + sat - l * sat;
+    let p = 2 * l - q;
+    let f = function (t) {
+      t = ((t % 1) + 1) % 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    d[i] = Math.round(f(h + 1/3) * 255);
+    d[i + 1] = Math.round(f(h) * 255);
+    d[i + 2] = Math.round(f(h - 1/3) * 255);
+  }
+
+}
+
+SpriteBuffer.prototype.addRecolored = function(baseIdentifier, outfit) {
+
+  /*
+   * Function SpriteBuffer.addRecolored
+   * Caches a recolored copy of a plain (mask-less) sprite for a virtual
+   * looktype — the no-look-details twin of addComposedOutfit. The buffer is
+   * shared per outfit SIGNATURE (virtual id included), so variants never
+   * collide with the base creature's sprites.
+   */
+
+  this.__invalidateIfStale();
+
+  let position = this.reserve(baseIdentifier);
+
+  let baseData = this.__getImageData(baseIdentifier);
+  this.__applyColorMap(baseData, outfit.__virtual);
+
+  this.compositionCanvas.context.putImageData(baseData, 0, 0);
+  this.__spriteBufferCanvas.context.drawImage(
+    this.compositionCanvas.canvas,
+    32 * position.x,
+    32 * position.y
+  );
+
+  this.__ensureGLTexture();
+
+  if (this.__glTexture) {
+    let imageData = this.__spriteBufferCanvas.context.getImageData(
+      32 * position.x, 32 * position.y, 32, 32
+    );
+    SpriteBuffer.prototype.__globalSpriteBatch.uploadToAtlas(
+      this.__glTexture, 32 * position.x, 32 * position.y, imageData
+    );
+  }
+
+  this.__spriteCache[baseIdentifier] = new Sprite(
+    this.__spriteBufferCanvas.canvas, position, 32,
+    this.__glTexture, this.__glAtlasWidth, this.__glAtlasHeight
+  );
+
+}
+
 SpriteBuffer.prototype.clear = function() {
 
   /*
@@ -43330,6 +44034,12 @@ SpriteBuffer.prototype.addComposed = function(position, outfit, base, mask) {
   // If a mask is supplied compose the two sprites to a real outfit
   if(mask !== 0) {
     this.__compose(outfit, baseData, this.__getImageData(mask));
+  }
+
+  // Virtual looktype: exact per-color remap AFTER zone composition, so the
+  // map (authored against composed pixels) applies to what players see.
+  if(outfit && outfit.__virtual) {
+    this.__applyColorMap(baseData, outfit.__virtual);
   }
 
   // Put the current sprite to the temporary canvas
@@ -43494,6 +44204,34 @@ SpriteBuffer.prototype.destroy = function() {
 
 }
 
+// Virtual item sprites: synthetic id -> { sprite: realId, recipe }. Synthetic
+// ids start far above any real spr id; entries persist for the session (the
+// atlas slot may evict — __add refills through the same recolor path).
+SpriteBuffer.prototype.__virtualItemSprites = {};
+SpriteBuffer.prototype.__virtualItemDedupe = {};
+SpriteBuffer.prototype.__virtualItemNextId = 10000000;
+
+SpriteBuffer.prototype.registerVirtualItemSprite = function(realId, vcid, recipe) {
+
+  /*
+   * Function SpriteBuffer.registerVirtualItemSprite
+   * Allocates (or returns the existing) synthetic sprite id for a
+   * (virtual CID, real sprite) pair. The synthetic id lives in the same
+   * buffer as real sprites but fills via the recipe's recolor.
+   */
+
+  let key = vcid + ":" + realId;
+  let existing = SpriteBuffer.prototype.__virtualItemDedupe[key];
+  if (existing !== undefined) {
+    return existing;
+  }
+  let synthetic = SpriteBuffer.prototype.__virtualItemNextId++;
+  SpriteBuffer.prototype.__virtualItemDedupe[key] = synthetic;
+  SpriteBuffer.prototype.__virtualItemSprites[synthetic] = { sprite: realId, recipe: recipe };
+  return synthetic;
+
+}
+
 SpriteBuffer.prototype.__add = function(id) {
 
   /*
@@ -43504,8 +44242,15 @@ SpriteBuffer.prototype.__add = function(id) {
   // Reserve a slot in the sprite buffer
   let position = this.reserve(id);
 
-  // Fetch the address of the sprite and get the RGBA color data
-  let imageData = this.__getImageData(id);
+  // Fetch the address of the sprite and get the RGBA color data. A synthetic
+  // virtual-item id decodes its REAL sprite's pixels and applies the variant
+  // recipe once, here at fill (virtual-items.js) — same recolor engine as
+  // virtual looktypes.
+  let virtualEntry = SpriteBuffer.prototype.__virtualItemSprites[id];
+  let imageData = this.__getImageData(virtualEntry ? virtualEntry.sprite : id);
+  if (virtualEntry) {
+    this.__applyColorMap(imageData, virtualEntry.recipe);
+  }
 
   // Add the unpacked sprite to the sprite buffer
   this.__spriteBufferCanvas.context.putImageData(imageData, 32 * position.x, 32 * position.y);
@@ -43779,7 +44524,7 @@ SpriteBuffer.__pruneShared = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/sprite.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/sprite.js ===== */
 
 const Sprite = function(src, position, size, glTexture, atlasWidth, atlasHeight) {
 
@@ -43802,7 +44547,7 @@ const Sprite = function(src, position, size, glTexture, atlasWidth, atlasHeight)
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/rendering/weather-canvas.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/rendering/weather-canvas.js ===== */
 
 const WeatherCanvas = function(screen) {
 
@@ -43857,7 +44602,8 @@ const WeatherCanvas = function(screen) {
 
   // Hail particle pool
   this.__hailStones = [];
-  this.__hailStoneCount = 120;
+  // 120 was a wall of tracers (owner 2026-07-16: 'a bit too much')
+  this.__hailStoneCount = 70;
   this.__hailInitialized = false;
 
   // Ash particle pool
@@ -43905,7 +44651,7 @@ const WeatherCanvas = function(screen) {
     this.__rainDropCount = 150;
     this.__sandParticleCount = 175;
     this.__drizzleDropCount = 75;
-    this.__hailStoneCount = 60;
+    this.__hailStoneCount = 40;
     this.__ashParticleCount = 100;
     this.__snowFlakeCount = 50;
   }
@@ -44622,7 +45368,7 @@ WeatherCanvas.prototype.__initHailStones = function() {
       "x": Math.random() * w,
       "y": Math.random() * h,
       "radius": 1 + Math.random(),
-      "speed": 8 + Math.random() * 6,
+      "speed": 5 + Math.random() * 4,
       "opacity": opacity,
       "bounceX": (Math.random() - 0.5) * 2
     });
@@ -45466,7 +46212,7 @@ WeatherCanvas.prototype.drawPattern = function(pattern, x, y) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/chat-resizer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/chat-resizer.js ===== */
 
 const ChatResizer = function () {
     /*
@@ -45658,7 +46404,7 @@ ChatResizer.prototype.__pinChatBottom = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/fight-mode-selector.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/fight-mode-selector.js ===== */
 
 const FightModeSelector = function () {
 
@@ -46000,7 +46746,7 @@ FightModeSelector.prototype.__updatePkLockVisual = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/hotbar-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/hotbar-manager.js ===== */
 
 const HotbarManager = function () {
 
@@ -49221,7 +49967,7 @@ HotbarManager.prototype.__getKeySpan = function (slotIndex) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/interface.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/interface.js ===== */
 
 const Interface = function () {
   /*
@@ -49916,10 +50662,14 @@ Interface.prototype.enableVersionFeatures = function (version) {
    * Enables or disables version-specific features
    */
 
-  // Disable addons when version is below 1000
-  if (version <= 1000) {
-    this.modalManager.get("outfit-modal").disableAddons();
-  }
+  // Addon checkboxes: ENABLED (owner 2026-07-09) so quest-outfit addons
+  // (Pirate/Assassin/Shaman/Beggar) can actually be toggled. Addons are an
+  // 8.x-era feature and this is a 7.6 client, but our outfit quests grant
+  // them, so the picker must expose the toggles. Safe: the server
+  // (Player.changeOutfit) validates addon ownership against the earned
+  // addon_<looktype> storage and silently strips any unearned bit, so a
+  // player checking a box they haven't earned just reverts to base.
+  // (Previously disabled here for version <= 1000; no longer.)
 };
 
 Interface.prototype.getHexColor = function (index) {
@@ -50069,6 +50819,16 @@ Interface.prototype.reset = function () {
   this.screenElementManager.clear();
 
   this.windowManager.closeAll();
+
+  // The safe-trade window needs its own teardown: closeAll() runs the base
+  // window close(), but the trade window is a centered overlay carrying live
+  // trade state (offers, accept flags, partner name). Without closeTrade()
+  // that state — and possibly the overlay itself — survived logout into the
+  // next session (player report 2026-07-14). Idempotent when no trade is up.
+  let tradeWindow = this.windowManager.getWindow("trade-window");
+  if (tradeWindow && tradeWindow.closeTrade) {
+    tradeWindow.closeTrade();
+  }
 
   // Close any modal that was left open when the connection ended so
   // it doesn't linger visually with stale state after re-login (e.g.
@@ -50788,6 +51548,12 @@ Interface.prototype.sendLogout = function () {
     // Send logout request — the server will check combat state and either
     // close the socket (allowed) or send a cancel message (rejected)
     gameClient.networkManager.__intentionalClose = true;
+    // Logout returns to the CHARACTER screen, not the login form (owner
+    // 2026-07-11) — __handleClose reads this flag after the reset. If the
+    // server REFUSES the logout (combat), the socket stays open and the
+    // armed flag is harmless: it only acts on an intentional close, exactly
+    // like the pre-existing __intentionalClose arming on this same path.
+    gameClient.networkManager.__logoutToCharSelect = true;
     gameClient.send(new LogoutPacket());
   });
 };
@@ -51006,7 +51772,7 @@ Interface.prototype.__enableListeners = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/layout-editor.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/layout-editor.js ===== */
 
 const LayoutEditor = function () {
 
@@ -52162,7 +52928,7 @@ LayoutEditor.prototype.__forcePanelsVisible = function (show) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-chat-body.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-chat-body.js ===== */
 
 "use strict";
 
@@ -52197,7 +52963,7 @@ ChatBodyMenu.prototype.click = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-chat-header.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-chat-header.js ===== */
 
 const ChatHeaderMenu = function(id) {
 
@@ -52246,7 +53012,7 @@ ChatHeaderMenu.prototype.click = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-container.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-container.js ===== */
 
 const ContainerMenu = function (id) {
 
@@ -52431,6 +53197,19 @@ ContainerMenu.prototype.click = function (event) {
         case "trade":
             gameClient.mouse.startTradeTargetSelect(this.slotObject);
             break;
+        case "lootlist-add": {
+            // One-tap "/lootlist add <sid>" — server validates premium,
+            // catalog membership, dedup and the 500 cap, and answers with
+            // a colored confirmation. noHistory like the /namebag sends.
+            let addItem = this.slotObject.which && this.slotObject.which.peekItem
+              ? this.slotObject.which.peekItem(this.slotObject.index)
+              : null;
+            if (addItem && addItem.sid) {
+                let cml = gameClient.interface && gameClient.interface.channelManager;
+                if (cml) cml.sendMessageText("/lootlist add " + addItem.sid, undefined, true);
+            }
+            break;
+        }
     }
 
     // Reset slot object reference
@@ -52442,7 +53221,7 @@ ContainerMenu.prototype.click = function (event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-friend-list.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-friend-list.js ===== */
 
 const FriendListMenu = function(id) {
 
@@ -52589,7 +53368,7 @@ FriendListMenu.prototype.open = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-friend-window.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-friend-window.js ===== */
 
 const FriendWindowMenu = function(id) {
 
@@ -52679,7 +53458,7 @@ FriendWindowMenu.prototype.addFriend = function(friend) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-hotbar.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-hotbar.js ===== */
 
 "use strict";
 
@@ -52750,7 +53529,7 @@ HotbarMenu.prototype.click = function (event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-manager.js ===== */
 
 const MenuManager = function () {
 
@@ -52872,7 +53651,7 @@ MenuManager.prototype.__defocus = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-message.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-message.js ===== */
 
 const MessageMenu = function(id) {
 
@@ -53166,7 +53945,7 @@ MessageMenu.prototype.whisper = function(target) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu-screen.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu-screen.js ===== */
 
 const ScreenMenu = function(id) {
 
@@ -53336,7 +54115,7 @@ ScreenMenu.prototype.click = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/menus/menu.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/menus/menu.js ===== */
 
 const Menu = function (id) {
 
@@ -53488,7 +54267,7 @@ Menu.prototype.buttonClose = function (event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/minimap-markers.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/minimap-markers.js ===== */
 
 /*
  * MinimapMarkers — client-local, player-placed minimap markers.
@@ -53638,7 +54417,7 @@ const MinimapMarkers = (function () {
 })();
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/mobile-chat.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/mobile-chat.js ===== */
 
 "use strict";
 
@@ -54739,9 +55518,16 @@ MobileChat.prototype.__syncChannelPill = function() {
     }
   }
 
-  // Show close channel button only for DM (private) channels
+  // Close button on every channel EXCEPT (owner 2026-07-15): World, the
+  // always-on locals (Console/Loot — the only LocalChannels), and Default —
+  // the channel manager hard-rejects closing id 0, so an X there would only
+  // dead-end in a cancel message. DMs stay unconditionally closable.
   if(this.__closeChannelBtn) {
-    this.__closeChannelBtn.style.display = (channel.constructor === PrivateChannel) ? "flex" : "none";
+    let closable = (channel.constructor === PrivateChannel)
+      || (channel.constructor !== LocalChannel
+          && channel.id !== CONST.CHANNEL.DEFAULT
+          && channel.id !== CONST.CHANNEL.WORLD);
+    this.__closeChannelBtn.style.display = closable ? "flex" : "none";
   }
 
 };
@@ -55216,7 +56002,7 @@ MobileChat.prototype.handleBackButton = function() {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/mobile-container-panel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/mobile-container-panel.js ===== */
 
 const MobileContainerPanel = function (panelId, layoutConfigId) {
 
@@ -55586,7 +56372,7 @@ MobileContainerPanel.prototype.__handleTabClose = function (containerId, event) 
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-automations.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-automations.js ===== */
 
 "use strict";
 
@@ -55676,7 +56462,7 @@ AutomationsModal.prototype.__switchTab = function (tab) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-captcha.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-captcha.js ===== */
 
 /* =============================================================================
  * Captcha modal i18n
@@ -57073,7 +57859,7 @@ CaptchaModal.prototype.__createTile = function (index, spriteId, spriteType) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-character-select.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-character-select.js ===== */
 
 const CharacterSelectModal = function(element) {
 
@@ -57162,6 +57948,16 @@ CharacterSelectModal.prototype.handleOpen = function(options) {
   this.__worlds = options.worlds || null;   // multi-world: {id:{name,pvp,online}}
   this.__premiumUntil = options.premiumUntil || null;
   this.__hasEmail = !!options.hasEmail;
+
+  // Stash the full payload so a graceful LOGOUT can return here (owner
+  // 2026-07-11: logout -> character screen, not the login form). Single
+  // chokepoint: every open of this modal carries the freshest list (login,
+  // OAuth, reconnect fallback), so the stash never goes staler than the
+  // last time the modal was shown. Session tokens are multi-use with an
+  // 8h TTL, so re-entering from the stash stays valid.
+  if (gameClient.networkManager) {
+    gameClient.networkManager.__lastCharSelectPayload = options;
+  }
 
   // Show or hide the email reminder
   let emailReminder = document.getElementById("email-reminder");
@@ -57565,7 +58361,7 @@ CharacterSelectModal.prototype.__validateNameField = function(field) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-character.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-character.js ===== */
 
 "use strict";
 
@@ -57734,7 +58530,7 @@ CharacterModal.prototype.__formatDuration = function (ms) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-chat.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-chat.js ===== */
 
 "use strict";
 
@@ -57862,7 +58658,7 @@ ChatModal.prototype.__handleFocus = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-chess.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-chess.js ===== */
 
 const ChessModal = function (id) {
 
@@ -58235,7 +59031,7 @@ ChessModal.prototype.__handleSquare = function (index) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-confirm.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-confirm.js ===== */
 
 const ConfirmModal = function(element) {
 
@@ -58286,7 +59082,7 @@ ConfirmModal.prototype.handleConfirm = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-create-account.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-create-account.js ===== */
 
 const CreateAccountModal = function(element) {
 
@@ -58598,7 +59394,7 @@ CreateAccountModal.prototype.handleConfirm = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-death.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-death.js ===== */
 
 "use strict";
 
@@ -58662,7 +59458,7 @@ DeathModal.prototype.handleCancel = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-enter-name.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-enter-name.js ===== */
 
 const EnterNameModal = function(element) {
 
@@ -58811,7 +59607,7 @@ EnterNameModal.prototype.__cleanupKeyboard = function(input) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-games.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-games.js ===== */
 
 const GamesModal = function (id) {
 
@@ -59000,7 +59796,7 @@ GamesModal.prototype.onLeaderboard = function (info) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-guild.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-guild.js ===== */
 
 const GuildModal = function(element) {
 
@@ -59354,7 +60150,7 @@ GuildModal.prototype.__escape = function(str) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-hotbar-add.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-hotbar-add.js ===== */
 
 const HotbarAddModal = function (element) {
 
@@ -60275,7 +61071,7 @@ HotbarAddModal.prototype.__hideMobileKeyboard = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-house-info.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-house-info.js ===== */
 
 const HouseInfoModal = function(element) {
 
@@ -60296,6 +61092,7 @@ const HouseInfoModal = function(element) {
     "guests": document.getElementById("house-tab-guests"),
     "subowners": document.getElementById("house-tab-subowners"),
     "doors": document.getElementById("house-tab-doors"),
+    "protection": document.getElementById("house-tab-protection"),
     "transfer": document.getElementById("house-tab-transfer"),
     "leave": document.getElementById("house-tab-leave")
   };
@@ -60361,6 +61158,8 @@ HouseInfoModal.prototype.handleOpen = function(info) {
     // Transfer tab: shown to an owner who can sell, OR to a buyer with an
     // incoming offer (who is otherwise not privileged here).
     if (tab === "transfer") visible = (info.isOwner && info.transferEnabled) || !!info.pendingTransfer;
+    // Protection tab: owner/sub-owner, feature enabled server-side.
+    if (tab === "protection") visible = info.isPrivileged && !!(info.protection && info.protection.enabled);
     // Leave tab: owner-only (give up / abandon the house).
     if (tab === "leave") visible = !!info.isOwner;
     btn.style.display = visible ? "" : "none";
@@ -60371,6 +61170,7 @@ HouseInfoModal.prototype.handleOpen = function(info) {
   this.__renderGuests(info);
   this.__renderSubowners(info);
   this.__renderDoors(info);
+  this.__renderProtection(info);
   this.__renderTransfer(info);
   this.__renderLeave(info);
 
@@ -60392,6 +61192,7 @@ HouseInfoModal.prototype.handleOpen = function(info) {
 HouseInfoModal.prototype.__isTabVisible = function(tab, info) {
   if (tab === "overview") return true;
   if (tab === "transfer") return (info.isOwner && info.transferEnabled) || !!info.pendingTransfer;
+  if (tab === "protection") return !!(info.isPrivileged && info.protection && info.protection.enabled);
   if (tab === "leave") return !!info.isOwner;
   if (!info.isPrivileged) return false;
   if (tab === "subowners") return !!info.isOwner;
@@ -60431,6 +61232,27 @@ HouseInfoModal.prototype.__sendAction = function(actionCode, name, doorKey) {
 
 }
 
+HouseInfoModal.prototype.__formatBedRest = function(b) {
+
+  /*
+   * Function HouseInfoModal.__formatBedRest
+   * Compact one-line form of the /bed budget status for the Overview tab.
+   */
+
+  let fmtHM = function (totalSeconds) {
+    let s = Math.max(0, Math.floor(totalSeconds));
+    let h = Math.floor(s / 3600);
+    let m = Math.floor((s % 3600) / 60);
+    if (h > 0 && m > 0) return h + "h " + m + "m";
+    if (h > 0) return h + "h";
+    return m + "m";
+  };
+  if (!b.windowActive) return fmtHM(b.capSeconds) + " available (full budget)";
+  if (b.remainingSeconds <= 0) return "used up — refreshes in " + fmtHM(b.resetInMs / 1000);
+  return fmtHM(b.remainingSeconds) + " of " + fmtHM(b.capSeconds) + " left — refreshes in " + fmtHM(b.resetInMs / 1000);
+
+}
+
 HouseInfoModal.prototype.__renderOverview = function(info) {
 
   let rows = [
@@ -60442,6 +61264,12 @@ HouseInfoModal.prototype.__renderOverview = function(info) {
   // Next rent due date (owned houses only). rentDueAt is ms epoch; 0 = untracked.
   if (info.owner && info.rentDueAt > 0) {
     rows.push(["Rent due", this.__formatRentDue(info.rentDueAt)]);
+  }
+
+  // Viewer's bed-rest budget (/bed) — per-VIEWER, shown to everyone:
+  // guests sleep in other people's beds too (owner 2026-07-15).
+  if (info.bedRest) {
+    rows.push(["Bed rest", this.__formatBedRest(info.bedRest)]);
   }
 
   let html = "<dl class='house-stat-list'>";
@@ -60569,6 +61397,7 @@ HouseInfoModal.prototype.__renderGeneral = function(info) {
     + "<dl class='house-stat-list'>"
     + "<dt>Price</dt><dd>" + price + " gold / sqm" + (info.priceRatchetPercent ? " (rises ~" + info.priceRatchetPercent + "% each time it's sold)" : "") + "</dd>"
     + "<dt>Rent</dt><dd>" + rent + " gold / sqm every " + (info.rentPeriodDays || 30) + " days, from your bank</dd>"
+    + (info.bedRest ? "<dt>Bed rest</dt><dd>" + this.__formatBedRest(info.bedRest) + "</dd>" : "")
     + "</dl>"
     + "<p class='house-hint'><b>Buy:</b> stand at a free house's door and use <b>/buyhouse</b>. Keep the rent paid or you lose the house (and its contents go to your depot).</p>"
     + (info.transferEnabled ? "<p class='house-hint'><b>Sell to a player:</b> empty the house, then <b>/transferhouse &lt;player&gt; &lt;price&gt;</b> (" + (info.transferTaxPercent || 0) + "% tax). The buyer confirms from their own House window's Transfer tab.</p>" : "")
@@ -60577,6 +61406,64 @@ HouseInfoModal.prototype.__renderGeneral = function(info) {
   this.__tabContents.overview.innerHTML = html;
 
 };
+
+HouseInfoModal.prototype.__renderProtection = function(info) {
+
+  /*
+   * Function HouseInfoModal.__renderProtection
+   * "Protection" tab: status of the Minibian gods' throw protection,
+   * price, and a two-step purchase button (click -> confirm -> send
+   * HOUSE_ACTION.PROTECTION_BUY). The server answers with a fresh
+   * HouseInfoPacket, so the tab re-renders with the new expiry.
+   */
+
+  let container = this.__tabContents["protection"];
+  if (!container) return;
+  let prot = info.protection || {};
+  let active = prot.activeUntil && Date.now() < prot.activeUntil;
+  let until = active ? new Date(prot.activeUntil).toISOString().slice(0, 10) : null;
+  let cost = prot.cost || 0;
+  let days = prot.days || 30;
+
+  let html = "<dl class='house-stat-list'>"
+    + "<dt>Status</dt><dd>" + (active ? ("Protected until " + until) : "Not protected") + "</dd>"
+    + "<dt>Price</dt><dd>" + cost.toLocaleString() + " gold / " + days + " days</dd>"
+    + "<dt>Your bank</dt><dd>" + (info.bankBalance || 0).toLocaleString() + " gold</dd>"
+    + "</dl>"
+    + "<p class='house-hint'>Pay the Minibian gods to watch over this house: while their protection holds, "
+    + "only invited guests may place items inside — anything strangers try to throw in is rejected. "
+    + "Buying again extends the time.</p>"
+    + "<button id='house-protection-buy' type='button'>"
+    + (active ? "Extend" : "Purchase") + " " + days + " days — " + cost.toLocaleString() + " gold</button>";
+
+  container.innerHTML = html;
+
+  let self = this;
+  let btn = container.querySelector("#house-protection-buy");
+  if (btn) {
+    btn.addEventListener("click", function () {
+      // Proper Yes/No confirm window (owner 2026-07-16: the in-button
+      // two-step read as weird). The shared confirm-modal only runs the
+      // callback on Yes; the server debits the bank and answers with a
+      // fresh HouseInfoPacket that re-renders this tab with the new expiry.
+      let mm = gameClient.interface.modalManager;
+      let cm = mm.get("confirm-modal");
+      mm.open("confirm-modal", function () {
+        self.__sendAction(8 /* HOUSE_ACTION.PROTECTION_BUY */);
+      });
+      if (cm) {
+        cm.setTitle("House Protection");
+        let body = cm.element.querySelector(".modal-body > div");
+        if (body) {
+          body.innerHTML = "Pay the Minibian gods " + cost.toLocaleString()
+            + " gold from your bank for " + days + " days of protection on '"
+            + self.__escape(info.name) + "'?";
+        }
+      }
+    });
+  }
+
+}
 
 HouseInfoModal.prototype.__renderTransfer = function(info) {
 
@@ -60960,7 +61847,7 @@ HouseInfoModal.prototype.__escape = function(str) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-hunt-info.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-hunt-info.js ===== */
 
 const HuntInfoModal = function(element) {
 
@@ -61266,7 +62153,7 @@ HuntInfoModal.prototype.__escape = function (s) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-ignore.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-ignore.js ===== */
 
 const IgnoreModal = function(element) {
 
@@ -61422,7 +62309,7 @@ IgnoreModal.prototype.__escape = function(str) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-login-pin.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-login-pin.js ===== */
 
 const LoginPinModal = function (element) {
 
@@ -61533,7 +62420,7 @@ LoginPinModal.prototype.__submit = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-lootlist.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-lootlist.js ===== */
 
 const LootListModal = function (element) {
 
@@ -61858,9 +62745,21 @@ LootListModal.prototype.__createRow = function (entry) {
     let cur = self2.__routes[entry.sid] || null;
     let idx = opts.indexOf(cur);
     let next = opts[(idx + 1) % opts.length];
+    // Route ceiling mirrors the item cap: refuse VISIBLY at click time
+    // instead of letting the server clamp the save (same JOHbola lesson —
+    // silent slicing reads as random routing failure). Cycling an EXISTING
+    // route stays allowed at the cap; only brand-new assignments count.
+    if (next && !cur && Object.keys(self2.__routes).length >= self2.MAX_ROUTES) {
+      return self2.__showRouteCapHint();
+    }
     if (next) self2.__routes[entry.sid] = next;
     else delete self2.__routes[entry.sid];
     paintRoute();
+    // Commit route changes IMMEDIATELY (debounced ~1.2s after the last
+    // click): the close-path save covers a clean X, but a refresh/crash/
+    // disconnect between assigning and closing lost every route (player
+    // video report 2026-07-11 — "settings keep getting reset").
+    self2.__scheduleRouteCommit();
   });
   paintRoute();
 
@@ -61880,6 +62779,24 @@ LootListModal.prototype.__createRow = function (entry) {
 // (plus the route tail) inside the 1024-byte inbound cap. Must match the
 // slice guards in client protocol.js and server handleLootListUpdate.
 LootListModal.prototype.MAX_ITEMS = 500;
+LootListModal.prototype.MAX_ROUTES = 500;
+
+LootListModal.prototype.__showRouteCapHint = function () {
+
+  /*
+   * Function LootListModal.__showRouteCapHint
+   * Visible refusal when the 500-destination ceiling is hit — the server
+   * clamps at the same number, so blocking here keeps the click honest.
+   */
+
+  let el = document.getElementById("lootlist-route-hint");
+  if (!el) return;
+  el.textContent = "Destination limit reached — at most " + this.MAX_ROUTES + " routed items. Set one back to Main BP first.";
+  el.style.display = "";
+  clearTimeout(this.__routeHintT);
+  this.__routeHintT = setTimeout(function () { el.style.display = "none"; }, 6000);
+
+}
 
 LootListModal.prototype.__showCapHint = function () {
 
@@ -62107,11 +63024,12 @@ LootListModal.prototype.__updateCount = function () {
 
   if (this.__count) {
     let n = this.__selected.size;
-    // Show the ceiling once the list is big enough for it to matter —
-    // "487 / 500 items" warns long before the cap blocks a tick.
+    // The ceiling is ALWAYS visible (owner 2026-07-14: "say max. 500
+    // somewhere in the module"); the count switches to the starker
+    // "N / 500" form once the list is big enough for it to matter.
     this.__count.textContent = n >= 400
       ? (n + " / " + this.MAX_ITEMS + " items selected")
-      : (n + " item" + (n === 1 ? "" : "s") + " selected");
+      : (n + " item" + (n === 1 ? "" : "s") + " selected (max. " + this.MAX_ITEMS + ")");
     this.__count.classList.toggle("lootlist-count-max", n >= this.MAX_ITEMS);
   }
 
@@ -62149,6 +63067,11 @@ LootListModal.prototype.handleClose = function () {
    */
 
   try {
+    // A pending debounced route-commit is superseded by the close-save.
+    if (this.__routeCommitTimer) {
+      clearTimeout(this.__routeCommitTimer);
+      this.__routeCommitTimer = null;
+    }
     if (this.__openFingerprint !== undefined && this.__stateFingerprint() !== this.__openFingerprint) {
       this.__commitSelection();
     }
@@ -62178,6 +63101,28 @@ LootListModal.prototype.__handleSave = function (enabled) {
   }
   this.__currentEnabled = enabled === true;
   this.__updateStateBadge();
+
+};
+
+LootListModal.prototype.__scheduleRouteCommit = function () {
+
+  /*
+   * Function LootListModal.__scheduleRouteCommit
+   * Debounced auto-commit for route (destination) changes — one
+   * __commitSelection ~1.2s after the last route click, so rapid cycling
+   * through bags sends a single packet. Belt-and-braces next to the
+   * close-path save: routes survive even a refresh/disconnect that skips
+   * handleClose (player video report 2026-07-11).
+   */
+
+  if (this.__routeCommitTimer) {
+    clearTimeout(this.__routeCommitTimer);
+  }
+  let self = this;
+  this.__routeCommitTimer = setTimeout(function () {
+    self.__routeCommitTimer = null;
+    self.__commitSelection();
+  }, 1200);
 
 };
 
@@ -62473,7 +63418,7 @@ LootListModal.prototype.__flashPresetSaved = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-manager.js ===== */
 
 const ModalManager = function () {
 
@@ -62508,7 +63453,7 @@ const ModalManager = function () {
   this.register(MenuModal, "menu-modal");
   this.register(GamesModal, "games-modal");
   this.register(ChessModal, "chess-modal");
-  // this.register(CardsModal, "cards-modal");  // PARKED 2026-06-26 — re-add with the launcher entry to resume card collecting
+  // this.register(CardsModal, "cards-modal");  // PARKED again 2026-07-12 (owner) — re-add with the launcher entry to resume (chrome maps below already list cards-modal; harmless while unregistered)
   // this.register(MinibeastModal, "minibeast-modal");                 // PARKED 2026-06-26 — re-add with the launcher entries to resume Minibeasts
   // this.register(MinibeastBattleModal, "minibeast-battle-modal");    // PARKED 2026-06-26
   this.register(SimpleGameModal, "simple-game-modal");
@@ -62923,6 +63868,7 @@ ModalManager.prototype.SEETHROUGH_MODAL_IDS = {
   "chat-modal": true,            // the "Channels" window (Hub → Channels)
   "character-modal": true,       // Hub → Character (frags/blessings/outfit tabs)
   "automations-modal": true,     // Hub → Automations (Free | Premium tabs)
+  "cards-modal": true,           // Hub → Cards (card collection)
   "outfit-modal": true,
   // Settings (reachable without going through the Hub).
   "settings-modal": true
@@ -62940,7 +63886,9 @@ ModalManager.prototype.MODAL_PARENT = {
   "table-game-modal": "games-modal",
   "character-modal": "menu-modal",    // Character     → Hub
   "automations-modal": "menu-modal",  // Automations   → Hub
-  "lootlist-modal": "automations-modal" // Loot List    → Automations
+  "cards-modal": "menu-modal",        // Cards         → Hub
+  "lootlist-modal": "automations-modal", // Loot List    → Automations
+  "spawn-map-modal": "task-info-modal"    // Spawn map    → Journal (picker AND activity-name links)
 };
 
 ModalManager.prototype.__chromeInsert = function (el, btn, rank) {
@@ -63129,7 +64077,7 @@ ModalManager.prototype.__refreshSeeThroughToggle = function (btn, on) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-map.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-map.js ===== */
 
 const MapModal = function (element) {
 
@@ -64054,7 +65002,7 @@ MapModal.prototype.__drawMarkers = function () {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-marker.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-marker.js ===== */
 
 const MarkerModal = function(id) {
 
@@ -64192,7 +65140,7 @@ MarkerModal.prototype.__handleDelete = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-menu.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-menu.js ===== */
 
 const MenuModal = function (id) {
 
@@ -64432,7 +65380,7 @@ MenuModal.prototype.__handleClick = function (which) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-move-item.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-move-item.js ===== */
 
 const MoveItemModal = function(element) {
 
@@ -64642,7 +65590,7 @@ MoveItemModal.prototype.__adjustCount = function(delta) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-oauth-create.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-oauth-create.js ===== */
 
 const OAuthCreateModal = function (element) {
 
@@ -64859,7 +65807,7 @@ OAuthCreateModal.prototype.handleConfirm = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-offer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-offer.js ===== */
 
 const OfferModal = function (element) {
 
@@ -65414,7 +66362,7 @@ OfferModal.prototype.__bindSliderTouch = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-outfit.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-outfit.js ===== */
 
 const OutfitModal = function(id) {
 
@@ -65743,6 +66691,39 @@ OutfitModal.prototype.__renderOutfit = function() {
     return;
   }
 
+  // Show the addon checkboxes ONLY for outfits that actually have addon
+  // sprite layers (owner 2026-07-09: legacy 7.6 base outfits showed empty
+  // checkboxes). An outfit's frame group pattern.y encodes the layers:
+  // >1 = has addon one, >2 = has addon two. Legacy outfits are pattern.y=1.
+  // Uncheck+clear a hidden addon so the preview and the sent outfit don't
+  // carry a stale flag.
+  // OWNERSHIP gate (owner 2026-07-12): an addon layer the sprite HAS but the
+  // player hasn't EARNED (server-sent owned-addon bits on the outfit list —
+  // same addon_<look> storage changeOutfit validates) shows as a DISABLED
+  // checkbox and is force-unchecked, so the preview can never dress you in
+  // an addon the server would silently strip (demon hunter base report).
+  try {
+    let __fg = outfitObject.getFrameGroup(0);
+    let __py = (__fg && __fg.pattern) ? __fg.pattern.y : 1;
+    let __cb1 = document.getElementById("checkbox-outfit-addon-one");
+    let __cb2 = document.getElementById("checkbox-outfit-addon-two");
+    let __lbl1 = __cb1.closest(".checkbox-label");
+    let __lbl2 = __cb2.closest(".checkbox-label");
+    let __owned = 0;
+    let __list = (gameClient.player && gameClient.player.outfits) || [];
+    for (let i = 0; i < __list.length; i++) {
+      if (__list[i].id === this.__outfit.id) { __owned = __list[i].addons || 0; break; }
+    }
+    if (__lbl1) __lbl1.style.display = (__py > 1) ? "" : "none";
+    if (__lbl2) __lbl2.style.display = (__py > 2) ? "" : "none";
+    __cb1.disabled = !(__owned & 1);
+    __cb2.disabled = !(__owned & 2);
+    if (__lbl1) __lbl1.title = (__owned & 1) ? "" : "You have not earned this addon yet.";
+    if (__lbl2) __lbl2.title = (__owned & 2) ? "" : "You have not earned this addon yet.";
+    if ((__py <= 1 || !(__owned & 1)) && __cb1.checked) { __cb1.checked = false; this.__outfit.addonOne = false; }
+    if ((__py <= 2 || !(__owned & 2)) && __cb2.checked) { __cb2.checked = false; this.__outfit.addonTwo = false; }
+  } catch (e) { /* preview cosmetic — never break render */ }
+
   // Render preview
   if(!document.getElementById("checkbox-animate-outfit").checked) {
 
@@ -65816,7 +66797,7 @@ OutfitModal.prototype.handleClose = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-party-info.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-party-info.js ===== */
 
 const PartyInfoModal = function(element) {
 
@@ -66097,7 +67078,7 @@ PartyInfoModal.prototype.__renderParty = function(info) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-queue.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-queue.js ===== */
 
 const QueueModal = function (id) {
 
@@ -66160,7 +67141,7 @@ QueueModal.prototype.update = function (position, totalAhead, premiumDays) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-readable.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-readable.js ===== */
 
 const ReadableModal = function (id) {
 
@@ -66401,7 +67382,7 @@ ReadableModal.prototype.__cleanupKeyboard = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-shop.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-shop.js ===== */
 
 const ShopModal = function (element) {
 
@@ -66638,12 +67619,76 @@ ShopModal.prototype.__renderOffers = function () {
 
 }
 
+ShopModal.prototype.__drawOutfitSlot = function (canvas, looktype, addons) {
+
+  /*
+   * Function ShopModal.__drawOutfitSlot
+   * Renders an OUTFIT sprite (with the given addon layers) into an offer
+   * slot — the same offscreen __drawCharacter technique as the Cards modal /
+   * outfit preview. Best-effort: a bad looktype just leaves the slot blank.
+   */
+
+  try {
+    // Lazy shared scratch (one offscreen 128px canvas + sprite buffers).
+    if (!this.__outfitOff) {
+      this.__outfitBuf = new SpriteBuffer(2);
+      this.__outfitBufMount = new SpriteBuffer(2);
+      this.__outfitOff = document.createElement("canvas");
+      this.__outfitOff.width = 128; this.__outfitOff.height = 128;
+      this.__outfitOffCanvas = new Canvas(this.__outfitOff, 128, 128);
+    }
+    let outfit = new Outfit({
+      id: looktype,
+      details: { head: 78, body: 88, legs: 79, feet: 95 },
+      mount: 0, mounted: false,
+      addonOne: !!(addons & 1), addonTwo: !!(addons & 2),
+      lookTypeEx: 0
+    });
+    let dataObject = outfit.getDataObject();
+    if (!dataObject) return;
+    let frameGroup = dataObject.getFrameGroup(0);
+    if (!frameGroup) return;
+    this.__outfitOffCanvas.clear();
+    this.__outfitBuf.clear();
+    // __drawSprite lays cells out on a 32px grid at 32*(pos - cellIndex), and
+    // __drawCharacter shifts large/displaced outfits left+up by the 0.25
+    // offset. Anchoring at (dim-1)+0.25 makes the character span exactly
+    // [0 .. dim*32] on the scratch, so the crop-blit below FILLS the slot —
+    // the original full-128 blit left the sprite a corner blob at ~1/6 slot
+    // size (owner report 2026-07-10, worst on mobile).
+    let dim = Math.max(frameGroup.width || 1, frameGroup.height || 1);
+    let px = (dim - 1) + 0.25;
+    // Face south (2), static frame, no mount — same params as the preview.
+    this.__outfitOffCanvas.__drawCharacter(this.__outfitBuf, this.__outfitBufMount, outfit, new Position(px, px), frameGroup, null, 0, 0, 2, 0, 64, 0.25);
+    let ctx = canvas.canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.__outfitOff, 0, 0, dim * 32, dim * 32, 0, 0, canvas.canvas.width, canvas.canvas.height);
+  } catch (e) { /* blank slot beats a broken shop */ }
+
+}
+
 ShopModal.prototype.__createOfferNode = function (offer, index) {
 
   /*
    * Function ShopModal.__createOfferNode
    * Creates a clickable item slot for a shop offer
    */
+
+  // Outfit products render the actual outfit (with its addon layers), not an
+  // item sprite (owner 2026-07-10). Same treatment as multi-tile FURNITURE
+  // offers: draw a 64px bitmap and CSS-scale it into the 32px slot — a raw
+  // 32px bitmap looked chunkier/smaller than the furniture thumbnails
+  // (owner 2026-07-10: "can the outfit boxes be the same size as the
+  // furniture?").
+  if (offer.outfitId > 0) {
+    let outfitCanvas = new Canvas(null, 64, 64);
+    outfitCanvas.canvas.className = "slot offer-slot";
+    this.__drawOutfitSlot(outfitCanvas, offer.outfitId, offer.outfitAddons);
+    outfitCanvas.canvas.style.width = "32px";
+    outfitCanvas.canvas.style.height = "32px";
+    outfitCanvas.canvas.addEventListener("click", this.__handleSelectOffer.bind(this, outfitCanvas, offer, index));
+    return outfitCanvas.canvas;
+  }
 
   let item = new Item(offer.id, 1);
   item.sid = offer.sid || 0;
@@ -66722,7 +67767,7 @@ ShopModal.prototype.__handleSelectOffer = function (canvas, offer, index) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-shrine.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-shrine.js ===== */
 
 // Shrine modal i18n — same 8 locales as the captcha, and it REUSES the
 // captcha's locale machinery (captchaResolveLocale / captchaSetOverride /
@@ -67044,7 +68089,7 @@ ShrineModal.prototype.__clearTimers = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-simplegame.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-simplegame.js ===== */
 
 const SimpleGameModal = function (id) {
 
@@ -67278,7 +68323,7 @@ SimpleGameModal.prototype.__stopClock = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-spawn-map.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-spawn-map.js ===== */
 
 const SpawnMapModal = function (id) {
 
@@ -67643,7 +68688,7 @@ SpawnMapModal.prototype.__panBy = function (clientX, clientY) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-spellbook.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-spellbook.js ===== */
 
 const SpellbookModal = function (element) {
 
@@ -67826,7 +68871,7 @@ SpellbookModal.prototype.handleOpen = function (index) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-tablegame.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-tablegame.js ===== */
 
 const TableGameModal = function (id) {
 
@@ -68522,7 +69567,7 @@ TableGameModal.prototype.__pkSetRaise = function (to, minTo, maxTo, isBet) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-task-info.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-task-info.js ===== */
 
 const TaskInfoModal = function(element) {
 
@@ -68661,10 +69706,25 @@ TaskInfoModal.prototype.__renderActivities = function () {
     return "<div style=\"font-size:12px;color:" + color + ";margin-top:1px;\">⏳ " + txt + "</div>";
   }
 
-  function card(title, where, how, reward, timerKey) {
+  // Subtle NPC links (owner 2026-07-15: "make the name of the npcs
+  // clickable"): each giver's NAME in the where-line becomes the link to
+  // its spawn-map pin — dotted underline, no extra chrome. The delegated
+  // click below resolves the name against the p:1 spawn-data entries by
+  // prefix, so label tweaks in the build tool can't strand the link.
+  function linkNames(where, npcNames) {
+    if (!npcNames || !npcNames.length) return where;
+    npcNames.forEach(function (n) {
+      where = where.replace(n,
+        "<span class=\"task-activity-pin\" data-npc=\"" + n + "\" "
+        + "style=\"cursor:pointer;border-bottom:1px dotted #998;\">" + n + "</span>");
+    });
+    return where;
+  }
+
+  function card(title, where, how, reward, timerKey, npcNames) {
     return "<div style=\"margin-bottom:9px;\">"
       + "<div style=\"font-weight:bold;\">" + title + "</div>"
-      + "<div style=\"color:#bbb;font-size:12px;\">" + where + "</div>"
+      + "<div style=\"color:#bbb;font-size:12px;\">" + linkNames(where, npcNames) + "</div>"
       + "<div style=\"color:#aaa;font-size:12px;\">" + how + " &middot; <span style=\"color:#9c9;\">" + (reward || "runes to hunt with") + "</span></div>"
       + statusLine(timerKey)
       + "</div>";
@@ -68675,23 +69735,47 @@ TaskInfoModal.prototype.__renderActivities = function () {
     + card("Party Gauntlet &mdash; once a day",
            "Bartholomew &middot; the King's herald",
            "Lvl 80+, party of 4&ndash;8",
-           "gauntlet points", "gauntlet")
+           "gauntlet points", "gauntlet", ["Bartholomew"])
     + card("Daily Arena &mdash; once a day",
            "Ulf &middot; Svargrond, by the arena",
            "Lvl 40+, survive 10 beasts",
-           null, "arena")
+           null, "arena", ["Ulf"])
     + card("Butterfly Catching &mdash; twice a day",
            "Nessie &middot; Ab'Dendriel &nbsp;&middot;&nbsp; Iris &middot; Port Hope",
            "Lvl 20+ promoted; hand in 20 butterflies",
-           null, "butterfly")
+           null, "butterfly", ["Nessie", "Iris"])
     + card("Old Rod Fishing &mdash; twice a day",
            "Hoggle &middot; east of Thais &nbsp;&middot;&nbsp; Edmund &middot; north of Carlin",
            "Lvl 20+ promoted; hand in 20 old fish",
-           null, "oldrod")
+           null, "oldrod", ["Hoggle", "Edmund"])
     + card("Minigames",
            "Hub menu &rarr; 🎮 Minigames",
            "Challenge other players to quick games",
            "climb the leaderboard", "minigame");
+
+  // Delegated pin clicks (innerHTML rebuild per open — one listener, once).
+  if (!this.__activityPinsWired) {
+    this.__activityPinsWired = true;
+    let modal = this;
+    el.addEventListener("click", function (ev) {
+      let chip = ev.target && ev.target.closest ? ev.target.closest(".task-activity-pin") : null;
+      if (!chip) return;
+      let prefix = (chip.dataset.npc || "").toLowerCase();
+      if (!prefix) return;
+      modal.__mapEnsureData(function () {
+        let m = modal.__map;
+        let hit = null;
+        for (let i = 0; i < m.data.clusters.length; i++) {
+          let c = m.data.clusters[i];
+          if (c.p === 1 && c.n.toLowerCase().indexOf(prefix) === 0) { hit = c.n; break; }
+        }
+        if (hit) modal.__openSpawnMapFor(hit);
+        else if (gameClient.interface && gameClient.interface.setCancelMessage) {
+          gameClient.interface.setCancelMessage("No map entry for that NPC yet.");
+        }
+      });
+    });
+  }
 
 };
 
@@ -69012,11 +70096,47 @@ TaskInfoModal.prototype.__mapBuildList = function () {
   let names = Object.keys(agg).sort();
   listEl.innerHTML = "";
   m.rows = [];
+
+  // Task & errand giver NPCs (p:1 entries) — pinned section above the
+  // monster list, letter-filter exempt (dataset.always), gold swatch.
+  let npcNames = [];
+  let seenNpc = {};
+  for (let i = 0; i < m.data.clusters.length; i++) {
+    let c = m.data.clusters[i];
+    if (c.p === 1 && !seenNpc[c.n]) { seenNpc[c.n] = true; npcNames.push(c.n); }
+  }
+  npcNames.sort();
+  if (npcNames.length) {
+    let head = document.createElement("div");
+    head.className = "task-map-row task-map-npc-header";
+    head.dataset.kind = "npc";
+    m.npcHeader = head;
+    head.style.cssText = "opacity:0.8;font-size:11px;padding:2px 6px;";
+    head.textContent = "— Task & errand givers —";
+    listEl.appendChild(head);
+    npcNames.forEach(function (name) {
+      let row = document.createElement("div");
+      row.className = "lootlist-row task-map-row";
+      row.dataset.always = "1";
+      row.dataset.kind = "npc";
+      row.dataset.search = name.toLowerCase();
+      row.dataset.name = name;
+      row.innerHTML = "<span class=\"task-map-swatch\" style=\"background:#ffd700\"></span>"
+        + "<span class=\"task-map-name\">" + name + "</span>"
+        + "<span class=\"task-map-count\">NPC</span>";
+      row.addEventListener("click", this.__mapSelectMonster.bind(this, name));
+      listEl.appendChild(row);
+      m.rows.push(row);
+    }.bind(this));
+  }
+
+  names = names.filter(function (n) { return !seenNpc[n]; });
   names.forEach(function (name) {
     let info = agg[name];
     let color = this.__MAP_TIER_COLORS[info.tier] || this.__MAP_TIER_COLORS[0];
     let row = document.createElement("div");
     row.className = "lootlist-row task-map-row";
+    row.dataset.kind = "monster";
     row.dataset.letter = name.charAt(0).toUpperCase();
     row.dataset.search = name.toLowerCase();
     row.dataset.name = name;
@@ -69027,6 +70147,24 @@ TaskInfoModal.prototype.__mapBuildList = function () {
     listEl.appendChild(row);
     m.rows.push(row);
   }.bind(this));
+
+  // Kind filter (All / Monsters / NPCs — owner 2026-07-15). Wired once.
+  if (!m.kindWired) {
+    m.kindWired = true;
+    m.kind = m.kind || "all";
+    let kf = document.getElementById("task-map-kind-filter");
+    if (kf) {
+      Array.from(kf.querySelectorAll("button")).forEach(function (b) {
+        b.addEventListener("click", function () {
+          m.kind = b.dataset.kind;
+          Array.from(kf.querySelectorAll("button")).forEach(function (x) {
+            x.classList.toggle("active", x === b);
+          });
+          this.__mapFilterRows();
+        }.bind(this));
+      }.bind(this));
+    }
+  }
 
   // Apply the current letter filter right away so the picker opens on a single
   // letter (default "A") instead of painting every monster — "All" renders the
@@ -69062,12 +70200,15 @@ TaskInfoModal.prototype.__mapFilterRows = function () {
   let search = document.getElementById("task-map-search");
   let q = (m.letter === "All" && search) ? search.value.toLowerCase().trim() : "";
 
+  let kind = m.kind || "all";
   for (let i = 0; i < m.rows.length; i++) {
     let row = m.rows[i];
-    let okLetter = (m.letter === "All") || (row.dataset.letter === m.letter);
+    let okLetter = row.dataset.always === "1" || (m.letter === "All") || (row.dataset.letter === m.letter);
     let okSearch = !q || (row.dataset.search || "").indexOf(q) !== -1;
-    row.style.display = (okLetter && okSearch) ? "" : "none";
+    let okKind = kind === "all" || row.dataset.kind === kind;
+    row.style.display = (okLetter && okSearch && okKind) ? "" : "none";
   }
+  if (m.npcHeader) m.npcHeader.style.display = (kind === "monster") ? "none" : "";
 
 };
 
@@ -69117,7 +70258,7 @@ TaskInfoModal.prototype.__openSpawnMapFor = function (name) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-text.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-text.js ===== */
 
 const TextModal = function(id) {
 
@@ -69188,7 +70329,7 @@ TextModal.prototype.handleCancel = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-trade-select.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-trade-select.js ===== */
 
 const TradeSelectModal = function (element) {
 
@@ -69336,7 +70477,7 @@ TradeSelectModal.prototype.__handleSelectPlayer = function (player) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-trade-with.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-trade-with.js ===== */
 
 const TradeWithModal = function (element) {
 
@@ -69942,7 +71083,7 @@ TradeWithModal.prototype.__makeCloseButton = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-trade.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-trade.js ===== */
 
 const TradeModal = function(element) {
 
@@ -70148,7 +71289,7 @@ TradeModal.prototype.__sendKeepingToggle = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal-travel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal-travel.js ===== */
 
 const TravelModal = function (element) {
 
@@ -70305,7 +71446,7 @@ TravelModal.prototype.handleConfirm = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/modals/modal.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/modals/modal.js ===== */
 
 const Modal = function(id) {
 
@@ -70610,7 +71751,7 @@ Modal.prototype.__buttonClick = function(event) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/notification.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/notification.js ===== */
 
 const NotificationManager = function() {
 
@@ -70623,9 +71764,16 @@ const NotificationManager = function() {
   this.__internalTimeoutServer = null;
   this.__internalZoneTimeout = null;
 
-  // Priority of the currently displayed server message (0 = normal, 1 = high)
-  // High-priority messages (level-up, skill advance) cannot be overwritten by lower ones (loot)
-  this.__serverMessagePriority = 0;
+  // Priority of the currently displayed server message. Ladder:
+  //   -1 = chatter (client-generated "Using one of N ..." supply line)
+  //    0 = normal (loot, most server messages)
+  //    1 = high (level-up, skill advance)
+  // A message can only overwrite an EQUAL-or-lower one still on screen, so
+  // loot ("Loot of a demon: ...") survives the supply line that follows a
+  // rune kill (player report 2026-07-09), and advancement popups survive
+  // loot. -Infinity = nothing on screen (any priority may display —
+  // a plain 0 here would permanently gag the -1 supply line).
+  this.__serverMessagePriority = -Infinity;
 
 }
 
@@ -70671,8 +71819,10 @@ NotificationManager.prototype.setServerMessage = function(message, color, priori
 
   /*
    * Function NotificationManager.setServerMessage
-   * Shows a center-screen server message with priority support
-   * High-priority messages (level-up, skill advance) cannot be overwritten by lower ones (loot)
+   * Shows a center-screen server message with priority support (see the
+   * ladder in the constructor). A lower-priority message never overwrites
+   * a higher one still on screen; equal priority replaces (so a second
+   * supply line updates the count, a second loot line shows the new kill).
    */
 
   priority = priority || 0;
@@ -70698,7 +71848,8 @@ NotificationManager.prototype.setServerMessage = function(message, color, priori
 
   this.__internalTimeoutServer = setTimeout(function() {
     element.style.display = "none";
-    this.__serverMessagePriority = 0;
+    // Nothing on screen — any priority (incl. the -1 supply line) may show.
+    this.__serverMessagePriority = -Infinity;
   }.bind(this), duration);
 
 }
@@ -70726,7 +71877,7 @@ NotificationManager.prototype.deferCancel = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/npc-dialog.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/npc-dialog.js ===== */
 
 const NpcDialog = function() {
 
@@ -70926,7 +72077,7 @@ NpcDialog.prototype.isVisible = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/quest-tracker.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/quest-tracker.js ===== */
 
 const QuestTracker = function () {
     /*
@@ -71032,7 +72183,7 @@ QuestTracker.prototype.toggle = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element-character.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/screen-element-character.js ===== */
 
 const CharacterElement = function (creature) {
   /*
@@ -71490,7 +72641,7 @@ CharacterElement.prototype.__setupNpcIcon = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element-floating.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/screen-element-floating.js ===== */
 
 const FloatingElement = function (message, position, color) {
 
@@ -71592,7 +72743,7 @@ FloatingElement.prototype.setColor = function (color) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/screen-element-manager.js ===== */
 
 const ScreenElementManager = function () {
 
@@ -71959,7 +73110,7 @@ ScreenElementManager.prototype.deleteTextElement = function (textElement) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element-message.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/screen-element-message.js ===== */
 
 const MessageElement = function (entity, message, color, loudness) {
 
@@ -72080,7 +73231,7 @@ MessageElement.prototype.setTextPosition = function () {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-element.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/screen-element.js ===== */
 
 const ScreenElement = function (id) {
 
@@ -72316,7 +73467,7 @@ ScreenElement.prototype.__getAbsoluteOffset = function (position) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/screen-recorder.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/screen-recorder.js ===== */
 
 "use strict";
 
@@ -72329,8 +73480,10 @@ ScreenElement.prototype.__getAbsoluteOffset = function (position) {
  * UI. The video is written to a file the player downloads LOCALLY — no server
  * storage, no replay engine. Toggled with the /record chat command.
  *
- * Codec is feature-detected, preferring WebM/VP9 for the smallest files, then
- * MP4/H.264. Bitrate is kept modest since the content is mostly static
+ * Codec is feature-detected, preferring MP4/H.264 (owner 2026-07-12: plays
+ * everywhere — QuickTime, Windows, phone galleries, Discord embeds — unlike
+ * webm), falling back to WebM/VP9 where MP4 recording isn't supported
+ * (Firefox). Bitrate is kept modest since the content is mostly static
  * pixel art.
  *
  * Trade-offs of getDisplayMedia (vs capturing the canvas directly):
@@ -72353,13 +73506,15 @@ const ScreenRecorder = function () {
 };
 
 ScreenRecorder.prototype.CAPTURE_FPS = 30;
-// File size ≈ BITRATE × duration (independent of resolution). Target is
-// "~3 MB per 10s" → ~2.4 Mbps; 2.3 Mbps lands ~2.9 MB / 10s after container
-// overhead while restoring crisp quality (1.3 Mbps was bitrate-starved). The
-// game's native detail fits within 720p, so the MAX_HEIGHT cap (applied in the
-// getDisplayMedia constraints) lets this bitrate go entirely to quality rather
-// than extra pixels. BITRATE scales file size proportionally — tune to taste.
-ScreenRecorder.prototype.BITRATE = 2300000; // 2.3 Mbps (~2.9 MB / 10s)
+// File size ≈ BITRATE × duration (independent of resolution). Was 2.3 Mbps
+// (~2.9 MB / 10s); raised to 3.2 Mbps (owner 2026-07-12 "up the quality
+// slightly") — that also compensates for the switch to MP4/H.264, which
+// compresses ~25% worse than the old WebM/VP9 at equal bitrate. Lands
+// ~4 MB / 10s (~24 MB per minute). The game's native detail fits within
+// 720p, so the MAX_HEIGHT cap (applied in the getDisplayMedia constraints)
+// lets this bitrate go entirely to quality rather than extra pixels.
+// BITRATE scales file size proportionally — tune to taste.
+ScreenRecorder.prototype.BITRATE = 3200000; // 3.2 Mbps (~4 MB / 10s)
 ScreenRecorder.prototype.MAX_HEIGHT = 720;
 
 ScreenRecorder.prototype.isRecording = function () {
@@ -72370,19 +73525,20 @@ ScreenRecorder.prototype.__pickMime = function () {
 
   /*
    * Function ScreenRecorder.__pickMime
-   * Best supported recording mime type, preferring WebM/VP9 (smallest files),
-   * then MP4. Null if the browser can record none.
+   * Best supported recording mime type, preferring MP4/H.264 (universal
+   * playback; owner 2026-07-12), then WebM (Firefox can't record MP4).
+   * Null if the browser can record none.
    */
 
   if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
     return null;
   }
   let candidates = [
+    "video/mp4;codecs=avc1",
+    "video/mp4",
     "video/webm;codecs=vp9",
     "video/webm;codecs=vp8",
-    "video/webm",
-    "video/mp4;codecs=avc1",
-    "video/mp4"
+    "video/webm"
   ];
   for (let i = 0; i < candidates.length; i++) {
     if (MediaRecorder.isTypeSupported(candidates[i])) {
@@ -72589,7 +73745,7 @@ ScreenRecorder.prototype.__hideIndicator = function () {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/settings.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/settings.js ===== */
 
 const Settings = function (element) {
 
@@ -72878,6 +74034,7 @@ Settings.prototype.__applyJoystickTurnZoneVisibility = function (style) {
 
   row.style.display = (style === "analog") ? "" : "none";
 
+
 }
 
 Settings.prototype.__setKeyboardLayout = function () {
@@ -73107,6 +74264,19 @@ Settings.prototype.is12HourClock = function () {
   return this.__state["clock-format"] === "12h";
 
 }
+
+Settings.prototype.isMobilePreciseClickEnabled = function () {
+
+  /*
+   * Function Settings.isMobilePreciseClickEnabled
+   * Returns true when mobile taps resolve attacks pixel-precisely against
+   * drawn sprites (the desktop __resolveAttackCreature path) instead of the
+   * forgiving 3x3 tile scan. Mobile-only toggle in Optimization settings.
+   */
+
+  return this.__state["mobile-precise-click"] === true;
+
+};
 
 Settings.prototype.isTapToWalkEnabled = function () {
 
@@ -73782,6 +74952,17 @@ Settings.prototype.__toggle = function (event) {
         gameClient.send(new ChannelMessagePacket(0x00, 0, aiCmd));
       }
       break;
+    case "auto-skin":
+      this.__state[event.target.id] = event.target.checked;
+      // Mirror to server-side player.storage — ContainerManager runs the
+      // knife/stake attempt automatically on corpse open for opted-in
+      // players (owner 2026-07-10, mobile QoL). Same server-synced
+      // pattern as heal-notification; re-sent at login (gameclient.js).
+      if (gameClient && gameClient.isConnected()) {
+        let askCmd = event.target.checked ? "/autoskin on" : "/autoskin off";
+        gameClient.send(new ChannelMessagePacket(0x00, 0, askCmd));
+      }
+      break;
     case "autoturn-spells":
       // Auto-turn to your target on a strike/wave spell. Default ON. Server-synced
       // (the server only skips the auto-face for players who send /autoturn off),
@@ -73803,6 +74984,7 @@ Settings.prototype.__toggle = function (event) {
     case "qezc-diagonal":
     case "smart-walking":
     case "precise-attack-click":
+    case "mobile-precise-click":
     case "drag-indicator":
     case "gpu-outfit-colors":
     case "burst-walk":
@@ -74129,6 +75311,20 @@ Settings.prototype.__init = function () {
     this.__state["precise-attack-click"] = false;
   }
 
+  // Mobile precise click: opt-in for everyone (fuzzy 3x3 stays the default —
+  // fat fingers on 32px sprites genuinely benefit from forgiveness).
+  if (!this.__state.hasOwnProperty("mobile-precise-click")) {
+    this.__state["mobile-precise-click"] = false;
+  }
+
+  // Dynamic placement REMOVED (owner 2026-07-17: "Remove dynamic joystick
+  // placement"). Scrub any stored flag + remap the briefly-shipped
+  // movement-style value so old saves land on the plain analog stick.
+  delete this.__state["dynamic-placement"];
+  if (this.__state["movement-style"] === "dynamic") {
+    this.__state["movement-style"] = "analog";
+  }
+
   // Low/Lowest Spec are a ladder (mutex in __toggle) — settle state saved
   // before the mutex existed: both on = Lowest wins.
   if (this.__state["low-spec-mode"] && this.__state["lowest-spec-mode"]) {
@@ -74254,6 +75450,7 @@ Settings.prototype.__getCleanState = function () {
     "keyboard-layout": getValue("keyboard-layout", "qwerty"),
     "clock-format": getValue("clock-format"),
     "tap-to-walk": getChecked("tap-to-walk"),
+    "mobile-precise-click": getChecked("mobile-precise-click"),
     "longpress-context-menu": getChecked("longpress-context-menu"),
     "classic-minimap": getChecked("classic-minimap"),
     "screen-protector-mode": getChecked("screen-protector-mode"),
@@ -74305,6 +75502,7 @@ Settings.prototype.__getCleanState = function () {
     "word-suggestions": getChecked("word-suggestions"),
     "hide-spell-casts": getChecked("hide-spell-casts"),
     "attack-indicator": getChecked("attack-indicator"),
+    "auto-skin": getChecked("auto-skin"),
     // Must live in cleanState (default ON) or __update drops it every load — then
     // __applyState never binds the change listener and the checkbox is dead (it
     // looked enabled but never sent /autoturn off; the typed command worked because
@@ -74405,6 +75603,7 @@ Settings.prototype.__applyState = function (id) {
     case "qezc-diagonal":
     case "smart-walking":
     case "precise-attack-click":
+    case "mobile-precise-click":
     case "drag-indicator":
     case "gpu-outfit-colors":
     case "extra-hotbar":
@@ -74414,6 +75613,7 @@ Settings.prototype.__applyState = function (id) {
     case "word-suggestions":
     case "hide-spell-casts":
     case "attack-indicator":
+    case "auto-skin":
     case "heal-notification":
     case "open-containers-same-window":
     case "reopen-containers":
@@ -74503,7 +75703,7 @@ Settings.prototype.__applyState = function (id) {
   }
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/status-bar.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/status-bar.js ===== */
 
 const StatusBar = function () {
 
@@ -75037,7 +76237,7 @@ StatusBar.prototype.__updateMagicShieldIndicator = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/tooltip.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/tooltip.js ===== */
 
 const Tooltip = function () {
     this.element = document.createElement("div");
@@ -75520,7 +76720,7 @@ Tooltip.prototype.__getContainerContentsWeight = function (item) {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/tutorial-highlight.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/tutorial-highlight.js ===== */
 
 "use strict";
 
@@ -75721,7 +76921,7 @@ TutorialHighlight.prototype.reset = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/virtual-keyboard.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/virtual-keyboard.js ===== */
 
 "use strict";
 
@@ -77249,7 +78449,7 @@ VirtualKeyboard.prototype.__showMobileControls = function() {
 };
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-battle.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/window-battle.js ===== */
 
 const BattleWindow = function (element) {
 
@@ -77767,22 +78967,36 @@ BattleWindow.prototype.addCreature = function (creature) {
   this.updateCreature(creature);
   this.sortByDistance();
 
-  // BLOCK ALL MOUSE EVENTS IN MOBILE MODE
-  // This is critical because Mouse.js listens to mousedown/mouseup on document.body.
-  // Since we allow touchstart default (for scroll), the browser acts as a mouse.
-  // We must stop these events here so they don't reach the game map.
-
-  function blockMobileMouse(event) {
+  // Guard this row's raw mouse events before they reach Mouse.js (which listens
+  // on document.body).
+  //   - MOBILE: block everything. touchstart keeps its default (for scroll), so
+  //     the browser also fires compatibility mouse events we must swallow.
+  //   - DESKTOP + rune crosshair armed (__multiUseObject from right-click "Use
+  //     with", or __hotbarCrosshairItem from a hotbar rune): stop the mousedown/
+  //     up from bubbling to Mouse.__handleMouseDown. That global handler treats
+  //     a click whose target isn't a map tile/slot as a "click on void" and
+  //     CANCELS the armed rune (mouse.js ~2088) BEFORE this row's own click
+  //     handler (tryRune) can fire it — so rune-shooting via the battle list
+  //     silently degraded into a plain attack-target toggle. Blocking here keeps
+  //     __multiUseObject alive so the click handler shoots the rune. Only the
+  //     two crosshair states tryRune handles are guarded; other modes fall
+  //     through to the normal void-cancel. (owner 2026-07-11)
+  function guardRowMouse(event) {
     if (gameClient.touch && gameClient.touch.isMobileMode) {
-      // console.log("Blocking mobile mouse event:", event.type, this.id);
       event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      return;
+    }
+    let mouse = gameClient.mouse;
+    if (mouse && (mouse.__multiUseObject !== null || mouse.__hotbarCrosshairItem !== null)) {
       event.stopPropagation();
       event.stopImmediatePropagation();
     }
   }
 
-  node.addEventListener("mousedown", blockMobileMouse);
-  node.addEventListener("mouseup", blockMobileMouse);
+  node.addEventListener("mousedown", guardRowMouse);
+  node.addEventListener("mouseup", guardRowMouse);
 
   // Right-click: open the existing screen-menu populated for this creature.
   // Lets players Look / Attack / Follow / Invite to Party / Message directly
@@ -77858,6 +79072,14 @@ BattleWindow.prototype.addCreature = function (creature) {
     if (creature) {
       creature.__volatileSquare = { color: Interface.prototype.COLORS.WHITE, expires: performance.now() + 1000 };
     }
+    // Mirror the armed-rune cursor onto the row. Mouse.js sets it on
+    // document.body, but this row's own CSS cursor would otherwise override it
+    // with the plain pointer — so the player couldn't tell the click will SHOOT
+    // the rune here (now that it does). (owner 2026-07-11)
+    let mouse = gameClient.mouse;
+    if (mouse && (mouse.__multiUseObject !== null || mouse.__hotbarCrosshairItem !== null)) {
+      this.style.cursor = document.body.style.cursor || "move";
+    }
   });
 
   node.addEventListener("mouseleave", function () {
@@ -77865,6 +79087,7 @@ BattleWindow.prototype.addCreature = function (creature) {
     if (creature) {
       creature.__volatileSquare = null;
     }
+    this.style.cursor = "";
   });
 
   // Shared rune-targeting: if a rune is active — right-click "Use with"
@@ -77972,7 +79195,7 @@ BattleWindow.prototype.addCreature = function (creature) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-friend.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/window-friend.js ===== */
 
 const FriendWindow = function(element) {
 
@@ -78101,7 +79324,7 @@ FriendWindow.prototype.__createFriendEntry = function(entry) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/window-manager.js ===== */
 
 const WindowManager = function () {
 
@@ -78199,15 +79422,19 @@ const WindowManager = function () {
 WindowManager.prototype.LAYOUT_KEY = "window-layout";
 WindowManager.prototype.LAYOUT_VERSION = 1;
 
-// Per-container-TYPE window geometry (column + minimized), independent of the
-// fixed-window layout above and keyed by the stable container item id (NOT the
-// per-session container id, which changes every login). Lets a backpack reopen
-// in the column + collapsed state the player left it in. Everything here is
-// best-effort: any failure falls back to the default placement in
-// Container.createDOM, so a corrupt/missing save can never block a container
-// from opening. Desktop only — mobile uses tabbed panels.
+// PER-INSTANCE container window geometry (column + minimized + order within
+// the column), keyed by the SAME open-order index the height store uses
+// (Container.__restoreKey — "the k-th open container" is the stable
+// cross-relog identity; server container ids are re-minted guids every
+// login). v2, owner 2026-07-12: v1 keyed by container ITEM id, which made
+// every identical backpack share one memory slot. Same OTCv8 restore
+// semantics as heights: honored only for the login/reconnect re-push;
+// mid-play opens clear the slot and take default placement. Best-effort:
+// any failure falls back to the default placement in Container.createDOM.
+// Desktop only — mobile uses tabbed panels. Bounded like the height store:
+// keys never exceed the number of simultaneously open containers.
 WindowManager.prototype.CONTAINER_GEOMETRY_KEY = "container-geometry";
-WindowManager.prototype.CONTAINER_GEOMETRY_VERSION = 1;
+WindowManager.prototype.CONTAINER_GEOMETRY_VERSION = 2;
 
 // OTCv8-style per-container height memory (owner 2026-07-06: "lets fully copy
 // theirs its the gold standard — purely for desktop"). Heights are keyed by
@@ -78267,6 +79494,109 @@ WindowManager.prototype.clearContainerHeight = function (containerId) {
   } catch (e) { /* best-effort */ }
 };
 
+// FIXED-window body heights (skill/battle/friends...), keyed by the window's
+// stable DOM id. Containers deliberately live in the two stores above; this
+// one exists because InteractiveWindow.open() resets the body to natural
+// height, which sprang the (player-resized) skill window fully open on every
+// login (player report 2026-07-12). Saved on resize-drag end; applied by
+// open() itself, so every open path — login restore, sidebar toggle,
+// minimize/expand — lands on the player's size. Best-effort + clamped.
+WindowManager.prototype.FIXED_HEIGHTS_KEY = "fixed-window-heights";
+
+WindowManager.prototype.__readFixedHeights = function () {
+  if (this.__isMobile) return {};
+  try {
+    let parsed = JSON.parse(localStorage.getItem(this.FIXED_HEIGHTS_KEY));
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) { return {}; }
+};
+
+WindowManager.prototype.loadFixedHeight = function (windowId) {
+  // Saved body height in px for a fixed window's DOM id, or null. Clamped on
+  // read like the container store so a poisoned save can't restore a giant.
+  let h = this.__readFixedHeights()[windowId];
+  if (!(typeof h === "number" && isFinite(h) && h >= 34)) return null;
+  return Math.min(Math.floor(h), Math.floor((window.innerHeight || 900) * 0.4));
+};
+
+WindowManager.prototype.saveFixedHeight = function (windowId, height) {
+  if (this.__isMobile || !windowId) return;
+  try {
+    let h = Math.floor(height);
+    if (!isFinite(h) || h < 34) return;
+    h = Math.min(h, Math.floor((window.innerHeight || 900) * 0.4));
+    let heights = this.__readFixedHeights();
+    heights[windowId] = h;
+    localStorage.setItem(this.FIXED_HEIGHTS_KEY, JSON.stringify(heights));
+  } catch (e) { /* best-effort */ }
+};
+
+// Overflow fit (player report 2026-07-12: "when screen sides don't have
+// space, new containers open out of screen"). Column stacks can overflow the
+// viewport because window bodies carry INLINE pixel heights — flexbox cannot
+// shrink those. After a new window lands in a column, hand its overflow to
+// the largest sibling bodies (never below one 34px row, minimized windows
+// skipped), remembering each victim's original height on the element. When
+// any window leaves the column, reflowColumnOnRemove grows the shrunken ones
+// back while space allows — the "temporarily reduce, restore after" the
+// player asked for.
+WindowManager.prototype.fitColumnAfterAdd = function (stack, newEl) {
+  if (this.__isMobile || !stack || !newEl) return;
+  try {
+    // Hidden layout (login restore before the game screen shows) has no
+    // pixel truth — nothing to measure, nothing to shrink.
+    if (!stack.clientHeight) return;
+    let overflow = stack.scrollHeight - stack.clientHeight;
+    if (overflow <= 0) return;
+    let candidates = [];
+    for (let i = 0; i < stack.children.length; i++) {
+      let child = stack.children[i];
+      if (child === newEl || !child.querySelector) continue;
+      let body = child.querySelector(".body");
+      if (!body || body.style.display === "none") continue;   // minimized
+      let h = parseInt(body.style.height, 10);
+      if (!isFinite(h) || h <= 34) continue;
+      candidates.push({ body: body, h: h, el: child });
+    }
+    candidates.sort(function (a, b) { return b.h - a.h; });
+    for (let c = 0; c < candidates.length && overflow > 0; c++) {
+      let cand = candidates[c];
+      let give = Math.min(overflow, cand.h - 34);
+      if (give <= 0) continue;
+      if (!cand.el.dataset.autoShrunkHeight) {
+        cand.el.dataset.autoShrunkHeight = String(cand.h);
+      }
+      cand.body.style.height = (cand.h - give) + "px";
+      overflow -= give;
+    }
+  } catch (e) { /* cosmetic — a fit failure must never block an open */ }
+};
+
+WindowManager.prototype.reflowColumnOnRemove = function (stack) {
+  if (this.__isMobile || !stack || !stack.children) return;
+  try {
+    let spare = stack.clientHeight - stack.scrollHeight;
+    if (spare <= 0) return;
+    for (let i = 0; i < stack.children.length && spare > 0; i++) {
+      let child = stack.children[i];
+      let saved = parseInt(child.dataset && child.dataset.autoShrunkHeight, 10);
+      if (!isFinite(saved)) continue;
+      let body = child.querySelector && child.querySelector(".body");
+      if (!body) { delete child.dataset.autoShrunkHeight; continue; }
+      let cur = parseInt(body.style.height, 10);
+      if (!isFinite(cur)) cur = 34;
+      let grow = Math.min(spare, saved - cur);
+      if (grow > 0) {
+        body.style.height = (cur + grow) + "px";
+        spare -= grow;
+      }
+      if (cur + Math.max(0, grow) >= saved) {
+        delete child.dataset.autoShrunkHeight;   // fully restored
+      }
+    }
+  } catch (e) { /* cosmetic */ }
+};
+
 WindowManager.prototype.__readContainerGeometry = function () {
   // Returns the saved { itemId: {column, minimized} } map, or {} on any failure.
   if (this.__isMobile) return {};
@@ -78282,14 +79612,31 @@ WindowManager.prototype.__readContainerGeometry = function () {
   } catch (e) { return {}; }
 };
 
-WindowManager.prototype.loadContainerGeometry = function (itemId) {
-  // Returns {column, minimized} for a container item id, or null if absent/invalid.
-  // (Body HEIGHT is deliberately NOT here — it lives in the OTCv8-style
-  // per-session-container-id store above, with different restore semantics.)
+WindowManager.prototype.loadContainerGeometry = function (restoreKey) {
+  // Returns {column, minimized, order} for an open-order restore key, or null
+  // if absent/invalid. (Body HEIGHT is deliberately NOT here — it lives in
+  // the height store above; both stores now share the same per-instance key.)
   let items = this.__readContainerGeometry();
-  let geom = items[itemId];
+  let geom = items[restoreKey];
   if (!geom || (geom.column !== "left" && geom.column !== "right")) return null;
-  return { column: geom.column, minimized: geom.minimized === true };
+  return {
+    column: geom.column,
+    minimized: geom.minimized === true,
+    order: (typeof geom.order === "number" && geom.order >= 0) ? Math.floor(geom.order) : null
+  };
+};
+
+WindowManager.prototype.clearContainerGeometry = function (restoreKey) {
+  // Mid-play open: the k-th slot's geometry memory resets (mirrors
+  // clearContainerHeight — OTCv8's clearSettings rule).
+  if (this.__isMobile) return;
+  try {
+    let items = this.__readContainerGeometry();
+    if (!(restoreKey in items)) return;
+    delete items[restoreKey];
+    localStorage.setItem(this.CONTAINER_GEOMETRY_KEY,
+      JSON.stringify({ version: this.CONTAINER_GEOMETRY_VERSION, items: items }));
+  } catch (e) { /* best-effort */ }
 };
 
 WindowManager.prototype.saveContainerGeometry = function () {
@@ -78305,10 +79652,23 @@ WindowManager.prototype.saveContainerGeometry = function () {
     let rightStack = this.getStack("right");
     gameClient.player.__openedContainers.forEach(function (container) {
       if (!container || !container.window || !container.window.__element) return;
-      let parent = container.window.__element.parentElement;
+      let el = container.window.__element;
+      let parent = el.parentElement;
       let column = (parent === leftStack) ? "left" : (parent === rightStack) ? "right" : null;
       if (column === null) return; // detached / not in a sidebar stack
-      items[container.id] = { column: column, minimized: container.window.isMinimized() };
+      // order = the window's position within its column stack (fixed windows
+      // included), so a relog can put the bag back BETWEEN the same
+      // neighbours the player dragged it to (player report 2026-07-12:
+      // "position between backpacks" was lost on login).
+      let order = Array.prototype.indexOf.call(parent.children, el);
+      // Keyed PER INSTANCE by the open-order restore key — the same identity
+      // the height store uses — so identical bags no longer share one slot
+      // (owner 2026-07-12).
+      items[container.__restoreKey()] = {
+        column: column,
+        minimized: container.window.isMinimized(),
+        order: (order >= 0) ? order : undefined
+      };
     });
     localStorage.setItem(this.CONTAINER_GEOMETRY_KEY,
       JSON.stringify({ version: this.CONTAINER_GEOMETRY_VERSION, items: items }));
@@ -78548,7 +79908,7 @@ WindowManager.prototype.__columnFreeSpace = function (stack) {
 
 }
 
-WindowManager.prototype.getFreeStack = function (requiredHeight) {
+WindowManager.prototype.getFreeStack = function (requiredHeight, preferredColumn) {
 
   /*
    * Function WindowManager.getFreeStack
@@ -78558,6 +79918,13 @@ WindowManager.prototype.getFreeStack = function (requiredHeight) {
    * column with more free space so the flexbox shrink-to-fit (.window flex:0 1
    * auto + scrolling body) packs the stack into the least-crowded column rather
    * than clipping the newest window off-screen (overflow:hidden on .column).
+   *
+   * `preferredColumn` ("left"/"right"/null) is the player's saved column for
+   * this container TYPE. It is honored ONLY in the hidden-layout login burst
+   * below, where pixel math is meaningless anyway — so a relog puts the bag
+   * back where the player dragged it (report 2026-07-09: "my bag used to sit
+   * under my eq on the right, now it opens left on login"). Measured, mid-play
+   * opens stay purely space-based (the 2026-06-25 no-pin decision).
    */
 
   if (requiredHeight === undefined) {
@@ -78576,10 +79943,11 @@ WindowManager.prototype.getFreeStack = function (requiredHeight) {
   // tiebreak (0 >= 0) sends EVERY container to the right column — which, once
   // visible, exceeds the flex-shrink floor (~66px/window + the fixed minimap/
   // equipment/battle panels) and clips off the bottom-right (Deadlymage
-  // 2026-07-01). Pixel math is meaningless with no layout, so ALTERNATE columns
-  // instead — left first (the right column hosts the fixed panels) — which
-  // spreads a burst of N containers evenly, matching the pre-burst UX. Normal
-  // pixel placement resumes automatically once the layout is measurable.
+  // 2026-07-01). Pixel math is meaningless with no layout, so use the player's
+  // SAVED column when there is one, and ALTERNATE columns for the rest — left
+  // first (the right column hosts the fixed panels) — which spreads a burst of
+  // N containers evenly, matching the pre-burst UX. Normal pixel placement
+  // resumes automatically once the layout is measurable.
   if (!(rightStack && rightStack.clientHeight > 0)
       || !(leftStack && leftStack.clientHeight > 0)) {
     // A genuinely missing column (shouldn't happen — both are static in
@@ -78587,6 +79955,8 @@ WindowManager.prototype.getFreeStack = function (requiredHeight) {
     // into the result. Fall back to whichever exists.
     if (!leftStack) return rightStack;
     if (!rightStack) return leftStack;
+    if (preferredColumn === "left") return leftStack;
+    if (preferredColumn === "right") return rightStack;
     this.__unmeasuredStackToggle = !this.__unmeasuredStackToggle;
     return this.__unmeasuredStackToggle ? leftStack : rightStack;
   }
@@ -78812,6 +80182,16 @@ WindowManager.prototype.__handleMouseUp = function (event) {
       if (resized !== null) {
         let h = parseInt(el.getBody().style.height, 10);
         if (isFinite(h)) this.saveContainerHeight(resized.__restoreKey(), h);
+      } else {
+        // Not a container: a FIXED sidebar window (skill/battle/friends...)
+        // was resized — persist under its DOM id so open() restores it
+        // (player report 2026-07-12: skill window sprang fully open on
+        // login regardless of its dragged size).
+        let fixedEl = el.__element;
+        if (fixedEl && fixedEl.id && this.windows[fixedEl.id]) {
+          let fh = parseInt(el.getBody().style.height, 10);
+          if (isFinite(fh)) this.saveFixedHeight(fixedEl.id, fh);
+        }
       }
     } catch (e) { /* best-effort */ }
   }
@@ -78820,7 +80200,7 @@ WindowManager.prototype.__handleMouseUp = function (event) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-questlog.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/window-questlog.js ===== */
 
 const WindowQuestLog = function (id) {
 
@@ -79103,7 +80483,7 @@ WindowQuestLog.prototype.setQuestDetails = function (questId, missions) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-skill.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/window-skill.js ===== */
 
 const SkillWindow = function (element) {
 
@@ -79271,7 +80651,8 @@ SkillWindow.prototype.__saveHiddenBars = function (hidden) {
 
 SkillWindow.prototype.SKILL_BONUS_KEYS = new Object({
   "sword": "sword", "axe": "axe", "club": "club",
-  "fist": "fist", "distance": "distance", "shielding": "shielding"
+  "fist": "fist", "distance": "distance", "shielding": "shielding",
+  "magic": "magic"
 });
 
 SkillWindow.prototype.setSkillValue = function (which, value, percentage) {
@@ -79573,7 +80954,7 @@ function __showSkillTapTooltip(row, text) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window-trade.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/window-trade.js ===== */
 
 const TradeWindow = function (element) {
 
@@ -79998,7 +81379,7 @@ TradeWindow.prototype.__clearCanvas = function (canvasId) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/window.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/window.js ===== */
 
 const InteractiveWindow = function (element) {
 
@@ -80267,6 +81648,22 @@ InteractiveWindow.prototype.open = function () {
   body.style.display = this.__bodyDisplay || "flex";
   body.style.height = "";
 
+  // FIXED sidebar windows (skill/battle/friends...) re-apply their saved
+  // player-resized height here: this reset is why the skill window sprang
+  // fully open on every login/toggle no matter how small the player had
+  // dragged it (player report 2026-07-12). Containers are NOT in the fixed
+  // store (they have their own OTCv8-style height memory keyed by open
+  // order), so they are unaffected.
+  try {
+    if (typeof gameClient !== "undefined" && gameClient.interface
+        && gameClient.interface.windowManager && this.__element.id) {
+      let saved = gameClient.interface.windowManager.loadFixedHeight(this.__element.id);
+      if (saved !== null) {
+        body.style.height = saved + "px";
+      }
+    }
+  } catch (e) { /* best-effort — natural height is always a safe fallback */ }
+
   // Ensure footer is visible
   this.getElement(".footer").style.display = "block";
 
@@ -80302,11 +81699,17 @@ InteractiveWindow.prototype.remove = function (event) {
    * Removes the element from the DOM
    */
 
+  // Capture the column BEFORE removal so the manager can hand freed space
+  // back to any windows it auto-shrank to make room (player report
+  // 2026-07-12: "when closed they can go back to their previous sizes").
+  let stack = this.__element.parentElement;
+
   this.__element.remove();
 
   // User closed via the X — persist (same rationale as toggle).
   if (gameClient.interface && gameClient.interface.windowManager) {
     gameClient.interface.windowManager.saveLayout();
+    gameClient.interface.windowManager.reflowColumnOnRemove(stack);
   }
 
 }
@@ -80324,7 +81727,7 @@ InteractiveWindow.prototype.addTo = function (stackElement) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/ui/word-suggestions.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/ui/word-suggestions.js ===== */
 
 const WordSuggestions = function (virtualKeyboard) {
 
@@ -81835,7 +83238,7 @@ SuggestionTrie.prototype.topMatches = function (prefix, limit, usageMap, gameWor
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/__proto__.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/__proto__.js ===== */
 
 "use strict";
 
@@ -81945,7 +83348,7 @@ Number.prototype.clamp = function(min, max) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/animation.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/animation.js ===== */
 
 const Animation = function(id) {
 
@@ -82134,7 +83537,7 @@ LoopedAnimation.prototype.getFrame = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/binary-heap.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/binary-heap.js ===== */
 
 "use strict";
 
@@ -82336,7 +83739,7 @@ BinaryHeap.prototype.bubbleUp = function(n) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/bitflag.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/bitflag.js ===== */
 
 "use strict";
 
@@ -82472,7 +83875,7 @@ const FinBitFlag = BitFlagGenerator([
   "DatFlagChargeable"
 ]);
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/book.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/book.js ===== */
 
 "use strict";
 
@@ -82516,7 +83919,7 @@ Book.prototype.setContent = function(content) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/box-animation.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/box-animation.js ===== */
 
 const BoxAnimation = function(color) {
 
@@ -82549,7 +83952,7 @@ BoxAnimation.prototype.__generateDurations = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/casting-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/casting-manager.js ===== */
 
 const CastingManager = function() {
 
@@ -82608,7 +84011,7 @@ CastingManager.prototype.getCastFraction = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/channel-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/channel-manager.js ===== */
 
 "use strict";
 
@@ -83010,34 +84413,61 @@ ChannelManager.prototype.handleOpenChannel = function(channel) {
 // is remembered in localStorage and reopened next login.
 ChannelManager.prototype.__CHANNEL_PERSIST_SKIP = { 0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 6: 1, 12: 1 };
 
+ChannelManager.prototype.__openChannelsKey = function() {
+  /*
+   * Function ChannelManager.__openChannelsKey
+   * PER-CHARACTER localStorage key for the remembered channel set. The old
+   * single global "open-channels" key made characters CLOBBER each other:
+   * playing a Rookgaard/Starfish alt (where you close mainland channels, or
+   * never open any) overwrote the set your main had saved — the main then
+   * restored nothing (player report 2026-07-09). Returns null when no player
+   * is available (teardown/reset) so callers skip rather than write a
+   * cross-character key.
+   */
+  try {
+    let name = gameClient && gameClient.player && gameClient.player.name;
+    return name ? ("open-channels:" + name) : null;
+  } catch (e) { return null; }
+};
+
 ChannelManager.prototype.__saveOpenChannels = function() {
   /*
    * Function ChannelManager.__saveOpenChannels
    * Persists the player's currently-open OPTIONAL global channels to
    * localStorage so they reopen on the next login. Called whenever a channel is
-   * added or closed (infrequent — not a hot path).
+   * added or closed (infrequent — not a hot path). Keyed per character; skips
+   * silently when no player is live (a teardown-time save must never clobber).
    */
   try {
+    let key = this.__openChannelsKey();
+    if (!key) return;
     let ids = [];
     for (let i = 0; i < this.channels.length; i++) {
       let id = this.channels[i].id;
       if (typeof id === "number" && id > 0 && !this.__CHANNEL_PERSIST_SKIP[id]) ids.push(id);
     }
-    localStorage.setItem("open-channels", JSON.stringify(ids));
+    localStorage.setItem(key, JSON.stringify(ids));
   } catch (e) { /* private mode / quota — non-fatal */ }
 };
 
 ChannelManager.prototype.__restoreOpenChannels = function() {
   /*
    * Function ChannelManager.__restoreOpenChannels
-   * Re-opens the optional global channels the player had open last session.
-   * Called synchronously during handleAcceptLogin — BEFORE the server's
-   * auto-open packets arrive — so it reads the saved set before any
+   * Re-opens the optional global channels THIS CHARACTER had open last
+   * session. Called synchronously during handleAcceptLogin — BEFORE the
+   * server's auto-open packets arrive — so it reads the saved set before any
    * __saveOpenChannels() overwrites it. Each id is requested from the server
    * (which replies with a ChannelJoinPacket); already-open ones are skipped.
+   * Falls back to the legacy global "open-channels" key the first time a
+   * character has no per-character entry yet (one-time migration read).
    */
-  let ids;
-  try { ids = JSON.parse(localStorage.getItem("open-channels") || "[]"); } catch (e) { return; }
+  let ids = null;
+  try {
+    let key = this.__openChannelsKey();
+    let raw = key ? localStorage.getItem(key) : null;
+    if (raw === null) raw = localStorage.getItem("open-channels");   // legacy migration
+    ids = JSON.parse(raw || "[]");
+  } catch (e) { return; }
   if (!Array.isArray(ids)) return;
   for (let i = 0; i < ids.length; i++) {
     let id = ids[i];
@@ -83483,13 +84913,18 @@ ChannelManager.prototype.__handlePrivateMessageSend = function(channel, message)
    * Handles writing of private chat message to server
    */
 
-  // Client side add message to channel
+  // Client side add message to channel. Pass our own level so the local echo
+  // matches how the RECIPIENT sees it ("Name [level]:") — the server never
+  // echoes an outgoing PM back, so without this your own messages showed no
+  // level (player report 2026-07-09).
   channel.__addMessage(
     new CharacterMessage(
       message,
       0,
       gameClient.player.name,
-      gameClient.interface.COLORS.MAYABLUE
+      gameClient.interface.COLORS.MAYABLUE,
+      undefined,
+      gameClient.player.level
     )
   );
 
@@ -83768,7 +85203,9 @@ ChannelManager.prototype.sendMessageText = function(text, channelIndex, noHistor
             pmText,
             0,
             gameClient.player.name,
-            gameClient.interface.COLORS.MAYABLUE
+            gameClient.interface.COLORS.MAYABLUE,
+            undefined,
+            gameClient.player.level
           )
         );
       }
@@ -83960,7 +85397,7 @@ ChannelManager.prototype.setActiveChannel = function(index) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/channel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/channel.js ===== */
 
 const Channel = function(name, id) {
 
@@ -84287,7 +85724,7 @@ Channel.prototype.__createElement = function(name) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/clock.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/clock.js ===== */
 
 "use strict";
 
@@ -84388,7 +85825,7 @@ Clock.prototype.updateClockDOM = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/dataobject.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/dataobject.js ===== */
 
 "use strict";
 
@@ -84459,7 +85896,7 @@ DataObject.prototype.getFrameGroup = function(group) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/distance-animation.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/distance-animation.js ===== */
 
 "use strict";
 
@@ -84577,7 +86014,7 @@ DistanceAnimation.prototype.getPattern = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/enum.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/enum.js ===== */
 
 const Enum = function(array) {
 
@@ -84598,7 +86035,7 @@ const Enum = function(array) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/error.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/error.js ===== */
 
 const ConnectionError = function(message) {
   this.name = "ConnectionError";
@@ -84622,7 +86059,7 @@ const ServerError = function(message) {
 ServerError.prototype = Error.prototype;
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/eventemitter.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/eventemitter.js ===== */
 
 const EventEmitter = function() {
 
@@ -84700,7 +86137,7 @@ EventEmitter.prototype.clear = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/fluid-container.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/fluid-container.js ===== */
 
 const FluidThing = function(id, count, fluidType) {
 
@@ -84888,7 +86325,7 @@ FluidThing.prototype.getFluidName = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/frame-group.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/frame-group.js ===== */
 
 const FrameGroup = function () {
 
@@ -85111,7 +86548,7 @@ FrameGroup.prototype.getNumberSprites = function () {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/heap-event.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/heap-event.js ===== */
 
 const HeapEvent = function(callback, when) {
 
@@ -85198,7 +86635,7 @@ HeapEvent.prototype.remainingFraction = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/local-channel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/local-channel.js ===== */
 
 const LocalChannel = function(name) {
 
@@ -85216,7 +86653,7 @@ LocalChannel.prototype = Object.create(Channel.prototype);
 LocalChannel.prototype.constructor = LocalChannel;
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/message-character.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/message-character.js ===== */
 
 const CharacterMessage = function(message, type, name, color, loudness, level) {
 
@@ -85317,7 +86754,7 @@ CharacterMessage.prototype.createNode = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/message.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/message.js ===== */
 
 const Message = function(message, color) {
 
@@ -85376,8 +86813,11 @@ Message.prototype.createNode = function() {
   // Player-typed text is HTML-escaped server-side, so a literal "<span" typed
   // by a player arrives as "&lt;span" and can never match the strip. See
   // MessageMenu.copyMessage.
+  // [^"]* after the hex: {listed}/{retro} spans carry ;font-weight:bold in
+  // the same style attribute — the strict hex-then-quote form left their
+  // HTML in copied text (same class of bug as the 2026-07-02 report).
   span.setAttribute("data-message",
-    String(this.message).replace(/<span style="color:#[0-9A-Fa-f]{3,8}">([\s\S]*?)<\/span>/g, "$1"));
+    String(this.message).replace(/<span style="color:#[0-9A-Fa-f]{3,8}[^"]*">([\s\S]*?)<\/span>/g, "$1"));
 
   return span;
 
@@ -85417,7 +86857,7 @@ Message.prototype.__formatTime = function() {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/object-buffer.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/object-buffer.js ===== */
 
 const ObjectBuffer = function () {
 
@@ -85592,10 +87032,50 @@ ObjectBuffer.prototype.get = function (id) {
 
   // Does not exist?
   if (!this.dataObjects.hasOwnProperty(id)) {
+    // Virtual item (client-side recolored variant, virtual-items.js): build
+    // a clone of the base item's data object ONCE with synthetic sprite ids
+    // the sprite buffer recolors at cache fill. Lazily cached — later gets
+    // hit the hasOwnProperty fast path above.
+    let recipe = (typeof VirtualItems !== "undefined") ? VirtualItems.get(id) : null;
+    if (recipe) {
+      let clone = this.__buildVirtualItem(id, recipe);
+      if (clone) {
+        this.dataObjects[id] = clone;
+        return clone;
+      }
+    }
     return null;
   }
 
   return this.dataObjects[id];
+
+}
+
+ObjectBuffer.prototype.__buildVirtualItem = function (id, recipe) {
+
+  /*
+   * Function ObjectBuffer.__buildVirtualItem
+   * Clones the recipe's base item data object, rewriting every frame
+   * group's sprite ids to SYNTHETIC ids registered on the sprite buffer
+   * (which recolors them through the recipe at cache fill). Properties,
+   * flags and animation metadata are shared by reference — read-only.
+   */
+
+  let base = this.get(recipe.base);
+  if (base === null || !Array.isArray(base.frameGroups)) {
+    return null;
+  }
+
+  let clone = Object.assign(Object.create(Object.getPrototypeOf(base)), base);
+  clone.frameGroups = base.frameGroups.map(function (fg) {
+    let f = Object.assign(Object.create(Object.getPrototypeOf(fg)), fg);
+    f.sprites = fg.sprites.map(function (sid) {
+      return sid === 0 ? 0 : gameClient.spriteBuffer.registerVirtualItemSprite(sid, id, recipe);
+    });
+    return f;
+  });
+
+  return clone;
 
 }
 
@@ -86122,7 +87602,7 @@ ObjectBuffer.prototype.__readFlags = function (packet) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/position.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/position.js ===== */
 
 const Position = function (x, y, z) {
 
@@ -86530,7 +88010,7 @@ Position.prototype.besides = function (position) {
 }
 
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/private-channel.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/private-channel.js ===== */
 
 const PrivateChannel = function(name) {
 
@@ -86558,7 +88038,7 @@ PrivateChannel.prototype.__getEmptyMessage = function() {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/replay-manager.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/replay-manager.js ===== */
 
 const ReplayManager = function() {
 
@@ -86827,7 +88307,7 @@ ReplayManager.prototype.recordPacket = function(buffer) {
 
 }
 
-/* ===== FILE: https://minibia.com/b/2026-07-08j/src/utils/rgba.js ===== */
+/* ===== FILE: https://minibia.com/b/2026-07-17-0854/src/utils/rgba.js ===== */
 
 const RGBA = function(r, g, b, a) {
 
@@ -86882,9 +88362,3 @@ RGBA.prototype.interpolate = function(color, fraction) {
   );
 
 }
-
-
-/* ===== FAILED: https://raw.githubusercontent.com/pasqualguerrero/minibia-bot/refs/heads/main/pz-bot.js =====
-TypeError: Failed to fetch
-===== */
-
