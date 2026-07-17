@@ -6,6 +6,7 @@
     ["minibiaBot.heal.config", "k9x.heal.config"],
     ["minibiaBot.invisible.config", "k9x.invisible.config"],
     ["minibiaBot.magicShield.config", "k9x.magicShield.config"],
+    ["minibiaBot.forceLight.config", "k9x.forceLight.config"],
     ["minibiaBot.attack.config", "k9x.attack.config"],
     ["minibiaBot.cave.config", "k9x.cave.config"],
     ["minibiaBot.cave.route", "k9x.cave.route"],
@@ -25,6 +26,7 @@
     ["gameHelper.heal.config", "k9x.heal.config"],
     ["gameHelper.invisible.config", "k9x.invisible.config"],
     ["gameHelper.magicShield.config", "k9x.magicShield.config"],
+    ["gameHelper.forceLight.config", "k9x.forceLight.config"],
     ["gameHelper.attack.config", "k9x.attack.config"],
     ["gameHelper.cave.config", "k9x.cave.config"],
     ["gameHelper.cave.route", "k9x.cave.route"],
@@ -45,6 +47,7 @@
     ["heal", "k9x.heal.config"],
     ["invisible", "k9x.invisible.config"],
     ["magicShield", "k9x.magicShield.config"],
+    ["forceLight", "k9x.forceLight.config"],
     ["attack", "k9x.attack.config"],
     ["cave", "k9x.cave.config"],
     ["equipRing", "k9x.equipRing.config"],
@@ -134,6 +137,7 @@
     currentBundle.installHealModule(bot);
     currentBundle.installAutoInvisibleModule(bot);
     currentBundle.installAutoMagicShieldModule(bot);
+    currentBundle.installForceLightModule(bot);
     currentBundle.installAutoAttackModule(bot);
     currentBundle.installCaveModule(bot);
     currentBundle.installEquipRingModule(bot);
@@ -158,6 +162,7 @@
       heal: bot.heal.status(),
       invisible: bot.invisible.status(),
       magicShield: bot.magicShield.status(),
+      forceLight: bot.forceLight.status(),
       attack: bot.attack.status(),
       cave: bot.cave.status(),
       equipRing: bot.equipRing.status(),
@@ -172,7 +177,7 @@
 
     console.log("[k9x] ready", {
       version: bot.version,
-      modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "magicShield", "attack", "cave", "equipRing", "eat", "fishing", "talk", "ui"],
+      modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "magicShield", "forceLight", "attack", "cave", "equipRing", "eat", "fishing", "talk", "ui"],
     });
     console.log("k9x.reload()");
     console.log("k9x.xray.status()");
@@ -188,6 +193,8 @@
     console.log("k9x.invisible.stop()");
     console.log("k9x.magicShield.start()");
     console.log("k9x.magicShield.stop()");
+    console.log("k9x.forceLight.start()");
+    console.log("k9x.forceLight.stop()");
     console.log("k9x.attack.start()");
     console.log("k9x.attack.stop()");
     console.log("k9x.cave.addWaypointCurrentSpot()");

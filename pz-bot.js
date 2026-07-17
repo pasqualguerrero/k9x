@@ -3409,6 +3409,245 @@ window.__minibiaBotBundle.installAutoMagicShieldModule = function installAutoMag
 };
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
+window.__minibiaBotBundle.installForceLightModule = function installForceLightModule(bot) {
+  const configStorageKey = "k9x.forceLight.config";
+  const LIGHT_CONDITION_ID = 7;
+  // Client comments: utevo lux = 9, gran lux = 12, vis lux = 14
+  const PRESET_LEVELS = {
+    lux: 9,
+    gran: 12,
+    vis: 14,
+  };
+
+  const state = {
+    running: false,
+    timerId: null,
+  };
+
+  const storedConfig = bot.storage.get(configStorageKey, {}) || {};
+  const config = Object.assign(
+    {
+      tickMs: 500,
+      // Default to utevo gran lux strength.
+      lightLevel: PRESET_LEVELS.gran,
+      enabled: false,
+    },
+    storedConfig
+  );
+  config.lightLevel = normalizeLightLevel(config.lightLevel);
+  config.tickMs = Math.max(100, Math.trunc(Number(config.tickMs) || 500));
+  config.enabled = !!config.enabled;
+
+  function persistConfig() {
+    bot.storage.set(configStorageKey, { ...config });
+  }
+
+  function normalizeLightLevel(value) {
+    const next = Math.trunc(Number(value));
+    if (!Number.isFinite(next)) {
+      return PRESET_LEVELS.gran;
+    }
+
+    // Keep within a sensible bubble size range (client uses max(3, level)).
+    return Math.min(20, Math.max(3, next));
+  }
+
+  function getLightConditionId() {
+    return window.ConditionManager?.prototype?.LIGHT ?? LIGHT_CONDITION_ID;
+  }
+
+  function getPlayer() {
+    return window.gameClient?.player || null;
+  }
+
+  function hasLightCondition(player = getPlayer()) {
+    if (!player) {
+      return false;
+    }
+
+    const lightId = getLightConditionId();
+    if (typeof player.hasCondition === "function") {
+      return !!player.hasCondition(lightId);
+    }
+
+    if (player.conditions?.has) {
+      return player.conditions.has(lightId);
+    }
+
+    return false;
+  }
+
+  function applyForceLight() {
+    const player = getPlayer();
+    if (!player) {
+      return false;
+    }
+
+    const lightId = getLightConditionId();
+    const level = normalizeLightLevel(config.lightLevel);
+
+    // Match client spell/equipment path used by the renderer.
+    player.__lightLevel = level;
+    // Permanent so temporary-condition UI / clear paths treat it like gear light.
+    player.__lightPermanent = true;
+
+    if (!hasLightCondition(player) && typeof player.addCondition === "function") {
+      player.addCondition(lightId);
+    }
+
+    return true;
+  }
+
+  function clearForceLight() {
+    const player = getPlayer();
+    if (!player) {
+      return false;
+    }
+
+    const lightId = getLightConditionId();
+    player.__lightPermanent = false;
+    player.__lightLevel = 0;
+
+    if (hasLightCondition(player) && typeof player.removeCondition === "function") {
+      // Client may refuse remove when permanent was still set; we cleared it above.
+      try {
+        player.removeCondition(lightId);
+      } catch (error) {
+        bot.log("force light clear failed", error?.message || error);
+      }
+    }
+
+    return true;
+  }
+
+  function scheduleNextTick() {
+    if (!state.running) {
+      return;
+    }
+
+    state.timerId = window.setTimeout(() => {
+      tick();
+    }, config.tickMs);
+  }
+
+  function tick() {
+    if (!state.running) {
+      return;
+    }
+
+    try {
+      if (config.enabled) {
+        applyForceLight();
+      }
+    } catch (error) {
+      bot.log("force light tick failed", error?.message || error);
+    } finally {
+      scheduleNextTick();
+    }
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    config.lightLevel = normalizeLightLevel(config.lightLevel);
+    persistConfig();
+
+    if (state.running) {
+      applyForceLight();
+      bot.log("force light already running", { lightLevel: config.lightLevel });
+      return false;
+    }
+
+    state.running = true;
+    applyForceLight();
+    bot.log("force light started", { lightLevel: config.lightLevel });
+    tick();
+    return true;
+  }
+
+  function stop(options = {}) {
+    const shouldPersistEnabled = options.persistEnabled !== false;
+    const shouldClear = options.clear !== false;
+    state.running = false;
+
+    if (state.timerId != null) {
+      window.clearTimeout(state.timerId);
+      state.timerId = null;
+    }
+
+    if (shouldPersistEnabled) {
+      config.enabled = false;
+      persistConfig();
+    }
+
+    if (shouldClear) {
+      clearForceLight();
+    }
+
+    bot.log("force light stopped");
+    return true;
+  }
+
+  function status() {
+    const player = getPlayer();
+    return {
+      running: state.running,
+      config: { ...config },
+      playerLightLevel: player?.__lightLevel ?? null,
+      playerLightPermanent: !!player?.__lightPermanent,
+      hasLightCondition: hasLightCondition(player),
+      presets: { ...PRESET_LEVELS },
+    };
+  }
+
+  function updateConfig(nextConfig = {}) {
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "lightLevel")) {
+      nextConfig.lightLevel = normalizeLightLevel(nextConfig.lightLevel);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "tickMs")) {
+      const tickMs = Math.trunc(Number(nextConfig.tickMs));
+      nextConfig.tickMs = Number.isFinite(tickMs) ? Math.max(100, tickMs) : config.tickMs;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "enabled")) {
+      nextConfig.enabled = !!nextConfig.enabled;
+    }
+
+    Object.assign(config, nextConfig);
+    persistConfig();
+
+    if (config.enabled) {
+      start();
+    } else if (state.running) {
+      stop();
+    } else {
+      bot.log("force light config updated", { ...config });
+    }
+
+    return { ...config };
+  }
+
+  if (config.enabled) {
+    start();
+  }
+
+  bot.addCleanup(() => {
+    stop({ persistEnabled: false, clear: true });
+  });
+
+  bot.forceLight = {
+    start,
+    stop,
+    status,
+    updateConfig,
+    applyForceLight,
+    clearForceLight,
+    config,
+    presets: PRESET_LEVELS,
+  };
+};
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
 window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackModule(bot) {
   const configStorageKey = "k9x.attack.config";
   const state = {
@@ -8087,6 +8326,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     autoMagicShieldToggle.checked = !!bot.magicShield?.status?.().running;
   }
 
+  function refreshForceLightStatus() {
+    const forceLightToggle = document.getElementById("k9x-force-light-enabled");
+    const forceLightLevelInput = document.getElementById("k9x-force-light-level");
+    if (!forceLightToggle) return;
+
+    const status = bot.forceLight?.status?.();
+    forceLightToggle.checked = !!status?.running;
+
+    if (forceLightLevelInput && status?.config?.lightLevel != null) {
+      forceLightLevelInput.value = String(status.config.lightLevel);
+    }
+  }
+
   function refreshAutoAttackStatus() {
     const autoAttackToggle = document.getElementById("k9x-auto-attack-enabled");
     if (!autoAttackToggle) return;
@@ -8969,6 +9221,17 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 </label>
                 <div class="mb-small-note">Casts utamo vita whenever magic shield is not active.</div>
               </div>
+              <div class="mb-row mb-row-compact">
+                <label class="mb-toggle">
+                  <input type="checkbox" id="k9x-force-light-enabled" />
+                  <span>Force Light</span>
+                </label>
+                <label class="mb-field mb-field-compact" for="k9x-force-light-level">
+                  <span class="mb-field-label">Level (9/12/14)</span>
+                  <input type="number" id="k9x-force-light-level" min="3" max="20" placeholder="12" />
+                </label>
+              </div>
+              <div class="mb-small-note">Client-only light bubble (utevo lux=9, gran lux=12, vis lux=14). Re-applies if the server clears LIGHT.</div>
               <div class="mb-row">
                 <label class="mb-toggle">
                   <input type="checkbox" id="k9x-equip-ring-enabled" />
@@ -9212,6 +9475,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoFishingEnabledInput = panel.querySelector("#k9x-auto-fishing-enabled");
     const autoInvisibleEnabledInput = panel.querySelector("#k9x-auto-invisible-enabled");
     const autoMagicShieldEnabledInput = panel.querySelector("#k9x-auto-magic-shield-enabled");
+    const forceLightEnabledInput = panel.querySelector("#k9x-force-light-enabled");
+    const forceLightLevelInput = panel.querySelector("#k9x-force-light-level");
     const equipRingEnabledInput = panel.querySelector("#k9x-equip-ring-enabled");
     const autoHealEnabledInput = panel.querySelector("#k9x-auto-heal-enabled");
     const autoHealMinHpInput = panel.querySelector("#k9x-auto-heal-min-hp");
@@ -9490,6 +9755,40 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         }
 
         refreshAutoInvisibleStatus();
+      });
+    }
+
+    if (forceLightLevelInput) {
+      forceLightLevelInput.value = String(bot.forceLight?.config?.lightLevel ?? 12);
+      forceLightLevelInput.addEventListener("change", () => {
+        const lightLevel = Math.min(
+          20,
+          Math.max(3, Math.trunc(Number(forceLightLevelInput.value) || 12))
+        );
+        forceLightLevelInput.value = String(lightLevel);
+        bot.forceLight?.updateConfig?.({ lightLevel });
+        refreshForceLightStatus();
+      });
+    }
+
+    if (forceLightEnabledInput) {
+      forceLightEnabledInput.checked = !!bot.forceLight?.status?.().running;
+      forceLightEnabledInput.addEventListener("change", () => {
+        const lightLevel = Math.min(
+          20,
+          Math.max(3, Math.trunc(Number(forceLightLevelInput?.value) || bot.forceLight?.config?.lightLevel || 12))
+        );
+        if (forceLightLevelInput) {
+          forceLightLevelInput.value = String(lightLevel);
+        }
+
+        if (forceLightEnabledInput.checked) {
+          bot.forceLight.start({ lightLevel });
+        } else {
+          bot.forceLight.stop();
+        }
+
+        refreshForceLightStatus();
       });
     }
 
@@ -9947,6 +10246,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoHealStatus();
     refreshAutoInvisibleStatus();
     refreshAutoMagicShieldStatus();
+    refreshForceLightStatus();
     refreshAutoAttackStatus();
     refreshAutoAttackFilterControls();
     refreshAutoEatStatus();
@@ -10008,6 +10308,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoHealStatus,
     refreshAutoInvisibleStatus,
     refreshAutoMagicShieldStatus,
+    refreshForceLightStatus,
     refreshAutoAttackStatus,
     refreshAutoAttackFilterControls,
     refreshAutoEatStatus,
@@ -10036,6 +10337,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["minibiaBot.heal.config", "k9x.heal.config"],
     ["minibiaBot.invisible.config", "k9x.invisible.config"],
     ["minibiaBot.magicShield.config", "k9x.magicShield.config"],
+    ["minibiaBot.forceLight.config", "k9x.forceLight.config"],
     ["minibiaBot.attack.config", "k9x.attack.config"],
     ["minibiaBot.cave.config", "k9x.cave.config"],
     ["minibiaBot.cave.route", "k9x.cave.route"],
@@ -10055,6 +10357,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["gameHelper.heal.config", "k9x.heal.config"],
     ["gameHelper.invisible.config", "k9x.invisible.config"],
     ["gameHelper.magicShield.config", "k9x.magicShield.config"],
+    ["gameHelper.forceLight.config", "k9x.forceLight.config"],
     ["gameHelper.attack.config", "k9x.attack.config"],
     ["gameHelper.cave.config", "k9x.cave.config"],
     ["gameHelper.cave.route", "k9x.cave.route"],
@@ -10075,6 +10378,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["heal", "k9x.heal.config"],
     ["invisible", "k9x.invisible.config"],
     ["magicShield", "k9x.magicShield.config"],
+    ["forceLight", "k9x.forceLight.config"],
     ["attack", "k9x.attack.config"],
     ["cave", "k9x.cave.config"],
     ["equipRing", "k9x.equipRing.config"],
@@ -10164,6 +10468,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installHealModule(bot);
     currentBundle.installAutoInvisibleModule(bot);
     currentBundle.installAutoMagicShieldModule(bot);
+    currentBundle.installForceLightModule(bot);
     currentBundle.installAutoAttackModule(bot);
     currentBundle.installCaveModule(bot);
     currentBundle.installEquipRingModule(bot);
@@ -10188,6 +10493,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       heal: bot.heal.status(),
       invisible: bot.invisible.status(),
       magicShield: bot.magicShield.status(),
+      forceLight: bot.forceLight.status(),
       attack: bot.attack.status(),
       cave: bot.cave.status(),
       equipRing: bot.equipRing.status(),
@@ -10202,7 +10508,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     console.log("[k9x] ready", {
       version: bot.version,
-      modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "magicShield", "attack", "cave", "equipRing", "eat", "fishing", "talk", "ui"],
+      modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "magicShield", "forceLight", "attack", "cave", "equipRing", "eat", "fishing", "talk", "ui"],
     });
     console.log("k9x.reload()");
     console.log("k9x.xray.status()");
@@ -10218,6 +10524,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     console.log("k9x.invisible.stop()");
     console.log("k9x.magicShield.start()");
     console.log("k9x.magicShield.stop()");
+    console.log("k9x.forceLight.start()");
+    console.log("k9x.forceLight.stop()");
     console.log("k9x.attack.start()");
     console.log("k9x.attack.stop()");
     console.log("k9x.cave.addWaypointCurrentSpot()");

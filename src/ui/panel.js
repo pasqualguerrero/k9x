@@ -315,6 +315,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     autoMagicShieldToggle.checked = !!bot.magicShield?.status?.().running;
   }
 
+  function refreshForceLightStatus() {
+    const forceLightToggle = document.getElementById("k9x-force-light-enabled");
+    const forceLightLevelInput = document.getElementById("k9x-force-light-level");
+    if (!forceLightToggle) return;
+
+    const status = bot.forceLight?.status?.();
+    forceLightToggle.checked = !!status?.running;
+
+    if (forceLightLevelInput && status?.config?.lightLevel != null) {
+      forceLightLevelInput.value = String(status.config.lightLevel);
+    }
+  }
+
   function refreshAutoAttackStatus() {
     const autoAttackToggle = document.getElementById("k9x-auto-attack-enabled");
     if (!autoAttackToggle) return;
@@ -1197,6 +1210,17 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 </label>
                 <div class="mb-small-note">Casts utamo vita whenever magic shield is not active.</div>
               </div>
+              <div class="mb-row mb-row-compact">
+                <label class="mb-toggle">
+                  <input type="checkbox" id="k9x-force-light-enabled" />
+                  <span>Force Light</span>
+                </label>
+                <label class="mb-field mb-field-compact" for="k9x-force-light-level">
+                  <span class="mb-field-label">Level (9/12/14)</span>
+                  <input type="number" id="k9x-force-light-level" min="3" max="20" placeholder="12" />
+                </label>
+              </div>
+              <div class="mb-small-note">Client-only light bubble (utevo lux=9, gran lux=12, vis lux=14). Re-applies if the server clears LIGHT.</div>
               <div class="mb-row">
                 <label class="mb-toggle">
                   <input type="checkbox" id="k9x-equip-ring-enabled" />
@@ -1440,6 +1464,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoFishingEnabledInput = panel.querySelector("#k9x-auto-fishing-enabled");
     const autoInvisibleEnabledInput = panel.querySelector("#k9x-auto-invisible-enabled");
     const autoMagicShieldEnabledInput = panel.querySelector("#k9x-auto-magic-shield-enabled");
+    const forceLightEnabledInput = panel.querySelector("#k9x-force-light-enabled");
+    const forceLightLevelInput = panel.querySelector("#k9x-force-light-level");
     const equipRingEnabledInput = panel.querySelector("#k9x-equip-ring-enabled");
     const autoHealEnabledInput = panel.querySelector("#k9x-auto-heal-enabled");
     const autoHealMinHpInput = panel.querySelector("#k9x-auto-heal-min-hp");
@@ -1718,6 +1744,40 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         }
 
         refreshAutoInvisibleStatus();
+      });
+    }
+
+    if (forceLightLevelInput) {
+      forceLightLevelInput.value = String(bot.forceLight?.config?.lightLevel ?? 12);
+      forceLightLevelInput.addEventListener("change", () => {
+        const lightLevel = Math.min(
+          20,
+          Math.max(3, Math.trunc(Number(forceLightLevelInput.value) || 12))
+        );
+        forceLightLevelInput.value = String(lightLevel);
+        bot.forceLight?.updateConfig?.({ lightLevel });
+        refreshForceLightStatus();
+      });
+    }
+
+    if (forceLightEnabledInput) {
+      forceLightEnabledInput.checked = !!bot.forceLight?.status?.().running;
+      forceLightEnabledInput.addEventListener("change", () => {
+        const lightLevel = Math.min(
+          20,
+          Math.max(3, Math.trunc(Number(forceLightLevelInput?.value) || bot.forceLight?.config?.lightLevel || 12))
+        );
+        if (forceLightLevelInput) {
+          forceLightLevelInput.value = String(lightLevel);
+        }
+
+        if (forceLightEnabledInput.checked) {
+          bot.forceLight.start({ lightLevel });
+        } else {
+          bot.forceLight.stop();
+        }
+
+        refreshForceLightStatus();
       });
     }
 
@@ -2175,6 +2235,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoHealStatus();
     refreshAutoInvisibleStatus();
     refreshAutoMagicShieldStatus();
+    refreshForceLightStatus();
     refreshAutoAttackStatus();
     refreshAutoAttackFilterControls();
     refreshAutoEatStatus();
@@ -2236,6 +2297,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoHealStatus,
     refreshAutoInvisibleStatus,
     refreshAutoMagicShieldStatus,
+    refreshForceLightStatus,
     refreshAutoAttackStatus,
     refreshAutoAttackFilterControls,
     refreshAutoEatStatus,

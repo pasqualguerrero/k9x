@@ -10,6 +10,7 @@ cat \
   src/modules/heal.js \
   src/modules/auto-invisible.js \
   src/modules/auto-magic-shield.js \
+  src/modules/force-light.js \
   src/modules/auto-attack.js \
   src/modules/cave.js \
   src/modules/equip-ring.js \
