@@ -72,7 +72,7 @@
 
         window.localStorage.removeItem(legacyKey);
       } catch (error) {
-        console.error("[minibia-bot] failed to migrate storage key", {
+        console.error("[k9x] failed to migrate storage key", {
           legacyKey,
           nextKey,
           error,
@@ -107,7 +107,7 @@
         config.enabled = snapshot[moduleName];
         window.localStorage.setItem(storageKey, JSON.stringify(config));
       } catch (error) {
-        console.error("[minibia-bot] failed to restore persisted enabled state", {
+        console.error("[k9x] failed to restore persisted enabled state", {
           module: moduleName,
           error,
         });
@@ -166,41 +166,42 @@
       talk: bot.talk.status(),
     });
 
-    window.minibiaBot = bot;
+    window.k9x = bot;
+    window.minibiaBot = bot; // backward-compatible alias
     window.pzBot = bot.pz;
 
-    console.log("[minibia-bot] ready", {
+    console.log("[k9x] ready", {
       version: bot.version,
       modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "magicShield", "attack", "cave", "equipRing", "eat", "fishing", "talk", "ui"],
     });
-    console.log("minibiaBot.reload()");
-    console.log("minibiaBot.xray.status()");
-    console.log("minibiaBot.panic.status()");
-    console.log("minibiaBot.pz.goToNearestPz()");
-    console.log("minibiaBot.pz.setHomePzCurrentSpot()");
-    console.log("minibiaBot.pz.goToHomePz()");
-    console.log("minibiaBot.rune.start()");
-    console.log("minibiaBot.rune.stop()");
-    console.log("minibiaBot.heal.start()");
-    console.log("minibiaBot.heal.stop()");
-    console.log("minibiaBot.invisible.start()");
-    console.log("minibiaBot.invisible.stop()");
-    console.log("minibiaBot.magicShield.start()");
-    console.log("minibiaBot.magicShield.stop()");
-    console.log("minibiaBot.attack.start()");
-    console.log("minibiaBot.attack.stop()");
-    console.log("minibiaBot.cave.addWaypointCurrentSpot()");
-    console.log("minibiaBot.cave.start()");
-    console.log("minibiaBot.cave.stop()");
-    console.log("minibiaBot.equipRing.start()");
-    console.log("minibiaBot.equipRing.stop()");
-    console.log("minibiaBot.eat.start()");
-    console.log("minibiaBot.eat.stop()");
-    console.log("minibiaBot.fishing.start()");
-    console.log("minibiaBot.fishing.stop()");
-    console.log("minibiaBot.talk.updateConfig({ apiKey: \"...\" })");
-    console.log("minibiaBot.talk.start()");
-    console.log("minibiaBot.talk.stop()");
+    console.log("k9x.reload()");
+    console.log("k9x.xray.status()");
+    console.log("k9x.panic.status()");
+    console.log("k9x.pz.goToNearestPz()");
+    console.log("k9x.pz.setHomePzCurrentSpot()");
+    console.log("k9x.pz.goToHomePz()");
+    console.log("k9x.rune.start()");
+    console.log("k9x.rune.stop()");
+    console.log("k9x.heal.start()");
+    console.log("k9x.heal.stop()");
+    console.log("k9x.invisible.start()");
+    console.log("k9x.invisible.stop()");
+    console.log("k9x.magicShield.start()");
+    console.log("k9x.magicShield.stop()");
+    console.log("k9x.attack.start()");
+    console.log("k9x.attack.stop()");
+    console.log("k9x.cave.addWaypointCurrentSpot()");
+    console.log("k9x.cave.start()");
+    console.log("k9x.cave.stop()");
+    console.log("k9x.equipRing.start()");
+    console.log("k9x.equipRing.stop()");
+    console.log("k9x.eat.start()");
+    console.log("k9x.eat.stop()");
+    console.log("k9x.fishing.start()");
+    console.log("k9x.fishing.stop()");
+    console.log("k9x.talk.updateConfig({ apiKey: \"...\" })");
+    console.log("k9x.talk.start()");
+    console.log("k9x.talk.stop()");
     return bot;
   }
 

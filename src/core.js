@@ -31,7 +31,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
       try {
         fn();
       } catch (error) {
-        console.error("[minibia-bot] cleanup failed", error);
+        console.error("[k9x] cleanup failed", error);
       }
     }
   }
@@ -60,7 +60,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
       alarmAudio.removeAttribute("src");
       alarmAudio.load();
     } catch (error) {
-      console.error("[minibia-bot] audio cleanup failed", error);
+      console.error("[k9x] audio cleanup failed", error);
     }
 
     alarmAudio = null;
@@ -310,7 +310,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
 
     reconnectElement.click();
     lastReconnectClickAt = now;
-    console.log("[minibia-bot] clicked reconnect");
+    console.log("[k9x] clicked reconnect");
     return true;
   }
 
@@ -323,7 +323,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
       try {
         tryClickReconnect();
       } catch (error) {
-        console.error("[minibia-bot] reconnect watcher failed", error);
+        console.error("[k9x] reconnect watcher failed", error);
       }
     };
 
@@ -406,7 +406,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
       runCleanups();
     },
     log(...args) {
-      console.log("[minibia-bot]", ...args);
+      console.log("[k9x]", ...args);
     },
     storage: {
       get(key, fallback = null) {
@@ -568,7 +568,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
 
         return true;
       } catch (error) {
-        console.error("[minibia-bot] audio unlock failed", error);
+        console.error("[k9x] audio unlock failed", error);
         return false;
       }
     },
@@ -592,7 +592,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
 
         return true;
       } catch (error) {
-        console.error("[minibia-bot] alarm failed", error);
+        console.error("[k9x] alarm failed", error);
         return false;
       }
     },
