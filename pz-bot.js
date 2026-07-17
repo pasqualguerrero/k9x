@@ -1264,7 +1264,18 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
 
   // Match talk module: only care about recent chat lines for whisper alarms.
   const maxWhisperAgeMs = 2 * 60 * 1000;
-  const systemChannelNames = new Set(["default", "console", "loot"]);
+  // Never treat these tabs as private "whisper" channels.
+  // Default is listed so local Default-channel speech is only counted when
+  // loudness/format marks it as a real whisper (see isWhisperMessage).
+  const systemChannelNames = new Set([
+    "default",
+    "console",
+    "loot",
+    "world",
+    "trade",
+    "help",
+    "team",
+  ]);
 
   const config = Object.assign(
     {
