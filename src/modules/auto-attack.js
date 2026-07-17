@@ -7,6 +7,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     timerId: null,
     lastTargetHotkeyAt: 0,
     lastRuneHotkeyAt: 0,
+    lastExoriHotkeyAt: 0,
     engagedTargetId: null,
     combatStartedAt: 0,
     lastChaseAt: 0,
@@ -28,6 +29,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       runeCooldownMs: 1200,
       maxTargetDistance: 8,
       meleeMode: true,
+      // Knight AOE (exori): cast when enough filtered monsters are face-to-face.
+      exoriEnabled: false,
+      exoriHotbarSlot: null,
+      exoriMinCreatures: 3,
+      exoriCooldownMs: 2000,
       targetFilterMode: "all",
       includedCreatureNames: [],
       excludedCreatureNames: [],
@@ -41,6 +47,13 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   config.targetFilterMode = normalizeTargetFilterMode(config.targetFilterMode);
   config.includedCreatureNames = normalizeCreatureNameList(config.includedCreatureNames);
   config.excludedCreatureNames = normalizeCreatureNameList(config.excludedCreatureNames);
+  config.exoriHotbarSlot = normalizeHotbarSlot(config.exoriHotbarSlot);
+  config.exoriMinCreatures = normalizeExoriMinCreatures(config.exoriMinCreatures);
+  config.exoriEnabled = !!config.exoriEnabled;
+  {
+    const cooldown = Math.trunc(Number(config.exoriCooldownMs));
+    config.exoriCooldownMs = Number.isFinite(cooldown) ? Math.max(0, cooldown) : 2000;
+  }
 
   function persistConfig() {
     bot.storage.set(configStorageKey, { ...config });
@@ -166,7 +179,17 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const dx = Math.abs(Number(from.x) - Number(to.x));
     const dy = Math.abs(Number(from.y) - Number(to.y));
+    // Face-to-face: same floor, Chebyshev distance 1 (8 surrounding tiles).
     return (dx !== 0 || dy !== 0) && dx <= 1 && dy <= 1;
+  }
+
+  function normalizeExoriMinCreatures(value) {
+    const next = Math.trunc(Number(value));
+    if (!Number.isFinite(next)) {
+      return 3;
+    }
+
+    return Math.min(8, Math.max(1, next));
   }
 
   function getTileDistance(from, to) {
@@ -790,6 +813,73 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return clicked;
   }
 
+  function getAdjacentMonsterCandidates(now = Date.now()) {
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    if (!playerPosition) {
+      return [];
+    }
+
+    pruneSkippedTargets(now);
+
+    return getNearbyMonsters()
+      .filter((monster) => shouldTargetCreature(monster))
+      .filter((monster) => !isTargetSkipped(monster, now))
+      .filter((monster) => !isCreatureDead(monster))
+      .filter((monster) => {
+        const monsterPosition = normalizePosition(monster?.getPosition?.() || monster?.__position);
+        return isAdjacentTile(playerPosition, monsterPosition);
+      });
+  }
+
+  function canUseExori(now = Date.now()) {
+    if (!config.exoriEnabled) {
+      return false;
+    }
+
+    const slot = normalizeHotbarSlot(config.exoriHotbarSlot);
+    if (!slot) {
+      return false;
+    }
+
+    if (now - state.lastExoriHotkeyAt < Math.max(0, Number(config.exoriCooldownMs) || 0)) {
+      return false;
+    }
+
+    const minCreatures = normalizeExoriMinCreatures(config.exoriMinCreatures);
+    return getAdjacentMonsterCandidates(now).length >= minCreatures;
+  }
+
+  function triggerExori(now = Date.now()) {
+    if (!canUseExori(now)) {
+      return false;
+    }
+
+    const slot = normalizeHotbarSlot(config.exoriHotbarSlot);
+    const adjacent = getAdjacentMonsterCandidates(now);
+    // Always arm cooldown on attempt so OOM / failed cast does not spam every tick
+    // or block the rest of the auto-attack loop.
+    state.lastExoriHotkeyAt = now;
+
+    const clicked = bot.clickHotbar(slot - 1);
+    if (clicked) {
+      markCombatActive(now);
+      bot.log("used auto attack exori hotkey", {
+        slot,
+        adjacentCount: adjacent.length,
+        minCreatures: normalizeExoriMinCreatures(config.exoriMinCreatures),
+        monsters: adjacent.map((creature) => creature.name || "Mob"),
+      });
+    } else {
+      bot.log("auto attack exori hotkey failed (continuing normal attack)", {
+        slot,
+        adjacentCount: adjacent.length,
+        minCreatures: normalizeExoriMinCreatures(config.exoriMinCreatures),
+      });
+    }
+
+    return clicked;
+  }
+
   function tryAttack() {
     if (!config.enabled) {
       return false;
@@ -812,6 +902,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     syncCombatState(now);
+
+    // Knight AOE is best-effort only: never return early on success/failure so
+    // low mana or a failed cast cannot stall targeting, chase, or runes.
+    triggerExori(now);
 
     if (config.meleeMode) {
       const chased = syncMeleeChase(now);
@@ -890,18 +984,23 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   }
 
   function status() {
-    const combatActive = syncCombatState(Date.now());
+    const now = Date.now();
+    const combatActive = syncCombatState(now);
+    const adjacentMonsters = getAdjacentMonsterCandidates(now);
     return {
       running: state.running,
       config: { ...config },
       lastTargetHotkeyAt: state.lastTargetHotkeyAt,
       lastRuneHotkeyAt: state.lastRuneHotkeyAt,
+      lastExoriHotkeyAt: state.lastExoriHotkeyAt,
       engagedTargetId: state.engagedTargetId,
       combatActive,
       combatStartedAt: state.combatStartedAt || 0,
       combatDurationMs: state.combatStartedAt ? Math.max(0, Date.now() - state.combatStartedAt) : 0,
       targetCount: getCombatTargetCount(),
       lastChaseAt: state.lastChaseAt,
+      adjacentMonsterCount: adjacentMonsters.length,
+      canUseExori: canUseExori(now),
       currentTarget: getCurrentTarget()
         ? {
             id: getCurrentTarget().id,
@@ -911,6 +1010,12 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
           }
         : null,
       nearbyMonsters: getNearbyMonsters().map((creature) => ({
+        id: creature.id,
+        name: creature.name,
+        type: creature.type,
+        position: creature.__position || null,
+      })),
+      adjacentMonsters: adjacentMonsters.map((creature) => ({
         id: creature.id,
         name: creature.name,
         type: creature.type,
@@ -926,6 +1031,23 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     if (Object.prototype.hasOwnProperty.call(nextConfig, "runeHotbarSlot")) {
       nextConfig.runeHotbarSlot = normalizeHotbarSlot(nextConfig.runeHotbarSlot);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "exoriHotbarSlot")) {
+      nextConfig.exoriHotbarSlot = normalizeHotbarSlot(nextConfig.exoriHotbarSlot);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "exoriMinCreatures")) {
+      nextConfig.exoriMinCreatures = normalizeExoriMinCreatures(
+        nextConfig.exoriMinCreatures ?? config.exoriMinCreatures
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "exoriCooldownMs")) {
+      const cooldown = Math.trunc(Number(nextConfig.exoriCooldownMs));
+      nextConfig.exoriCooldownMs = Number.isFinite(cooldown)
+        ? Math.max(0, cooldown)
+        : config.exoriCooldownMs;
     }
 
     if (Object.prototype.hasOwnProperty.call(nextConfig, "maxTargetDistance")) {
@@ -968,6 +1090,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     triggerAttack,
     canUseRune,
     triggerRune,
+    canUseExori,
+    triggerExori,
+    getAdjacentMonsterCandidates,
     getNearbyMonsters,
     getCurrentTarget,
     getCurrentFollowTarget,
