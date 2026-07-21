@@ -1272,10 +1272,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       }
     }
 
-    window.gameClient?.mouse?.__handleItemUseWith?.(
-      { which: tool.which, index: tool.index },
-      { which: targetTile, index: 0xFF }
-    );
+    bot.withAutomationSendSkip(() => {
+      window.gameClient?.mouse?.__handleItemUseWith?.(
+        { which: tool.which, index: tool.index },
+        { which: targetTile, index: 0xFF }
+      );
+    });
     state.lastStairsUseAt = now;
     state.lastPathAt = now;
     markPendingTransitionSource(targetPosition);

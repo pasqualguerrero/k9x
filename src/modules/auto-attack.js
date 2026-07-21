@@ -378,9 +378,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    window.gameClient.player.setFollowTarget(null);
-    window.gameClient.send(new FollowPacket(0));
-    return true;
+    return bot.withAutomationSendSkip(() => {
+      window.gameClient.player.setFollowTarget(null);
+      window.gameClient.send(new FollowPacket(0));
+      return true;
+    });
   }
 
   function clearCurrentTarget() {
@@ -396,9 +398,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    window.gameClient.player.setTarget(null);
-    window.gameClient.send(new TargetPacket(0));
-    return true;
+    return bot.withAutomationSendSkip(() => {
+      window.gameClient.player.setTarget(null);
+      window.gameClient.send(new TargetPacket(0));
+      return true;
+    });
   }
 
   function markCombatActive(now = Date.now()) {
@@ -478,10 +482,19 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    window.gameClient.player.setTarget(target);
-    window.gameClient.send(new TargetPacket(target.id));
-    state.engagedTargetId = target.id;
-    return true;
+    // Already on this target — re-sending TARGET every tick is pure untrusted
+    // intent noise with no gameplay benefit.
+    if (isSameCreature(getCurrentTarget(), target)) {
+      state.engagedTargetId = target.id;
+      return true;
+    }
+
+    return bot.withAutomationSendSkip(() => {
+      window.gameClient.player.setTarget(target);
+      window.gameClient.send(new TargetPacket(target.id));
+      state.engagedTargetId = target.id;
+      return true;
+    });
   }
 
   function setCurrentFollowTarget(target) {
@@ -497,9 +510,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return true;
     }
 
-    window.gameClient.player.setFollowTarget(target);
-    window.gameClient.send(new FollowPacket(target.id));
-    return true;
+    return bot.withAutomationSendSkip(() => {
+      window.gameClient.player.setFollowTarget(target);
+      window.gameClient.send(new FollowPacket(target.id));
+      return true;
+    });
   }
 
   function skipTarget(target, reason, now = Date.now(), skipMs = 4000) {

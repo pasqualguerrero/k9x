@@ -228,6 +228,32 @@ window.__minibiaBotBundle.createBot = function createBot() {
     );
   }
 
+  // Client input-metrics (window.__imx / former __provGuard) samples
+  // TARGET, CAST_SPELL, THING_USE_WITH, THING_USE_ON_CREATURE, CHANNEL_MESSAGE
+  // and reports trusted vs untrusted ratios. Official client automation
+  // (e.g. /bagnames) sets networkManager.__imSkip so those sends are neither
+  // trusted nor untrusted and do not poison the ratio. Mirror that for bot
+  // automation. Also set legacy __provenanceExempt for older clients.
+  // This is NOT human-input spoofing — isTrusted / honeypot stay untouched.
+  function withAutomationSendSkip(fn) {
+    const networkManager = window.gameClient?.networkManager;
+    if (!networkManager || typeof fn !== "function") {
+      return typeof fn === "function" ? fn() : undefined;
+    }
+
+    const previousImSkip = networkManager.__imSkip;
+    const previousProvenanceExempt = networkManager.__provenanceExempt;
+    networkManager.__imSkip = true;
+    networkManager.__provenanceExempt = true;
+
+    try {
+      return fn();
+    } finally {
+      networkManager.__imSkip = previousImSkip;
+      networkManager.__provenanceExempt = previousProvenanceExempt;
+    }
+  }
+
   function castSpellPacket(spellSid) {
     const spellbook = window.gameClient?.player?.spellbook;
     if (!spellbook?.spells?.has?.(spellSid)) {
@@ -238,17 +264,19 @@ window.__minibiaBotBundle.createBot = function createBot() {
       return false;
     }
 
-    if (typeof spellbook.castSpell === "function") {
-      spellbook.castSpell(spellSid);
-      return true;
-    }
+    return withAutomationSendSkip(() => {
+      if (typeof spellbook.castSpell === "function") {
+        spellbook.castSpell(spellSid);
+        return true;
+      }
 
-    if (typeof SpellCastPacket === "function" && typeof window.gameClient?.send === "function") {
-      window.gameClient.send(new SpellCastPacket(spellSid));
-      return true;
-    }
+      if (typeof SpellCastPacket === "function" && typeof window.gameClient?.send === "function") {
+        window.gameClient.send(new SpellCastPacket(spellSid));
+        return true;
+      }
 
-    return false;
+      return false;
+    });
   }
 
   function isVisibleElement(element) {
@@ -354,8 +382,9 @@ window.__minibiaBotBundle.createBot = function createBot() {
   startReconnectWatcher();
 
   return {
-    version: "0.3.1",
+    version: "0.3.2",
     addCleanup,
+    withAutomationSendSkip,
     destroy() {
       if (this.panic?.stop) {
         this.panic.stop();
@@ -461,16 +490,22 @@ window.__minibiaBotBundle.createBot = function createBot() {
         food: getSkillWindowValue(["food"]),
       };
     },
-    sendChat(text) {
+    sendChat(text, options = {}) {
       const channelManager = window.gameClient?.interface?.channelManager;
       if (!channelManager || !text) {
         return false;
       }
 
-      channelManager.sendMessageText(text);
-      rememberSentChat(text);
-      this.log("sent chat:", text);
-      return true;
+      // Default: opt automated chat out of input-metrics sampling.
+      const skipMetrics = options.skipMetrics !== false;
+      const send = () => {
+        channelManager.sendMessageText(text);
+        rememberSentChat(text);
+        this.log("sent chat:", text);
+        return true;
+      };
+
+      return skipMetrics ? withAutomationSendSkip(send) : send();
     },
     isRecentSentChat(text, withinMs) {
       return isRecentSentChat(text, withinMs);
@@ -484,8 +519,11 @@ window.__minibiaBotBundle.createBot = function createBot() {
         return false;
       }
 
-      button.click();
-      return true;
+      // Hotbar clicks fire CAST_SPELL / USE_WITH / TARGET via client handlers.
+      return withAutomationSendSkip(() => {
+        button.click();
+        return true;
+      });
     },
     resolveSpellSid(options = {}) {
       return resolveSpellSid(options);
@@ -493,7 +531,9 @@ window.__minibiaBotBundle.createBot = function createBot() {
     castSpell(options = {}) {
       const words = String(options.words || "").trim();
       const hotbarSlot = Number(options.hotbarSlot);
-      const fallbackChat = options.fallbackChat !== false;
+      // Chat fallback emits CHANNEL_MESSAGE and is a strong automation tell.
+      // Prefer packet/hotbar only unless the caller opts in.
+      const fallbackChat = options.fallbackChat === true;
       const spellSid = resolveSpellSid(options);
 
       if (spellSid != null) {

@@ -151,7 +151,11 @@ window.__minibiaBotBundle.installEquipRingModule = function installEquipRingModu
     };
     const count = source.count || 1;
 
-    window.gameClient.send(new ItemMovePacket(from, to, count));
+    // ItemMove is not in the input-metrics intent list, but keep the same
+    // automation opt-out as other bot sends for consistency.
+    bot.withAutomationSendSkip(() => {
+      window.gameClient.send(new ItemMovePacket(from, to, count));
+    });
     state.lastEquipAt = now;
     bot.log("equipped ring", {
       name: source.name,

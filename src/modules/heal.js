@@ -226,7 +226,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       sid: config.manaSpellSid,
       words: config.manaSpellWords,
       hotbarSlot: slot,
-      fallbackChat: !!normalizeSpellWords(config.manaSpellWords),
+      // No chat fallback: CHANNEL_MESSAGE is an input-metrics intent opcode.
     });
 
     if (castResult.ok) {
