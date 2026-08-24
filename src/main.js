@@ -21,6 +21,7 @@
     ["minibiaBot.xray.config", "k9x.xray.config"],
     ["minibiaBot.ui.panelPosition", "k9x.ui.panelPosition"],
     ["minibiaBot.ui.panelCollapsed", "k9x.ui.panelCollapsed"],
+    ["minibiaBot.ui.panelHidden", "k9x.ui.panelHidden"],
     ["gameHelper.audio.alarmSrc", "k9x.audio.alarmSrc"],
     ["gameHelper.rune.config", "k9x.rune.config"],
     ["gameHelper.heal.config", "k9x.heal.config"],
@@ -41,6 +42,7 @@
     ["gameHelper.xray.config", "k9x.xray.config"],
     ["gameHelper.ui.panelPosition", "k9x.ui.panelPosition"],
     ["gameHelper.ui.panelCollapsed", "k9x.ui.panelCollapsed"],
+    ["gameHelper.ui.panelHidden", "k9x.ui.panelHidden"],
   ];
   const persistedEnabledModules = [
     ["rune", "k9x.rune.config"],
@@ -179,6 +181,8 @@
       version: bot.version,
       modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "magicShield", "forceLight", "attack", "cave", "equipRing", "eat", "fishing", "talk", "ui"],
     });
+    console.log("Press Insert to show or hide the panel");
+    console.log("k9x.ui.toggle()");
     console.log("k9x.reload()");
     console.log("k9x.xray.status()");
     console.log("k9x.panic.status()");

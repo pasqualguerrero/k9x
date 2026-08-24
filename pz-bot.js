@@ -8487,9 +8487,16 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const panelPositionKey = "k9x.ui.panelPosition";
   const panelCollapsedKey = "k9x.ui.panelCollapsed";
+  const panelHiddenKey = "k9x.ui.panelHidden";
   const sectionCollapsedKey = "k9x.ui.sectionCollapsed";
+  const panelToggleShortcutLabel = "Insert";
+  let toggleKeyHandler = null;
 
   function destroy() {
+    if (toggleKeyHandler) {
+      window.removeEventListener("keydown", toggleKeyHandler, true);
+      toggleKeyHandler = null;
+    }
     document.getElementById("k9x-panel")?.remove();
     document.getElementById("k9x-style")?.remove();
   }
@@ -8508,6 +8515,22 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   function getSavedPanelCollapsed() {
     return !!bot.storage.get(panelCollapsedKey, false);
+  }
+
+  function savePanelHidden(hidden) {
+    bot.storage.set(panelHiddenKey, !!hidden);
+  }
+
+  function getSavedPanelHidden() {
+    return bot.storage.get(panelHiddenKey, true) !== false;
+  }
+
+  function isPanelToggleShortcut(event) {
+    if (!event || event.repeat || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) {
+      return false;
+    }
+
+    return event.code === "Insert" || event.key === "Insert";
   }
 
   function getSavedSectionCollapsed() {
@@ -9160,6 +9183,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     savePanelCollapsed(nextCollapsed);
   }
 
+  function setPanelHidden(panel, hidden) {
+    if (!panel) return;
+
+    const nextHidden = !!hidden;
+    panel.dataset.hidden = nextHidden ? "true" : "false";
+    panel.setAttribute("aria-hidden", nextHidden ? "true" : "false");
+    savePanelHidden(nextHidden);
+  }
+
+  function togglePanelHidden(panel) {
+    if (!panel) return;
+
+    setPanelHidden(panel, panel.dataset.hidden !== "true");
+  }
+
   function applySavedPanelPosition(panel, key = panelPositionKey) {
     const position = getSavedPanelPosition(key);
     if (!position) return;
@@ -9259,6 +9297,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         width: 1180px;
       }
 
+      #k9x-panel[data-hidden="true"] {
+        display: none !important;
+      }
+
       #k9x-panel[data-collapsed="true"] {
         width: 220px;
       }
@@ -9277,6 +9319,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         justify-content: space-between;
         gap: 8px;
         margin: 0 0 8px;
+      }
+
+      #k9x-panel .mb-titlebar-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
       }
 
       #k9x-panel .mb-icon-button {
@@ -9608,10 +9656,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     const panel = document.createElement("div");
     panel.id = "k9x-panel";
+    panel.dataset.hidden = "true";
+    panel.setAttribute("aria-hidden", "true");
     panel.innerHTML = `
         <div class="mb-titlebar">
         <div class="mb-title">K9X</div>
-        <button type="button" class="mb-icon-button" id="k9x-collapse" aria-label="Minimize panel" title="Minimize">−</button>
+        <div class="mb-titlebar-actions">
+          <button type="button" class="mb-icon-button" id="k9x-collapse" aria-label="Minimize panel" title="Minimize">−</button>
+          <button type="button" class="mb-icon-button" id="k9x-hide" aria-label="Hide panel" title="Hide (Insert)">×</button>
+        </div>
       </div>
       <div class="mb-body">
         <div class="mb-main-column">
@@ -9918,6 +9971,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         </div>
       </div>
       <div class="mb-footer">
+        Hide/show: Insert ·
         source:
         <a href="https://github.com/pasqualguerrero/k9x" target="_blank" rel="noopener noreferrer">github.com/pasqualguerrero/k9x</a>
       </div>
@@ -9939,7 +9993,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     applySavedPanelPosition(panel);
     enableDrag(panel);
     setPanelCollapsed(panel, getSavedPanelCollapsed());
+    setPanelHidden(panel, getSavedPanelHidden());
     enableCollapsibleSections(panel);
+
+    toggleKeyHandler = (event) => {
+      if (!isPanelToggleShortcut(event)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      togglePanelHidden(panel);
+    };
+    window.addEventListener("keydown", toggleKeyHandler, true);
 
     const spellInput = panel.querySelector("#k9x-rune-spell");
     const runeHotkeyInput = panel.querySelector("#k9x-rune-hotkey");
@@ -9987,6 +10053,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const xrayOverlayButton = panel.querySelector("#k9x-xray-overlay-toggle");
     const xrayFloorSelect = panel.querySelector("#k9x-xray-floor-select");
     const collapseButton = panel.querySelector("#k9x-collapse");
+    const hideButton = panel.querySelector("#k9x-hide");
     const reloadButton = panel.querySelector("#k9x-reload");
     const caveRecordButton = panel.querySelector("#k9x-cave-record");
     const caveRemoveLastButton = panel.querySelector("#k9x-cave-remove-last");
@@ -10001,6 +10068,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       collapseButton.addEventListener("click", () => {
         const isCollapsed = panel.dataset.collapsed === "true";
         setPanelCollapsed(panel, !isCollapsed);
+      });
+    }
+
+    if (hideButton) {
+      hideButton.addEventListener("click", () => {
+        setPanelHidden(panel, true);
       });
     }
 
@@ -10810,10 +10883,20 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveTransitionStatus,
     getSavedPanelPosition,
     getSavedPanelCollapsed,
+    getSavedPanelHidden,
     setPanelCollapsed: (collapsed) => {
       const panel = document.getElementById("k9x-panel");
       setPanelCollapsed(panel, collapsed);
     },
+    setPanelHidden: (hidden) => {
+      const panel = document.getElementById("k9x-panel");
+      setPanelHidden(panel, hidden);
+    },
+    toggle: () => {
+      const panel = document.getElementById("k9x-panel");
+      togglePanelHidden(panel);
+    },
+    shortcut: panelToggleShortcutLabel,
   };
 };
 (() => {
@@ -10839,6 +10922,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["minibiaBot.xray.config", "k9x.xray.config"],
     ["minibiaBot.ui.panelPosition", "k9x.ui.panelPosition"],
     ["minibiaBot.ui.panelCollapsed", "k9x.ui.panelCollapsed"],
+    ["minibiaBot.ui.panelHidden", "k9x.ui.panelHidden"],
     ["gameHelper.audio.alarmSrc", "k9x.audio.alarmSrc"],
     ["gameHelper.rune.config", "k9x.rune.config"],
     ["gameHelper.heal.config", "k9x.heal.config"],
@@ -10859,6 +10943,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["gameHelper.xray.config", "k9x.xray.config"],
     ["gameHelper.ui.panelPosition", "k9x.ui.panelPosition"],
     ["gameHelper.ui.panelCollapsed", "k9x.ui.panelCollapsed"],
+    ["gameHelper.ui.panelHidden", "k9x.ui.panelHidden"],
   ];
   const persistedEnabledModules = [
     ["rune", "k9x.rune.config"],
@@ -10997,6 +11082,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       version: bot.version,
       modules: ["pz", "xray", "panic", "rune", "heal", "invisible", "magicShield", "forceLight", "attack", "cave", "equipRing", "eat", "fishing", "talk", "ui"],
     });
+    console.log("Press Insert to show or hide the panel");
+    console.log("k9x.ui.toggle()");
     console.log("k9x.reload()");
     console.log("k9x.xray.status()");
     console.log("k9x.panic.status()");
