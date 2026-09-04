@@ -120,15 +120,19 @@ window.__minibiaBotBundle.installAutoFishingModule = function installAutoFishing
       return false;
     }
 
-    const hotbarClicked = bot.clickHotbar(slot - 1);
-    const waterClicked = dispatchLeftClickAtPointer();
+    // Rod hotbar + map click emit THING_USE_WITH, which input-metrics
+    // samples as a human intent. Same opt-out as cave use-with / hotbar.
+    return bot.withAutomationSendSkip(() => {
+      const hotbarClicked = bot.clickHotbar(slot - 1);
+      const waterClicked = dispatchLeftClickAtPointer();
 
-    if (hotbarClicked && waterClicked) {
-      state.lastCastAt = Date.now();
-      return true;
-    }
+      if (hotbarClicked && waterClicked) {
+        state.lastCastAt = Date.now();
+        return true;
+      }
 
-    return false;
+      return false;
+    }) === true;
   }
 
   function scheduleNextTick() {
